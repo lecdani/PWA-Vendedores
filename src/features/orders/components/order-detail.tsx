@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import Image from 'next/image';
 import { 
   ArrowLeft, 
   Store as StoreIcon, 
@@ -341,11 +342,13 @@ export function OrderDetail({ orderId }: { orderId: string }) {
               <CardTitle className="text-sm text-green-900">{t('delivery_proof')}</CardTitle>
             </CardHeader>
             <CardContent className="p-4 pt-0">
-              <div className="mb-3">
-                <img 
+              <div className="mb-3 relative w-full aspect-video rounded-lg border-2 border-green-200 overflow-hidden">
+                <Image 
                   src={order.podImageUrl} 
                   alt="POD" 
-                  className="w-full rounded-lg border-2 border-green-200"
+                  fill
+                  className="object-contain"
+                  unoptimized
                 />
               </div>
               {order.comments && (

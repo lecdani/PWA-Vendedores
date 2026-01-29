@@ -1,11 +1,19 @@
 
-  # PWA Vendedores
+ # PWA Vendedores
 
-  This is a code bundle for PWA Vendedores. The original project is available at https://www.figma.com/design/qrtCXlNp8yGuasheAHRsWN/PWA-Vendedores.
+ Portal de vendedores construido con **Next.js** y **Tailwind CSS**, siguiendo una arquitectura **Vertical Slice** (por funcionalidades).
 
-  ## Running the code
+ ## Cómo ejecutar el proyecto
 
-  Run `npm i` to install the dependencies.
+ 1. Instala dependencias:
+    ```bash
+    npm install
+    ```
 
-  Run `npm run dev` to start the development server.
+ 2. Inicia el entorno de desarrollo:
+    ```bash
+    npm run dev
+    ```
+
+ 3. Abre `http://localhost:3000` en tu navegador.
   

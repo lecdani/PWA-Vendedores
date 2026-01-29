@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import Image from 'next/image';
 import { ArrowLeft, Camera, Upload, CheckCircle, X, Image as ImageIcon } from 'lucide-react';
 import { useLanguage } from '@/shared/i18n/language-provider';
 import { Button } from '@/shared/ui/button';
@@ -152,11 +153,15 @@ export function CapturePOD({ orderId }: { orderId: string }) {
               </div>
             ) : (
               <div className="relative">
-                <img 
-                  src={podImage} 
-                  alt="POD" 
-                  className="w-full rounded-lg border border-slate-200"
-                />
+                <div className="relative w-full aspect-video rounded-lg border border-slate-200 overflow-hidden">
+                  <Image 
+                    src={podImage} 
+                    alt="POD" 
+                    fill
+                    className="object-contain"
+                    unoptimized
+                  />
+                </div>
                 <Button
                   variant="destructive"
                   size="sm"
