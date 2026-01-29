@@ -1,30 +1,48 @@
 'use client';
 
 import { usePathname, useRouter } from 'next/navigation';
-import { Home, ShoppingCart, BarChart3, User, Bell } from 'lucide-react';
+import { Home, ShoppingCart, BarChart3, User, Bell, LogOut } from 'lucide-react';
 import { LanguageSelector } from '@/shared/i18n/language-selector';
 import { useLanguage } from '@/shared/i18n/language-provider';
 import { Badge } from '@/shared/ui/badge';
+import { useAuth } from '@/shared/auth/auth-provider';
 
 export function MainLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
   const { t } = useLanguage();
+  const { user, logout } = useAuth();
 
   const getActiveTab = () => {
     if (pathname === '/') return 'home';
     if (pathname?.includes('/history') || pathname?.includes('/order')) return 'orders';
-    if (pathname?.includes('/pending-pod')) return 'stats';
+    if (pathname?.includes('/pending-pod')) return 'pod';
     if (pathname?.includes('/profile')) return 'profile';
     return 'home';
   };
 
   const activeTab = getActiveTab();
 
+  const menuItems = [
+    { id: 'home', label: t('home'), icon: Home, path: '/', action: null },
+    { id: 'orders', label: t('orders'), icon: ShoppingCart, path: '/history', action: null },
+    { id: 'pod', label: t('pod'), icon: BarChart3, path: '/pending-pod', action: null },
+    { id: 'profile', label: t('profile'), icon: User, path: '/profile', action: null },
+    { id: 'logout', label: 'Salir', icon: LogOut, path: null, action: logout },
+  ];
+
+  const handleNavClick = (item: typeof menuItems[0]) => {
+    if (item.action) {
+      item.action();
+    } else if (item.path) {
+      router.push(item.path);
+    }
+  };
+
   return (
-    <div className="min-h-screen flex flex-col bg-slate-50">
+    <div className="relative min-h-screen flex flex-col bg-slate-50" style={{ paddingBottom: '80px' }}>
       {/* Header */}
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-10 shadow-sm">
+      <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm">
         <div className="px-4 py-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -32,7 +50,7 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
                 <ShoppingCart className="h-5 w-5 text-white" />
               </div>
               <div>
-                <p className="text-slate-900 text-sm">Eternal Cosmetics</p>
+                <p className="text-slate-900 text-sm font-medium">Eternal Cosmetics</p>
                 <p className="text-xs text-slate-500">{t('seller_portal')}</p>
               </div>
             </div>
@@ -40,9 +58,9 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
             <div className="flex items-center gap-2">
               <button className="relative p-2 hover:bg-slate-100 rounded-lg transition-colors">
                 <Bell className="h-5 w-5 text-slate-600" />
-                <Badge className="absolute -top-1 -right-1 h-5 w-5 flex items-center justify-center p-0 bg-red-500 text-white text-xs">
+                <span className="absolute -top-1 -right-1 h-5 w-5 flex items-center justify-center rounded-full bg-red-500 text-white text-[10px] font-semibold">
                   2
-                </Badge>
+                </span>
               </button>
               <LanguageSelector />
             </div>
@@ -51,61 +69,93 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
       </header>
 
       {/* Main Content */}
-      <main className="flex-1 pb-20 overflow-y-auto">
+      <main className="flex-1 overflow-y-auto">
         {children}
       </main>
 
-      {/* Bottom Navigation */}
-      <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 shadow-lg z-10">
-        <div className="grid grid-cols-4 gap-1 px-2 py-2">
-          <button
-            onClick={() => router.push('/')}
-            className={`flex flex-col items-center gap-1 py-2 px-3 rounded-lg transition-colors ${
-              activeTab === 'home' 
-                ? 'bg-blue-50 text-blue-600' 
-                : 'text-slate-500 hover:bg-slate-50'
-            }`}
-          >
-            <Home className="h-5 w-5" />
-            <span className="text-xs">{t('home')}</span>
-          </button>
-
-          <button
-            onClick={() => router.push('/history')}
-            className={`flex flex-col items-center gap-1 py-2 px-3 rounded-lg transition-colors ${
-              activeTab === 'orders' 
-                ? 'bg-blue-50 text-blue-600' 
-                : 'text-slate-500 hover:bg-slate-50'
-            }`}
-          >
-            <ShoppingCart className="h-5 w-5" />
-            <span className="text-xs">{t('orders')}</span>
-          </button>
-
-          <button
-            onClick={() => router.push('/pending-pod')}
-            className={`flex flex-col items-center gap-1 py-2 px-3 rounded-lg transition-colors ${
-              activeTab === 'stats' 
-                ? 'bg-blue-50 text-blue-600' 
-                : 'text-slate-500 hover:bg-slate-50'
-            }`}
-          >
-            <BarChart3 className="h-5 w-5" />
-            <span className="text-xs">{t('pod')}</span>
-          </button>
-
-          <button
-            onClick={() => router.push('/profile')}
-            className={`flex flex-col items-center gap-1 py-2 px-3 rounded-lg transition-colors ${
-              activeTab === 'profile' 
-                ? 'bg-blue-50 text-blue-600' 
-                : 'text-slate-500 hover:bg-slate-50'
-            }`}
-          >
-            <User className="h-5 w-5" />
-            <span className="text-xs">{t('profile')}</span>
-          </button>
-        </div>
+      {/* Bottom Navigation Bar - Fijo en la parte inferior con estilo oscuro */}
+      <nav 
+        style={{ 
+          position: 'fixed',
+          bottom: 0,
+          left: 0,
+          right: 0,
+          backgroundColor: '#0f172a',
+          zIndex: 9999,
+          paddingBottom: 'max(env(safe-area-inset-bottom), 0px)',
+          boxShadow: '0 -4px 6px -1px rgba(0, 0, 0, 0.1), 0 -2px 4px -1px rgba(0, 0, 0, 0.06)',
+          height: '64px',
+          display: 'grid',
+          gridTemplateColumns: 'repeat(5, 1fr)'
+        }}
+      >
+        {menuItems.map((item) => {
+          const Icon = item.icon;
+          const isActive = activeTab === item.id;
+          
+          return (
+            <button
+              key={item.id}
+              onClick={() => handleNavClick(item)}
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '4px',
+                position: 'relative',
+                paddingTop: '4px',
+                backgroundColor: 'transparent',
+                border: 'none',
+                cursor: 'pointer'
+              }}
+              aria-label={item.label}
+            >
+              {/* Indicador activo - línea azul arriba */}
+              {isActive && (
+                <div 
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: '50%',
+                    transform: 'translateX(-50%)',
+                    width: '56px',
+                    height: '2px',
+                    backgroundColor: '#60a5fa',
+                    borderRadius: '9999px'
+                  }}
+                />
+              )}
+              
+              {/* Icono */}
+              <div style={{ 
+                position: 'relative',
+                transform: isActive ? 'scale(1.05)' : 'scale(1)',
+                transition: 'transform 0.2s'
+              }}>
+                <Icon 
+                  style={{
+                    width: '24px',
+                    height: '24px',
+                    color: isActive ? '#60a5fa' : '#94a3b8'
+                  }}
+                />
+              </div>
+              
+              {/* Texto */}
+              <span 
+                style={{
+                  fontSize: '12px',
+                  fontWeight: isActive ? 600 : 500,
+                  color: isActive ? '#60a5fa' : '#94a3b8',
+                  transition: 'color 0.2s'
+                }}
+              >
+                {item.label}
+              </span>
+            </button>
+          );
+        })}
       </nav>
     </div>
   );

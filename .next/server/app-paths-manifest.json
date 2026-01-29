@@ -1,4 +1,8 @@
 {
+  "/login/page": "app/login/page.js",
   "/page": "app/page.js",
-  "/profile/page": "app/profile/page.js"
+  "/pending-pod/page": "app/pending-pod/page.js",
+  "/select-store/page": "app/select-store/page.js",
+  "/profile/page": "app/profile/page.js",
+  "/history/page": "app/history/page.js"
 }
