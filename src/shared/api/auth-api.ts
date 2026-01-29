@@ -58,4 +58,28 @@ export const authApi = {
       } as ApiError;
     }
   },
+
+  /**
+   * Restablece la contraseña usando el token y email del link de recuperación (correo).
+   * La API espera POST /auth/reset-password con { token, email, newPassword }.
+   */
+  async resetPassword(
+    token: string,
+    email: string,
+    newPassword: string
+  ): Promise<{ success: boolean; message: string }> {
+    try {
+      const response = await apiClient.post<{ success: boolean; message: string }>(
+        '/auth/reset-password',
+        { token, email, newPassword }
+      );
+      return response;
+    } catch (error) {
+      const apiError = error as ApiError;
+      throw {
+        message: apiError.message || 'Error al restablecer la contraseña',
+        status: apiError.status,
+      } as ApiError;
+    }
+  },
 };
