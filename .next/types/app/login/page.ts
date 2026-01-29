@@ -1,4 +1,4 @@
-// File: C:\Users\danie\OneDrive\Desktop\PWA Vendedores\src\app\login\page.tsx
+// File: C:\PROYECTOS\PWA Vendedores\src\app\login\page.tsx
 import * as entry from '../../../../src/app/login/page.js'
 import type { ResolvingMetadata, ResolvingViewport } from 'next/dist/lib/metadata/types/metadata-interface.js'
 

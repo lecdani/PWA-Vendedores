@@ -1,8 +1,7 @@
 {
-  "/login/page": "app/login/page.js",
-  "/page": "app/page.js",
-  "/pending-pod/page": "app/pending-pod/page.js",
-  "/select-store/page": "app/select-store/page.js",
+  "/reset-password/page": "app/reset-password/page.js",
+  "/forgot-password/page": "app/forgot-password/page.js",
   "/profile/page": "app/profile/page.js",
-  "/history/page": "app/history/page.js"
+  "/page": "app/page.js",
+  "/login/page": "app/login/page.js"
 }

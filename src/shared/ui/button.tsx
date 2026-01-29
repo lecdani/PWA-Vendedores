@@ -47,6 +47,7 @@ const Button = React.forwardRef<
     <Comp
       ref={ref}
       data-slot="button"
+      suppressHydrationWarning
       className={cn(buttonVariants({ variant, size, className }))}
       {...props}
     />
