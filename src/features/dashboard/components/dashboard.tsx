@@ -14,12 +14,13 @@ import { useRouter } from 'next/navigation';
 import { MetricCard } from './metric-card';
 import { ModuleCard } from './module-card';
 import { useLanguage } from '@/shared/i18n/language-provider';
-import { Button } from '@/shared/ui/button';
+import { useAuth } from '@/shared/auth/auth-provider';
 
 export function Dashboard() {
   const { t } = useLanguage();
   const router = useRouter();
-  const sellerName = "Carlos";
+  const { user } = useAuth();
+  const sellerName = [user?.name, user?.lastName].filter(Boolean).join(' ') || user?.email?.split('@')[0] || 'Vendedor';
 
   const metrics = [
     { 

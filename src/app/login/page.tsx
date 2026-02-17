@@ -173,27 +173,6 @@ export default function LoginPage() {
         <p className="text-center text-sm text-slate-500 mt-6">
           © 2024 Eternal Cosmetics. Todos los derechos reservados.
         </p>
-
-        {/* Links de prueba para ver las interfaces de recuperación */}
-        <div className="mt-8 p-4 bg-slate-100/80 rounded-xl border border-slate-200">
-          <p className="text-xs font-medium text-slate-500 mb-2 uppercase tracking-wide">
-            Links de prueba (interfaces)
-          </p>
-          <ul className="text-sm text-slate-600 space-y-1">
-            <li>
-              <Link href="/forgot-password" className="text-blue-600 hover:underline">
-                /forgot-password
-              </Link>
-              <span className="text-slate-500 ml-1">— Pantalla “Enviar link por correo”</span>
-            </li>
-            <li>
-              <Link href="/reset-password?token=test123&email=test@ejemplo.com" className="text-blue-600 hover:underline">
-                /reset-password?token=...&email=...
-              </Link>
-              <span className="text-slate-500 ml-1">— Pantalla “Nueva contraseña”</span>
-            </li>
-          </ul>
-        </div>
       </div>
     </div>
   );

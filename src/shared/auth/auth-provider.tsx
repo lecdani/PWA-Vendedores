@@ -2,14 +2,36 @@
 
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
-import { authApi, LoginResponse } from '@/shared/api/auth-api';
+import { authApi } from '@/shared/api/auth-api';
 import type { ApiError } from '@/shared/api/api-client';
+
+/** Obtiene el rol del usuario: del body o del payload del JWT (igual que Sistema Web Admin) */
+function getRoleFromLoginResponse(response: Record<string, unknown>): string {
+  const fromBody = (response?.role ?? response?.Role ?? '').toString().trim();
+  if (fromBody) return fromBody;
+  const token = (response?.token ?? response?.accessToken ?? response?.jwt ?? response?.Token) as string | undefined;
+  if (!token || typeof token !== 'string') return '';
+  try {
+    const parts = token.split('.');
+    if (parts.length < 2) return '';
+    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+    const roleClaim =
+      payload.role ??
+      payload.Role ??
+      payload['http://schemas.microsoft.com/ws/2008/06/identity/claims/role'];
+    return (roleClaim ?? '').toString().trim();
+  } catch {
+    return '';
+  }
+}
 
 interface User {
   id: string;
   email: string;
   role: 'vendedor' | 'admin';
   name: string;
+  lastName?: string;
+  phone?: string;
 }
 
 interface AuthContextType {
@@ -17,6 +39,7 @@ interface AuthContextType {
   isAuthenticated: boolean;
   login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
   logout: () => void;
+  updateUser: (data: Partial<User>) => void;
   isLoading: boolean;
 }
 
@@ -45,67 +68,78 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = async (email: string, password: string): Promise<{ success: boolean; error?: string }> => {
     try {
-      const response: LoginResponse = await authApi.login(email, password);
+      const response = (await authApi.login(email, password)) as Record<string, unknown>;
       
-      // Si la API responde con success: false explícitamente
       if (response.success === false || response.error) {
-        return { 
-          success: false, 
-          error: response.message || response.error || 'Credenciales incorrectas' 
+        return {
+          success: false,
+          error: (response.message as string) || (response.error as string) || 'Credenciales incorrectas',
         };
       }
-      
-      // Extraer token de diferentes campos posibles
-      const token = response.token || response.accessToken || response.jwt;
-      
-      // Extraer user de diferentes campos posibles
-      const userData = response.user || response.data;
-      
-      // Si hay token y user, considerar éxito
-      if (token && userData) {
-        // Mapear el usuario al formato esperado
-        const user: User = {
-          id: userData.id || '',
-          email: userData.email || email,
-          name: userData.name || userData.email || 'Usuario',
-          role: userData.role || 'vendedor',
-        };
-        
-        // Guardar token y usuario
-        localStorage.setItem('auth_token', token);
-        localStorage.setItem('auth_user', JSON.stringify(user));
-        setUser(user);
-        return { success: true };
-      }
-      
-      // Si solo hay token (sin user), intentar extraer info del token o usar email
-      if (token) {
-        const user: User = {
-          id: userData?.id || email,
-          email: email,
-          name: userData?.name || email.split('@')[0] || 'Usuario',
-          role: userData?.role || 'vendedor',
-        };
-        
-        localStorage.setItem('auth_token', token);
-        localStorage.setItem('auth_user', JSON.stringify(user));
-        setUser(user);
-        return { success: true };
-      }
-      
-      // Si viene success: true pero falta token
-      if (response.success === true) {
-        return { 
-          success: false, 
-          error: 'Token no recibido del servidor' 
+
+      const token = (response.token ?? response.accessToken ?? response.jwt) as string | undefined;
+      if (!token) {
+        return {
+          success: false,
+          error: (response.message as string) || 'Token no recibido del servidor',
         };
       }
-      
-      // Si no hay ningún indicador claro, asumir error
-      return { 
-        success: false, 
-        error: response.message || response.error || 'Credenciales incorrectas' 
+
+      // Usuario: respuesta plana (token, email, name, id) o anidada (user/data)
+      const flat = response as { id?: string; email?: string; name?: string };
+      const nested = (response.user ?? response.data) as { id?: string; email?: string; name?: string } | undefined;
+      const id = (nested?.id ?? flat.id ?? email) as string;
+      const userEmail = (nested?.email ?? flat.email ?? email) as string;
+      const userName = (nested?.name ?? flat.name ?? userEmail?.split('@')[0] ?? 'Usuario') as string;
+
+      // Rol, estado activo y datos (teléfono, nombre) desde la API (BD) = fuente de verdad.
+      let roleRaw = '';
+      let isActive = true;
+      let apiPhone: string | undefined;
+      let apiName: string | undefined;
+      let apiLastName: string | undefined;
+      let apiUserId: string | undefined;
+      try {
+        const apiUser = await authApi.getCurrentUserFromApi(token, id !== email ? id : undefined, userEmail);
+        roleRaw = apiUser.role;
+        isActive = apiUser.isActive;
+        apiPhone = apiUser.phone;
+        apiName = apiUser.name;
+        apiLastName = apiUser.lastName;
+        apiUserId = apiUser.id;
+      } catch {
+        roleRaw = getRoleFromLoginResponse(response);
+      }
+      if (!roleRaw) {
+        roleRaw = getRoleFromLoginResponse(response);
+      }
+      if (!isActive) {
+        return {
+          success: false,
+          error: 'Su cuenta está inactiva. Contacte al administrador del sistema.',
+        };
+      }
+      const roleNorm = roleRaw.toLowerCase().trim();
+      const isAdmin = roleNorm === 'admin' || roleNorm === 'administrator';
+      if (isAdmin) {
+        return {
+          success: false,
+          error: 'Solo los usuarios vendedores pueden acceder a este sistema. Los administradores deben usar el sistema de administración.',
+        };
+      }
+
+      const user: User = {
+        id: apiUserId ?? String(id),
+        email: userEmail,
+        name: apiName ?? userName,
+        lastName: apiLastName,
+        role: 'vendedor',
+        phone: apiPhone,
       };
+      localStorage.setItem('auth_token', token);
+      localStorage.setItem('auth_user', JSON.stringify(user));
+      setUser(user);
+      return { success: true };
     } catch (error) {
       const apiError = error as ApiError;
       
@@ -157,6 +191,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     router.push('/login');
   };
 
+  const updateUser = (data: Partial<User>) => {
+    if (!user) return;
+    const next = { ...user, ...data };
+    setUser(next);
+    localStorage.setItem('auth_user', JSON.stringify(next));
+  };
+
   return (
     <AuthContext.Provider
       value={{
@@ -164,6 +205,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         isAuthenticated: !!user,
         login,
         logout,
+        updateUser,
         isLoading,
       }}
     >

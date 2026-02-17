@@ -51,7 +51,9 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
               </div>
               <div>
                 <p className="text-slate-900 text-sm font-medium">Eternal Cosmetics</p>
-                <p className="text-xs text-slate-500">{t('seller_portal')}</p>
+                <p className="text-xs text-slate-500 truncate max-w-[140px]">
+                  {([user?.name, user?.lastName].filter(Boolean).join(' ') || user?.email) ?? t('seller_portal')}
+                </p>
               </div>
             </div>
             

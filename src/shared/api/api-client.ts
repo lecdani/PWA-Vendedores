@@ -1,4 +1,4 @@
-const API_BASE_URL = 'http://192.168.0.113:5107';
+const API_BASE_URL = 'http://100.127.113.86:5107';
 
 export interface ApiError {
   message: string;
@@ -89,16 +89,17 @@ export class ApiClient {
         const errorCode = data.code || data.errorCode || '';
         const lowerMessage = errorMessage.toLowerCase();
         
-        // Detectar si el usuario no está registrado
-        if (response.status === 404 || 
-            lowerMessage.includes('no encontrado') || 
+        // "Usuario no registrado" solo en login; en perfil/otros mostrar el mensaje real del servidor
+        const isLoginRequest = url.includes('/auth/login');
+        if (isLoginRequest && (response.status === 404 ||
+            lowerMessage.includes('no encontrado') ||
             lowerMessage.includes('not found') ||
             lowerMessage.includes('no existe') ||
             lowerMessage.includes('no registrado') ||
             lowerMessage.includes('usuario no encontrado') ||
             lowerMessage.includes('user not found') ||
             errorCode.includes('USER_NOT_FOUND') ||
-            errorCode.includes('NOT_FOUND')) {
+            errorCode.includes('NOT_FOUND'))) {
           errorType = 'user_not_registered';
           errorMessage = 'Este email no está registrado en el sistema';
         }
@@ -123,9 +124,13 @@ export class ApiClient {
           errorType = 'unauthorized';
           errorMessage = errorMessage || 'No autorizado';
         }
-        // Error 404 genérico
+        // Error 404 genérico (solo si no fue tratado como user_not_registered)
         else if (response.status === 404) {
-          errorMessage = errorMessage || 'Endpoint no encontrado';
+          errorMessage = errorMessage || 'Recurso no encontrado';
+        }
+        // 400 Bad Request: mantener mensaje del servidor (ej. "El correo ya está en uso")
+        else if (response.status === 400) {
+          errorMessage = errorMessage || 'Datos inválidos. Revisa los campos.';
         }
         // Error 500
         else if (response.status === 500) {
@@ -154,6 +159,35 @@ export class ApiClient {
 
   async get<T>(endpoint: string, options?: RequestInit): Promise<T> {
     return this.request<T>(endpoint, { ...options, method: 'GET' });
+  }
+
+  /** GET usando un token explícito (p. ej. recién obtenido en login) sin usar localStorage */
+  async getWithToken<T>(endpoint: string, token: string): Promise<T> {
+    const url = `${this.baseUrl}${endpoint}`;
+    const headers: HeadersInit = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    };
+    const response = await fetch(url, { method: 'GET', headers });
+    const contentType = response.headers.get('content-type');
+    let data: any;
+    const text = await response.text();
+    if (contentType?.includes('application/json') && text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = { message: text };
+      }
+    } else {
+      data = text ? { message: text } : {};
+    }
+    if (!response.ok) {
+      throw {
+        message: data?.message || data?.error || response.statusText || 'Error en la solicitud',
+        status: response.status,
+      } as ApiError;
+    }
+    return data as T;
   }
 
   async post<T>(endpoint: string, data?: any, options?: RequestInit): Promise<T> {

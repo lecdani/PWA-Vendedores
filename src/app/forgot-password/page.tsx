@@ -30,7 +30,7 @@ export default function ForgotPasswordPage() {
       setSuccess(true);
     } catch (err: unknown) {
       const apiError = err as { message?: string };
-      setError(apiError.message || 'Error al enviar el link. Verifica el correo e intenta de nuevo.');
+      setError(apiError?.message ?? 'Error al enviar el enlace. Intenta de nuevo.');
     } finally {
       setIsSubmitting(false);
     }
@@ -52,7 +52,7 @@ export default function ForgotPasswordPage() {
             </div>
             <h2 className="text-xl font-bold text-slate-900 mb-2">Revisa tu correo</h2>
             <p className="text-slate-600 mb-6">
-              Si existe una cuenta con <strong>{email}</strong>, te enviamos un link para restablecer tu contraseña.
+              Si el correo existe en el sistema, recibirás un enlace de restablecimiento de contraseña.
               Abre el correo y haz clic en el enlace para crear tu nueva contraseña.
             </p>
             <p className="text-sm text-slate-500 mb-6">
