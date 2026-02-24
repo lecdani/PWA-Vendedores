@@ -1,1 +1,10 @@
 node_modules
+.next
+.out
+dist
+coverage
+.turbo
+.cursor
+*.log
+*.tmp
+.DS_Store
