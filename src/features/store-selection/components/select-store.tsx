@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Store, Search, ChevronRight, MapPin, ArrowLeft } from 'lucide-react';
 import { useLanguage } from '@/shared/i18n/language-provider';
@@ -8,56 +8,30 @@ import { Card, CardContent } from '@/shared/ui/card';
 import { Input } from '@/shared/ui/input';
 import { Button } from '@/shared/ui/button';
 import { Badge } from '@/shared/ui/badge';
-
-interface StoreType {
-  id: string;
-  name: string;
-  address: string;
-  city: string;
-  lastVisit: string;
-  status: 'active' | 'inactive';
-}
+import { storesApi, StoreForUI } from '@/shared/api/stores-api';
 
 export function SelectStore() {
   const { t } = useLanguage();
   const router = useRouter();
   const [searchQuery, setSearchQuery] = useState('');
+  const [stores, setStores] = useState<StoreForUI[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  // Mock data - En producción vendría de la API
-  const stores: StoreType[] = [
-    {
-      id: 'CVS-001',
-      name: 'CVS Pharmacy - Brickell',
-      address: '1234 Brickell Ave',
-      city: 'Miami, FL 33131',
-      lastVisit: '2025-11-20',
-      status: 'active'
-    },
-    {
-      id: 'CVS-002',
-      name: 'CVS Pharmacy - Downtown',
-      address: '5678 Flagler St',
-      city: 'Miami, FL 33130',
-      lastVisit: '2025-11-18',
-      status: 'active'
-    },
-    {
-      id: 'CVS-003',
-      name: 'CVS Pharmacy - Coral Gables',
-      address: '9012 Miracle Mile',
-      city: 'Coral Gables, FL 33134',
-      lastVisit: '2025-11-15',
-      status: 'active'
-    },
-    {
-      id: 'CVS-004',
-      name: 'CVS Pharmacy - Coconut Grove',
-      address: '3456 Grand Ave',
-      city: 'Miami, FL 33133',
-      lastVisit: '2025-11-10',
-      status: 'active'
-    },
-  ];
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      setLoading(true);
+      setError(null);
+      const apiStores = await storesApi.fetchStores();
+      if (!mounted) return;
+      setStores(apiStores);
+      setLoading(false);
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   const filteredStores = stores.filter(store =>
     store.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -108,9 +82,15 @@ export function SelectStore() {
 
       {/* Store List */}
       <div className="px-4 py-4">
-        <p className="text-xs text-slate-500 mb-3">
-          {filteredStores.length} {t('stores_found')}
-        </p>
+        {loading ? (
+          <p className="text-xs text-slate-500 mb-3">{t('loading')}...</p>
+        ) : error ? (
+          <p className="text-xs text-red-600 mb-3">{error}</p>
+        ) : (
+          <p className="text-xs text-slate-500 mb-3">
+            {filteredStores.length} {t('stores_found')}
+          </p>
+        )}
 
         <div className="space-y-3">
           {filteredStores.map((store) => (
@@ -129,7 +109,6 @@ export function SelectStore() {
                     <div className="flex items-start justify-between gap-2 mb-1">
                       <div>
                         <p className="text-sm text-slate-900 mb-0.5">{store.name}</p>
-                        <p className="text-xs text-slate-500">{store.id}</p>
                       </div>
                       <Badge 
                         variant="outline" 
@@ -139,10 +118,12 @@ export function SelectStore() {
                       </Badge>
                     </div>
                     
-                    <div className="flex items-center gap-1 text-xs text-slate-500 mb-1">
-                      <MapPin className="h-3 w-3" />
-                      <span>{store.address}</span>
-                    </div>
+                    {store.address && (
+                      <div className="flex items-center gap-1 text-xs text-slate-500 mb-1">
+                        <MapPin className="h-3 w-3" />
+                        <span>{store.address}</span>
+                      </div>
+                    )}
                     
                     <div className="flex items-center gap-1 text-xs text-slate-500">
                       <span>{t('last_visit')}:</span>

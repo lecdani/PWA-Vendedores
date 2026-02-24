@@ -2,74 +2,112 @@
 
 import { useRouter } from 'next/navigation';
 import { useState, useEffect } from 'react';
-import { FileCheck, Camera, AlertCircle, Calendar } from 'lucide-react';
+import { FileCheck, Camera, AlertCircle } from 'lucide-react';
 import { useLanguage } from '@/shared/i18n/language-provider';
+import { useAuth } from '@/shared/auth/auth-provider';
+import { ordersApi, OrderForUI } from '@/shared/api/orders-api';
+import { storesApi } from '@/shared/api/stores-api';
+import { histpricesApi } from '@/shared/api/histprices-api';
 import { Card, CardContent } from '@/shared/ui/card';
 import { Badge } from '@/shared/ui/badge';
 import { Button } from '@/shared/ui/button';
 
-interface PendingOrder {
-  id: string;
-  storeId: string;
-  storeName: string;
-  orderDate: string;
-  deliveryDate: string;
-  totalAmount: number;
-  status: 'pending';
-  totalUnits: number;
+function looksLikeId(name: string): boolean {
+  if (!name || !name.trim()) return true;
+  return /^[0-9a-f-]{36}$/i.test(name.trim()) || /^\d+$/.test(name.trim());
 }
 
 export function PendingPOD() {
   const { t } = useLanguage();
   const router = useRouter();
-  const [pendingOrders, setPendingOrders] = useState<PendingOrder[]>([]);
+  const { user } = useAuth();
+  const [pendingOrders, setPendingOrders] = useState<OrderForUI[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [storeCache, setStoreCache] = useState<Record<string, { name: string; address: string }>>({});
 
-  // Obtener pedidos del localStorage que requieren POD
-  const getPendingOrders = (): PendingOrder[] => {
-    if (typeof window === 'undefined') return [];
-    
-    const orders = JSON.parse(localStorage.getItem('orders') || '[]');
-    
-    // Filtrar solo los pedidos que requieren POD y no lo tienen
-    const filtered = orders
-      .filter((order: any) => {
-        return order.podRequired === true && 
-               order.podUploaded !== true && 
-               order.status === 'pending';
-      })
-      .map((order: any) => ({
-        id: order.id,
-        storeId: order.storeId,
-        storeName: order.storeName || order.storeId,
-        orderDate: order.date,
-        deliveryDate: order.deliveryDate || order.date,
-        totalAmount: order.total,
-        totalUnits: order.totalUnits || order.items?.reduce((sum: number, item: any) => sum + (item.toOrder || item.quantity || 0), 0) || 0,
-        status: order.status
-      }));
-
-    return filtered;
-  };
-
-  // Cargar pedidos cuando el componente se monta o cuando se enfoca la ventana
   useEffect(() => {
-    const loadOrders = () => {
-      setPendingOrders(getPendingOrders());
+    const load = async () => {
+      setLoading(true);
+      if (user?.id) {
+        let all = await ordersApi.getOrdersByUser(user.id);
+        if (typeof window !== 'undefined') {
+          try {
+            const statusRaw = sessionStorage.getItem('orderStatusByOrderId');
+            const statusMap = statusRaw ? JSON.parse(statusRaw) : {};
+            const podRaw = sessionStorage.getItem('podByOrderId');
+            const podMap = podRaw ? JSON.parse(podRaw) : {};
+            all = all.map((o) => {
+              let o2 = o;
+              const idKey = String(o.id ?? o.backendOrderId ?? '');
+              const cachedStatus = idKey ? (statusMap[idKey] ?? statusMap[o.id]) : undefined;
+              if (cachedStatus) o2 = { ...o2, status: cachedStatus };
+              const cachedPod = idKey ? (podMap[idKey] ?? podMap[o.id]) : undefined;
+              if (cachedPod?.podImageUrl || cachedPod?.podFileName) {
+                o2 = { ...o2, podUploaded: true };
+              }
+              return o2;
+            });
+          } catch {
+            // ignorar
+          }
+        }
+        const pending = all.filter(
+          (o) => ((o.status || '').toLowerCase() === 'pending' && (o.podRequired !== false) && !o.podUploaded)
+        );
+        // Mismo criterio que historial: rellenar total con precios de histprices cuando sea 0
+        const enriched = await Promise.all(
+          pending.map(async (order): Promise<OrderForUI> => {
+            if (Number(order.total) > 0) return order;
+            const items = order?.items && Array.isArray(order.items) ? order.items : [];
+            if (!items.length) return order;
+            try {
+              const enrichedItems = await Promise.all(
+                items.map(async (item: any) => {
+                  let price = Number(item.price) || 0;
+                  if (item.productId && !price) {
+                    price = await histpricesApi.getLatest(String(item.productId)); // último del historial
+                  }
+                  return { ...item, price };
+                })
+              );
+              const subtotal = enrichedItems.reduce((s, i) => s + (i.quantity ?? i.toOrder ?? 0) * (i.price ?? 0), 0);
+              const total = subtotal + Number(order.tax ?? 0);
+              return { ...order, items: enrichedItems, subtotal, total };
+            } catch {
+              return order;
+            }
+          })
+        );
+        setPendingOrders(enriched);
+      } else {
+        setPendingOrders([]);
+      }
+      setLoading(false);
     };
+    load();
+  }, [user?.id]);
 
-    loadOrders();
-
-    // Actualizar cuando la ventana recibe foco (usuario vuelve a la app)
-    window.addEventListener('focus', loadOrders);
-    
-    // Actualizar cada 2 segundos para asegurar que se vean los cambios
-    const interval = setInterval(loadOrders, 2000);
-
-    return () => {
-      window.removeEventListener('focus', loadOrders);
-      clearInterval(interval);
-    };
-  }, []);
+  useEffect(() => {
+    if (!pendingOrders.length) return;
+    const needStore = [...new Set(pendingOrders.map((o) => o.storeId).filter(Boolean))].filter(
+      (storeId) => {
+        const order = pendingOrders.find((o) => o.storeId === storeId);
+        return order && looksLikeId(order.storeName || '');
+      }
+    ) as string[];
+    if (needStore.length === 0) return;
+    let mounted = true;
+    (async () => {
+      const next: Record<string, { name: string; address: string }> = {};
+      for (const id of needStore) {
+        if (!mounted) break;
+        const store = await storesApi.fetchStoreById(id);
+        if (store && mounted) next[id] = { name: store.name, address: store.address || '' };
+      }
+      if (mounted) setStoreCache((prev) => ({ ...prev, ...next }));
+    })();
+    return () => { mounted = false; };
+  }, [pendingOrders]);
 
   return (
     <div className="px-4 py-4">
@@ -88,44 +126,74 @@ export function PendingPOD() {
         </div>
       </div>
 
-      {/* Pending Orders List */}
-      {pendingOrders.length > 0 ? (
+      {/* Pending Orders List - misma info que historial: tienda, total, dirección, fecha */}
+      {loading ? (
+        <p className="text-sm text-slate-500 py-4">{t('loading')}...</p>
+      ) : pendingOrders.length > 0 ? (
         <div className="space-y-3">
-          {pendingOrders.map((order) => (
-            <Card
-              key={order.id}
-              className="border-slate-200 hover:border-blue-300 hover:shadow-md transition-all"
-            >
-              <CardContent className="p-4">
-                <div className="flex items-start justify-between mb-3">
-                  <div>
-                    <p className="text-sm text-slate-900 mb-0.5">{order.id}</p>
-                    <p className="text-xs text-slate-600 mb-2">{order.storeName}</p>
-                    <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200">
-                      {t('waiting_pod')}
-                    </Badge>
+          {pendingOrders.map((order) => {
+            const cached = order.storeId ? storeCache[order.storeId] : null;
+            const displayStoreName = cached?.name || (order.storeName && !looksLikeId(order.storeName) ? order.storeName : t('store'));
+            const displayAddress = (cached?.address || order.storeAddress || '').trim();
+            const computedTotal = order.items?.length
+              ? order.items.reduce((s: number, i: any) => s + (i.quantity ?? i.toOrder ?? 0) * (Number(i.price) || 0), 0)
+              : 0;
+            const totalDisplay =
+              Number(order.total) > 0
+                ? Number(order.total)
+                : computedTotal > 0
+                  ? computedTotal
+                  : Number(order.subtotal) > 0
+                    ? Number(order.subtotal)
+                    : 0;
+            const hasTotal = totalDisplay > 0;
+            const articlesCount = order.items?.length ?? 0;
+            return (
+              <Card
+                key={order.id}
+                className="border-slate-200 hover:border-blue-300 hover:shadow-md transition-all cursor-pointer active:scale-[0.98]"
+                onClick={() => router.push(`/capture-pod/${order.id}`)}
+              >
+                <CardContent className="p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-slate-900 truncate">{displayStoreName}</p>
+                      {displayAddress ? (
+                        <p className="text-xs text-slate-500 mt-0.5 truncate" title={displayAddress}>{displayAddress}</p>
+                      ) : null}
+                      <p className="text-xs text-slate-400 mt-0.5">{new Date(order.date).toLocaleDateString()}</p>
+                      <div className="flex items-center gap-2 mt-2 flex-wrap">
+                        <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200">
+                          {t('waiting_pod')}
+                        </Badge>
+                        <span className="text-xs text-slate-500">{order.totalUnits || articlesCount} {t('units')}</span>
+                      </div>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <p className="text-xs text-slate-500 uppercase tracking-wide">{t('total')}</p>
+                      <p className="text-base font-semibold text-slate-900">
+                        {hasTotal ? `$${Number(totalDisplay).toFixed(2)}` : t('total_not_available')}
+                      </p>
+                      <p className="text-xs text-slate-500">{order.totalUnits || articlesCount} {t('units')}</p>
+                    </div>
                   </div>
-                  <p className="text-slate-900">${order.totalAmount.toFixed(2)}</p>
-                </div>
-
-                <div className="flex items-center gap-4 text-xs text-slate-500 mb-3">
-                  <div className="flex items-center gap-1">
-                    <Calendar className="h-3 w-3" />
-                    <span>{t('delivered')}: {new Date(order.deliveryDate).toLocaleDateString()}</span>
+                  <div className="flex items-center justify-between mt-3 pt-3 border-t border-slate-100">
+                    <span className="text-xs text-slate-500">
+                      {t('delivery_date')}: {new Date(order.deliveryDate || order.date).toLocaleDateString()}
+                    </span>
+                    <Button
+                      onClick={(e) => { e.stopPropagation(); router.push(`/capture-pod/${order.id}`); }}
+                      size="sm"
+                      className="bg-blue-600 hover:bg-blue-700 shrink-0"
+                    >
+                      <Camera className="h-4 w-4 mr-2" />
+                      {t('capture_pod')}
+                    </Button>
                   </div>
-                </div>
-
-                <Button
-                  onClick={() => router.push(`/capture-pod/${order.id}`)}
-                  className="w-full bg-blue-600 hover:bg-blue-700"
-                  size="sm"
-                >
-                  <Camera className="h-4 w-4 mr-2" />
-                  {t('capture_pod')}
-                </Button>
-              </CardContent>
-            </Card>
-          ))}
+                </CardContent>
+              </Card>
+            );
+          })}
         </div>
       ) : (
         <div className="text-center py-12">

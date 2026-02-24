@@ -315,13 +315,13 @@ export function Profile() {
 
       {/* Settings - Cambiar contraseña */}
       <Card className="mb-4 border-slate-200">
-        <CardHeader className="pb-3">
+        <CardHeader className="px-4 pt-4 pb-2">
           <CardTitle className="text-sm">{t('settings')}</CardTitle>
         </CardHeader>
-        <CardContent className="p-0">
+        <CardContent className="px-4 pb-4 pt-0">
           <button
             type="button"
-            className="w-full flex items-center justify-between p-4 hover:bg-slate-50 transition-colors"
+            className="w-full flex items-center justify-between p-3 rounded-lg hover:bg-slate-50 transition-colors border border-slate-100"
             onClick={() => { setShowChangePassword(true); setPasswordError(''); setPasswordSuccess(false); setPasswordData({ currentPassword: '', newPassword: '', confirmPassword: '' }); }}
           >
             <div className="flex items-center gap-3">

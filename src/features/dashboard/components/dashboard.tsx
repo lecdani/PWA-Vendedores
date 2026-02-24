@@ -1,55 +1,109 @@
 'use client';
 
-import { 
-  ShoppingCart, 
-  DollarSign, 
-  Target, 
-  Users, 
-  Plus, 
-  History, 
+import { useEffect, useState } from 'react';
+import {
+  Package,
+  ShoppingCart,
+  Plus,
+  History,
   BarChart3,
-  FileCheck
+  FileCheck,
+  MapPin,
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { MetricCard } from './metric-card';
 import { ModuleCard } from './module-card';
 import { useLanguage } from '@/shared/i18n/language-provider';
 import { useAuth } from '@/shared/auth/auth-provider';
+import { ordersApi, OrderForUI } from '@/shared/api/orders-api';
 
 export function Dashboard() {
   const { t } = useLanguage();
   const router = useRouter();
   const { user } = useAuth();
-  const sellerName = [user?.name, user?.lastName].filter(Boolean).join(' ') || user?.email?.split('@')[0] || 'Vendedor';
+  const sellerName =
+    [user?.name, user?.lastName].filter(Boolean).join(' ') ||
+    user?.email?.split('@')[0] ||
+    'Vendedor';
+
+  const [orders, setOrders] = useState<OrderForUI[] | null>(null);
+  const [visitLogs, setVisitLogs] = useState<Array<{ storeId: string; visitDate: string }>>([]);
+  const [loadingMetrics, setLoadingMetrics] = useState<boolean>(true);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      if (!user?.id) {
+        if (mounted) {
+          setOrders([]);
+          setVisitLogs([]);
+          setLoadingMetrics(false);
+        }
+        return;
+      }
+      setLoadingMetrics(true);
+      const [ordersData, logs] = await Promise.all([
+        ordersApi.getOrdersByUser(user.id),
+        ordersApi.getVisitLogsBySalesperson(user.id),
+      ]);
+      if (!mounted) return;
+      setOrders(ordersData || []);
+      setVisitLogs(Array.isArray(logs) ? logs : []);
+      setLoadingMetrics(false);
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [user?.id]);
+
+  const allOrders = orders ?? [];
+  const now = new Date();
+  const todayIso = now.toISOString().slice(0, 10);
+  const ordersToday = allOrders.filter((o) => {
+    if (!o.date) return false;
+    return new Date(o.date).toISOString().slice(0, 10) === todayIso;
+  }).length;
+
+  const totalStoresVisited = new Set(
+    visitLogs.map((v) => v.storeId).filter(Boolean)
+  ).size;
+
+  const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const storesVisitedThisMonth = new Set(
+    visitLogs
+      .filter((v) => (v.visitDate || '').slice(0, 7) === currentMonthKey)
+      .map((v) => v.storeId)
+      .filter(Boolean)
+  ).size;
 
   const metrics = [
-    { 
-      label: t('orders_today'), 
-      value: '12', 
-      icon: ShoppingCart, 
+    {
+      label: t('total_orders_vendor'),
+      value: loadingMetrics ? '—' : String(allOrders.length),
+      icon: Package,
       color: 'bg-blue-50 text-blue-600',
-      iconBg: 'bg-blue-500'
+      iconBg: 'bg-blue-500',
     },
-    { 
-      label: t('total_sales'), 
-      value: '$2,845', 
-      icon: DollarSign, 
+    {
+      label: t('orders_today'),
+      value: loadingMetrics ? '—' : String(ordersToday),
+      icon: ShoppingCart,
+      color: 'bg-emerald-50 text-emerald-600',
+      iconBg: 'bg-emerald-500',
+    },
+    {
+      label: t('total_stores_visited'),
+      value: loadingMetrics ? '—' : String(totalStoresVisited),
+      icon: MapPin,
       color: 'bg-green-50 text-green-600',
-      iconBg: 'bg-green-500'
+      iconBg: 'bg-green-500',
     },
-    { 
-      label: t('monthly_goal'), 
-      value: '68%', 
-      icon: Target, 
-      color: 'bg-purple-50 text-purple-600',
-      iconBg: 'bg-purple-500'
-    },
-    { 
-      label: t('active_customers'), 
-      value: '8', 
-      icon: Users, 
+    {
+      label: t('stores_visited_this_month'),
+      value: loadingMetrics ? '—' : String(storesVisitedThisMonth),
+      icon: MapPin,
       color: 'bg-orange-50 text-orange-600',
-      iconBg: 'bg-orange-500'
+      iconBg: 'bg-orange-500',
     },
   ];
 

@@ -1,4 +1,4 @@
-const API_BASE_URL = 'http://100.127.113.86:5107';
+export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://100.127.113.86:5107';
 
 export interface ApiError {
   message: string;
@@ -103,26 +103,19 @@ export class ApiClient {
           errorType = 'user_not_registered';
           errorMessage = 'Este email no está registrado en el sistema';
         }
-        // Detectar credenciales incorrectas
-        else if (response.status === 401 || 
-                 lowerMessage.includes('incorrect') ||
-                 lowerMessage.includes('invalid') ||
-                 lowerMessage.includes('wrong') ||
-                 lowerMessage.includes('credenciales') ||
-                 lowerMessage.includes('contraseña') ||
-                 lowerMessage.includes('password') ||
-                 errorCode.includes('INVALID_CREDENTIALS') ||
-                 errorCode.includes('UNAUTHORIZED')) {
-          errorType = 'invalid_credentials';
-          // Si el mensaje no es específico, usar uno genérico
-          if (!lowerMessage.includes('email') && !lowerMessage.includes('contraseña') && !lowerMessage.includes('password')) {
+        // Detectar credenciales incorrectas solo en 401; en 500 no mostrar "email/contraseña incorrectos"
+        else if (response.status === 401) {
+          const isAuthRequest = url.includes('/auth/') || url.includes('/login');
+          errorType = isAuthRequest ? 'invalid_credentials' : 'unauthorized';
+          if (isAuthRequest && (lowerMessage.includes('incorrect') || lowerMessage.includes('invalid') || lowerMessage.includes('wrong') || lowerMessage.includes('credenciales') || lowerMessage.includes('contraseña') || lowerMessage.includes('password') || errorCode.includes('INVALID_CREDENTIALS') || errorCode.includes('UNAUTHORIZED'))) {
             errorMessage = 'Email o contraseña incorrectos';
+          } else {
+            errorMessage = errorMessage || 'No autorizado';
           }
         }
-        // Otros errores 401
-        else if (response.status === 401) {
-          errorType = 'unauthorized';
-          errorMessage = errorMessage || 'No autorizado';
+        // 500/502/503: mantener mensaje del servidor o genérico (no mapear a credenciales)
+        else if (response.status >= 500) {
+          errorMessage = errorMessage || 'Error del servidor. Intenta más tarde.';
         }
         // Error 404 genérico (solo si no fue tratado como user_not_registered)
         else if (response.status === 404) {
@@ -131,10 +124,6 @@ export class ApiClient {
         // 400 Bad Request: mantener mensaje del servidor (ej. "El correo ya está en uso")
         else if (response.status === 400) {
           errorMessage = errorMessage || 'Datos inválidos. Revisa los campos.';
-        }
-        // Error 500
-        else if (response.status === 500) {
-          errorMessage = errorMessage || 'Error interno del servidor';
         }
         
         throw {
@@ -203,6 +192,27 @@ export class ApiClient {
       ...options,
       method: 'PUT',
       body: data ? JSON.stringify(data) : undefined,
+    });
+  }
+
+  async patch<T>(endpoint: string, data?: any, options?: RequestInit): Promise<T> {
+    return this.request<T>(endpoint, {
+      ...options,
+      method: 'PATCH',
+      body: data ? JSON.stringify(data) : undefined,
+    });
+  }
+
+  /** PATCH con body en texto plano (string). Content-Type: text/plain */
+  async patchText<T = any>(endpoint: string, bodyText: string, options?: RequestInit): Promise<T> {
+    return this.request<T>(endpoint, {
+      ...options,
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'text/plain',
+        ...options?.headers,
+      },
+      body: bodyText,
     });
   }
 

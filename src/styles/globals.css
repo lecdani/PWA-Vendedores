@@ -192,3 +192,23 @@
 html {
   font-size: var(--font-size);
 }
+
+/* Imprimir / Descargar: solo la factura */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  #invoice-print,
+  #invoice-print * {
+    visibility: visible;
+  }
+  #invoice-print {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    max-width: 100%;
+    box-shadow: none;
+    background: white;
+  }
+}

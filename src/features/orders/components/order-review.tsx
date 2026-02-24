@@ -2,32 +2,63 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { ArrowLeft, Send, Edit, ShoppingCart, DollarSign, Package } from 'lucide-react';
+import { ArrowLeft, Send, Edit, ShoppingCart, DollarSign, Package, Store as StoreIcon } from 'lucide-react';
 import { useLanguage } from '@/shared/i18n/language-provider';
+import { useAuth } from '@/shared/auth/auth-provider';
+import { ordersApi } from '@/shared/api/orders-api';
+import { storesApi, StoreForUI } from '@/shared/api/stores-api';
 import { Button } from '@/shared/ui/button';
 import { Card, CardContent } from '@/shared/ui/card';
 import { Separator } from '@/shared/ui/separator';
 import { Badge } from '@/shared/ui/badge';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/shared/ui/select';
 
 export function OrderReview() {
   const { t } = useLanguage();
   const router = useRouter();
+  const { user } = useAuth();
   const [storeId, setStoreId] = useState('CVS-001');
   const [storeInfo, setStoreInfo] = useState<any>(null);
   const [planogramData, setPlanogramData] = useState<any[]>([]);
+  const [editOrderId, setEditOrderId] = useState<string | null>(null);
+  const [stores, setStores] = useState<StoreForUI[]>([]);
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
-      // Obtener datos del sessionStorage
       const storedData = sessionStorage.getItem('orderReviewData');
       if (storedData) {
         const data = JSON.parse(storedData);
         setStoreId(data.storeId || 'CVS-001');
         setStoreInfo(data.storeInfo);
         setPlanogramData(data.planogramData || []);
+        setEditOrderId(data.editOrderId ?? null);
       }
     }
   }, []);
+
+  useEffect(() => {
+    if (!editOrderId) return;
+    let mounted = true;
+    (async () => {
+      const list = await storesApi.fetchStores();
+      if (mounted) setStores(list);
+    })();
+    return () => { mounted = false; };
+  }, [editOrderId]);
+
+  const handleStoreChange = (newStoreId: string) => {
+    setStoreId(newStoreId);
+    const store = stores.find((s) => s.id === newStoreId);
+    if (store) setStoreInfo(store);
+  };
 
   // Filtrar solo los productos con cantidad mayor a 0 para mostrar
   const orderItems = planogramData.filter((item: any) => item.toOrder > 0);
@@ -36,53 +67,155 @@ export function OrderReview() {
   const totalAmount = orderItems.reduce((sum: number, item: any) => sum + (item.toOrder * item.price), 0);
   const uniqueProducts = orderItems.length;
 
-  const handleSendOrder = () => {
+  const handleSendOrder = async () => {
     if (typeof window === 'undefined') return;
-    
-    // Generar ID único para el pedido
-    const orderId = `ORD-${Date.now()}`;
-    const orderDate = new Date().toISOString();
-    
-    // Crear objeto de pedido completo con información de la tienda
-    const newOrder = {
-      id: orderId,
+    setSending(true);
+    setSendError(null);
+
+    const subtotal = totalAmount;
+    const tax = 0;
+    const total = totalAmount;
+    const orderPayload = {
       storeId,
       storeName: storeInfo?.name || storeId,
-      storeAddress: storeInfo ? `${storeInfo.address}, ${storeInfo.city}` : '',
-      date: orderDate,
-      deliveryDate: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(), // 3 días después
-      status: 'pending',
-      items: orderItems,
-      totalUnits,
-      subtotal: totalAmount,
-      tax: totalAmount * 0.085,
-      total: totalAmount * 1.085,
-      podRequired: true,
-      podUploaded: false,
+      storeAddress: storeInfo ? `${storeInfo.address || ''}${storeInfo.city ? `, ${storeInfo.city}` : ''}` : '',
+      salespersonId: user?.id,
       vendorNumber: '2F318',
+      items: orderItems.map((item: any) => ({
+        productId: item.productId,
+        sku: item.sku,
+        productName: item.productName,
+        quantity: item.toOrder,
+        price: item.price,
+      })),
+      subtotal,
+      tax,
+      total,
     };
 
-    // Guardar en localStorage
-    const existingOrders = JSON.parse(localStorage.getItem('orders') || '[]');
-    existingOrders.push(newOrder);
-    localStorage.setItem('orders', JSON.stringify(existingOrders));
+    if (editOrderId) {
+      const orderBeforeUpdate = await ordersApi.getOrderById(editOrderId);
+      let invoiceIdHint: string | number | null = null;
+      if (typeof window !== 'undefined') {
+        try {
+          const raw = sessionStorage.getItem('invoiceIdByOrder');
+          const map = raw ? JSON.parse(raw) : {};
+          invoiceIdHint = map[editOrderId] ?? null;
+        } catch {
+          invoiceIdHint = null;
+        }
+      }
+      if (invoiceIdHint == null) {
+        const fromApi = await ordersApi.getInvoiceIdForOrder(editOrderId);
+        if (fromApi != null) invoiceIdHint = fromApi;
+      }
+      const ok = await ordersApi.updateOrder(editOrderId, orderPayload, invoiceIdHint);
+      setSending(false);
+      if (!ok) {
+        setSendError(t('error_saving_order') || 'No se pudo guardar el pedido. Revisa la conexión e inténtalo de nuevo.');
+        return;
+      }
+      // Actualizar solo el VisitLog de ESTE pedido (varios pedidos pueden ser misma tienda y misma fecha)
+      if (user?.id) {
+        let visitLogIdToUpdate: string | number | null = null;
+        if (typeof window !== 'undefined') {
+          try {
+            const raw = sessionStorage.getItem('visitLogIdByOrderId');
+            const map = raw ? JSON.parse(raw) : {};
+            const stored = map[editOrderId];
+            if (typeof stored === 'string' || typeof stored === 'number') visitLogIdToUpdate = stored;
+          } catch {
+            // ignore
+          }
+        }
+        if (visitLogIdToUpdate == null && orderBeforeUpdate) {
+          const originalStoreId = String(orderBeforeUpdate.storeId ?? '').trim().toLowerCase();
+          const orderDateStr = (orderBeforeUpdate.date || '').toString().slice(0, 10);
+          if (originalStoreId && orderDateStr) {
+            const logs = await ordersApi.getVisitLogsBySalesperson(user.id);
+            const matches = logs.filter(
+              (v) =>
+                String(v.storeId ?? '').trim().toLowerCase() === originalStoreId &&
+                (v.visitDate || '').slice(0, 10) === orderDateStr
+            );
+            if (matches.length === 1 && matches[0].id != null && matches[0].id !== '') {
+              visitLogIdToUpdate = matches[0].id;
+            }
+          }
+        }
+        if (visitLogIdToUpdate != null) {
+          const visitDateStr = orderBeforeUpdate?.date
+            ? (orderBeforeUpdate.date as string).toString().slice(0, 10)
+            : new Date().toISOString().slice(0, 10);
+          const updated = await ordersApi.updateVisitLog(visitLogIdToUpdate, {
+            storeId,
+            salespersonId: user.id,
+            visitDate: visitDateStr,
+          });
+          if (!updated) {
+            setSendError(t('error_saving_order') || 'Pedido guardado, pero no se pudo actualizar la visita en el servidor.');
+          }
+        }
+      }
+      sessionStorage.setItem('orderConfirmation', JSON.stringify({ orderId: editOrderId, showConfirmation: true }));
+      router.push(`/order/${editOrderId}`);
+      return;
+    }
 
-    // Guardar en sessionStorage para mostrar confirmación
-    sessionStorage.setItem('orderConfirmation', JSON.stringify({ orderId, showConfirmation: true }));
+    const apiResult = await ordersApi.createOrder(orderPayload);
+    const orderIdRaw = apiResult?.orderId;
+    if (orderIdRaw == null || orderIdRaw === '' || String(orderIdRaw).toLowerCase() === 'unknown') {
+      setSendError(t('error_saving_order') || 'No se pudo crear el pedido. Revisa la conexión e inténtalo de nuevo.');
+      setSending(false);
+      return;
+    }
 
-    // Navegar al detalle del pedido
-    router.push(`/order/${orderId}`);
+    const orderIdToUse = String(orderIdRaw);
+    if (user?.id) {
+      const visitLogId = await ordersApi.createVisitLog({
+        storeId,
+        salespersonId: user.id,
+        visitDate: new Date().toISOString().slice(0, 10),
+      });
+      if (typeof window !== 'undefined' && visitLogId != null) {
+        try {
+          const raw = sessionStorage.getItem('visitLogIdByOrderId');
+          const map = raw ? JSON.parse(raw) : {};
+          map[orderIdToUse] = visitLogId;
+          sessionStorage.setItem('visitLogIdByOrderId', JSON.stringify(map));
+        } catch {
+          // ignore
+        }
+      }
+    }
+    if (typeof window !== 'undefined' && apiResult.invoiceId != null) {
+      try {
+        const map: Record<string, string | number> = {};
+        const raw = sessionStorage.getItem('invoiceIdByOrder');
+        if (raw) Object.assign(map, JSON.parse(raw));
+        map[orderIdToUse] = apiResult.invoiceId;
+        sessionStorage.setItem('invoiceIdByOrder', JSON.stringify(map));
+      } catch {
+        // ignore
+      }
+    }
+
+    sessionStorage.setItem('orderConfirmation', JSON.stringify({ orderId: orderIdToUse, showConfirmation: true }));
+    setSending(false);
+    router.push(`/order/${orderIdToUse}`);
   };
 
   const handleEditOrder = () => {
     if (typeof window !== 'undefined') {
-      // Guardar datos en sessionStorage para el planograma
-      sessionStorage.setItem('planogramData', JSON.stringify({
+      const payload: Record<string, unknown> = {
+        storeId,
+        storeInfo,
         planogramData: planogramData,
-        storeInfo: storeInfo
-      }));
+      };
+      if (editOrderId) payload.editOrderId = editOrderId;
+      sessionStorage.setItem('orderReviewData', JSON.stringify(payload));
     }
-    router.push(`/planogram/${storeId}`);
+    router.push(`/planogram/${storeId}${editOrderId ? `?orderId=${editOrderId}` : ''}`);
   };
 
   return (
@@ -100,12 +233,49 @@ export function OrderReview() {
           </Button>
           <div>
             <h2 className="text-slate-900">{t('order_review')}</h2>
-            <p className="text-xs text-slate-500">{storeId}</p>
+            <p className="text-xs text-slate-500">{storeInfo?.name || storeId}</p>
           </div>
         </div>
       </div>
 
       <div className="px-4 py-4">
+        {/* Selector de tienda (solo en edición) */}
+        {editOrderId && stores.length > 0 && (
+          <Card className="mb-4 border-slate-200 overflow-visible shadow-sm">
+            <CardContent className="p-4 overflow-visible">
+              <label className="flex items-center gap-2 mb-2 text-sm font-medium text-slate-700">
+                <StoreIcon className="h-4 w-4 text-slate-500" />
+                {t('store')}
+              </label>
+              <div className="relative z-[1]">
+                <Select value={storeId} onValueChange={handleStoreChange}>
+                  <SelectTrigger className="h-11 w-full rounded-lg border-slate-200 bg-white shadow-sm hover:bg-slate-50 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 text-slate-900">
+                    <SelectValue placeholder={t('select_store')} />
+                  </SelectTrigger>
+                  <SelectContent
+                    className="z-[100] min-w-[var(--radix-select-trigger-width)] max-h-[280px] rounded-lg border-slate-200 bg-white shadow-lg py-1"
+                    position="popper"
+                    sideOffset={4}
+                  >
+                    {stores.map((store) => (
+                      <SelectItem
+                        key={store.id}
+                        value={store.id}
+                        className="py-2.5 pl-3 pr-9 cursor-pointer rounded-md mx-1 text-left focus:bg-slate-100 data-[highlighted]:bg-slate-100"
+                      >
+                        {store.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              {storeInfo?.address && (
+                <p className="text-xs text-slate-500 mt-2 pl-0.5">{storeInfo.address}</p>
+              )}
+            </CardContent>
+          </Card>
+        )}
+
         {/* Summary Cards */}
         <div className="grid grid-cols-3 gap-3 mb-4">
           <Card className="border-slate-200">
@@ -166,6 +336,12 @@ export function OrderReview() {
           </div>
         </Card>
 
+        {sendError && (
+          <div className="mb-4 p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">
+            {sendError}
+          </div>
+        )}
+
         {/* Total Card */}
         <Card className="border-green-200 bg-green-50 mb-20">
           <CardContent className="p-4">
@@ -175,13 +351,13 @@ export function OrderReview() {
                 <span className="text-slate-900">${totalAmount.toFixed(2)}</span>
               </div>
               <div className="flex items-center justify-between text-sm">
-                <span className="text-slate-700">{t('tax')} (8.5%)</span>
-                <span className="text-slate-900">${(totalAmount * 0.085).toFixed(2)}</span>
+                <span className="text-slate-700">{t('tax')}</span>
+                <span className="text-slate-900">$0.00</span>
               </div>
               <Separator />
               <div className="flex items-center justify-between">
                 <span className="text-slate-900">{t('total')}</span>
-                <span className="text-xl text-green-900">${(totalAmount * 1.085).toFixed(2)}</span>
+                <span className="text-xl text-green-900">${totalAmount.toFixed(2)}</span>
               </div>
             </div>
           </CardContent>
@@ -201,10 +377,17 @@ export function OrderReview() {
           </Button>
           <Button
             onClick={handleSendOrder}
+            disabled={sending || orderItems.length === 0}
             className="flex-1 bg-blue-600 hover:bg-blue-700"
           >
-            <Send className="h-4 w-4 mr-2" />
-            {t('send_order')}
+            {sending ? (
+              <span className="flex items-center gap-2">{t('loading')}...</span>
+            ) : (
+              <>
+                <Send className="h-4 w-4 mr-2" />
+                {editOrderId ? t('save_changes') : t('send_order')}
+              </>
+            )}
           </Button>
         </div>
       </div>

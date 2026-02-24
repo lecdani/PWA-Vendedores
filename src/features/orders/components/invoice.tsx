@@ -13,112 +13,108 @@ interface InvoiceItem {
 interface InvoiceProps {
   invoiceNumber: string;
   date: string;
-  vendorNumber: string;
+  vendorName: string;
   storeName: string;
   storeAddress: string;
   items: InvoiceItem[];
   comments?: string;
 }
 
-export function Invoice({ 
-  invoiceNumber, 
-  date, 
-  vendorNumber, 
-  storeName, 
+export function Invoice({
+  invoiceNumber,
+  date,
+  vendorName,
+  storeName,
   storeAddress,
   items,
-  comments 
+  comments,
 }: InvoiceProps) {
   const { t } = useLanguage();
-
   const totalPcs = items.reduce((sum, item) => sum + item.qty, 0);
   const totalAmount = items.reduce((sum, item) => sum + item.amount, 0);
+  const addressOnly = (storeAddress || '').replace(/,?\s*[0-9a-f-]{36}\s*$/i, '').replace(/,?\s*\d+\s*$/, '').trim();
 
   return (
-    <div className="bg-white p-6 max-w-4xl mx-auto" id="invoice-print">
-      {/* Header */}
-      <div className="border-2 border-black mb-4">
-        <div className="grid grid-cols-2 border-b-2 border-black">
-          <div className="p-3 border-r-2 border-black">
-            <h1 className="text-lg tracking-wide mb-2">ETERNAL COSMETICS, LLC</h1>
-            <p className="text-xs">7NW 84TH ST, MIAMI, FL 33166, PHONE: (305) 12345678</p>
-            <p className="text-xs mt-1">STORE:</p>
-          </div>
-          <div className="p-3">
-            <div className="flex items-center gap-2 mb-2">
-              <div className="w-12 h-12 flex items-center justify-center">
-                <div className="text-3xl">∞</div>
-              </div>
+    <div className="bg-white text-slate-800 max-w-3xl mx-auto shadow-sm print:shadow-none" id="invoice-print">
+      <div className="p-8 md:p-12">
+        <div className="border-b-2 border-slate-800 pb-5 mb-6">
+          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
+            <div>
+              <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-[0.2em] mb-1">Eternal Cosmetics</p>
+              <h1 className="text-2xl font-bold text-slate-900 tracking-tight">ETERNAL COSMETICS, LLC</h1>
+              <p className="text-sm text-slate-600 mt-2">7NW 84TH ST, MIAMI, FL 33166</p>
+              <p className="text-sm text-slate-600">TEL: (305) 12345678</p>
             </div>
-            <div className="border border-black p-1 mb-2">
-              <div className="text-xs">INVOICE #: {invoiceNumber}</div>
-            </div>
-            <div className="border border-black p-1">
-              <div className="text-xs">DATE: {date}</div>
+            <div className="text-right sm:text-right">
+              <div className="inline-block px-3 py-1 bg-slate-900 text-white text-xs font-semibold uppercase tracking-wider rounded-sm">{t('invoice_label')}</div>
+              <p className="text-sm font-medium text-slate-900 mt-3">{invoiceNumber || '—'}</p>
+              <p className="text-sm text-slate-600">{t('invoice_date')}: {date}</p>
             </div>
           </div>
         </div>
 
-        <div className="grid grid-cols-2 border-b-2 border-black">
-          <div className="p-3 border-r-2 border-black">
-            <p className="text-xs mb-1">ADDRESS:</p>
-            <p className="text-xs">{storeName}</p>
-            <p className="text-xs">{storeAddress}</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-8 mb-8">
+          <div>
+            <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider mb-2">{t('invoice_client_store')}</p>
+            <p className="text-sm font-semibold text-slate-900">{storeName || '—'}</p>
+            <p className="text-sm text-slate-600 mt-1 leading-relaxed">{addressOnly || '—'}</p>
           </div>
-          <div className="p-3">
-            <div className="border border-black p-1">
-              <div className="text-xs">VENDOR Nº:</div>
-              <div className="text-xs text-right pr-2">{vendorNumber}</div>
-            </div>
+          <div>
+            <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider mb-2">{t('invoice_vendor')}</p>
+            <p className="text-sm font-semibold text-slate-900">{vendorName || '—'}</p>
           </div>
         </div>
 
-        {/* Table Header */}
-        <div className="grid grid-cols-12 border-b-2 border-black bg-white text-xs">
-          <div className="col-span-1 p-2 border-r border-black text-center">QTY</div>
-          <div className="col-span-2 p-2 border-r border-black text-center">CODE</div>
-          <div className="col-span-5 p-2 border-r border-black text-center">DESCRIPTION</div>
-          <div className="col-span-2 p-2 border-r border-black text-center">PRICE</div>
-          <div className="col-span-2 p-2 text-center">AMOUNT</div>
+        <div className="overflow-hidden border border-slate-200">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-slate-800 text-white">
+                <th className="text-left py-3 px-4 font-semibold w-14 text-center">{t('invoice_qty')}</th>
+                <th className="text-left py-3 px-4 font-semibold">{t('invoice_description')}</th>
+                <th className="text-right py-3 px-4 font-semibold w-24">{t('invoice_unit_price')}</th>
+                <th className="text-right py-3 px-4 font-semibold w-28">{t('invoice_amount')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((item, index) => (
+                <tr key={index} className="border-b border-slate-100 last:border-0 hover:bg-slate-50/50">
+                  <td className="py-3 px-4 text-center text-slate-700">{item.qty}</td>
+                  <td className="py-3 px-4 text-slate-900">{item.description || '—'}</td>
+                  <td className="py-3 px-4 text-right text-slate-700">${Number(item.price).toFixed(2)}</td>
+                  <td className="py-3 px-4 text-right font-medium text-slate-900">${Number(item.amount).toFixed(2)}</td>
+                </tr>
+              ))}
+              {items.length === 0 && (
+                <tr>
+                  <td colSpan={4} className="py-8 px-4 text-center text-slate-400 text-sm">{t('invoice_no_items')}</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
 
-        {/* Items */}
-        <div className="min-h-[300px]">
-          {items.map((item, index) => (
-            <div key={index} className="grid grid-cols-12 border-b border-black text-xs">
-              <div className="col-span-1 p-2 border-r border-black text-center">{item.qty}</div>
-              <div className="col-span-2 p-2 border-r border-black">{item.code}</div>
-              <div className="col-span-5 p-2 border-r border-black">{item.description}</div>
-              <div className="col-span-2 p-2 border-r border-black text-right">${item.price.toFixed(2)}</div>
-              <div className="col-span-2 p-2 text-right">${item.amount.toFixed(2)}</div>
+        <div className="flex justify-end mt-8">
+          <div className="w-64 border-t-2 border-slate-200 pt-4">
+            <div className="flex justify-between text-sm mb-1">
+              <span className="text-slate-600">{t('invoice_total_units')}</span>
+              <span className="font-medium text-slate-800">{totalPcs}</span>
             </div>
-          ))}
-          
-          {/* Empty rows to fill space */}
-          {Array.from({ length: Math.max(0, 8 - items.length) }).map((_, index) => (
-            <div key={`empty-${index}`} className="grid grid-cols-12 border-b border-black text-xs h-8">
-              <div className="col-span-1 p-2 border-r border-black"></div>
-              <div className="col-span-2 p-2 border-r border-black"></div>
-              <div className="col-span-5 p-2 border-r border-black"></div>
-              <div className="col-span-2 p-2 border-r border-black"></div>
-              <div className="col-span-2 p-2"></div>
+            <div className="flex justify-between text-lg font-bold text-slate-900 mt-3 pt-2 border-t border-slate-100">
+              <span>{t('invoice_total')}</span>
+              <span>${totalAmount.toFixed(2)}</span>
             </div>
-          ))}
+          </div>
         </div>
 
-        {/* Totals */}
-        <div className="grid grid-cols-12 border-b-2 border-black text-xs">
-          <div className="col-span-1 p-2 border-r-2 border-black"></div>
-          <div className="col-span-2 p-2 border-r-2 border-black">TOTAL PCS</div>
-          <div className="col-span-5 p-2 border-r-2 border-black text-center">{totalPcs}</div>
-          <div className="col-span-2 p-2 border-r-2 border-black text-right">TOTAL:</div>
-          <div className="col-span-2 p-2 text-right">${totalAmount.toFixed(2)}</div>
-        </div>
+        {comments && (
+          <div className="mt-8 pt-6 border-t border-slate-200">
+            <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider mb-2">{t('invoice_observations')}</p>
+            <p className="text-sm text-slate-700">{comments}</p>
+          </div>
+        )}
 
-        {/* Comments */}
-        <div className="p-3">
-          <p className="text-xs mb-2">COMMENTS:</p>
-          <p className="text-xs min-h-[60px]">{comments || ''}</p>
+        <div className="mt-10 pt-4 border-t border-slate-100 text-center">
+          <p className="text-[10px] text-slate-400 uppercase tracking-wider">{t('invoice_footer')}</p>
         </div>
       </div>
     </div>

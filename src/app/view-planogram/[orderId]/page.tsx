@@ -2,11 +2,16 @@ import { MainLayout } from '@/shared/layout/main-layout';
 import { ViewPlanogram } from '@/features/planogram/components/view-planogram';
 import { ProtectedRoute } from '@/shared/auth/protected-route';
 
-export default function ViewPlanogramPage({ params }: { params: { orderId: string } }) {
+export default async function ViewPlanogramPage({
+  params,
+}: {
+  params: Promise<{ orderId: string }>;
+}) {
+  const { orderId } = await params;
   return (
     <ProtectedRoute>
       <MainLayout>
-        <ViewPlanogram orderId={params.orderId} />
+        <ViewPlanogram orderId={orderId} />
       </MainLayout>
     </ProtectedRoute>
   );

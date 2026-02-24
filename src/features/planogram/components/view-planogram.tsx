@@ -2,11 +2,14 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { ArrowLeft, Grid3x3, Package } from 'lucide-react';
+import { ArrowLeft, Grid3x3, Loader2 } from 'lucide-react';
 import { useLanguage } from '@/shared/i18n/language-provider';
+import { ordersApi, OrderForUI } from '@/shared/api/orders-api';
+import { planogramsApi } from '@/shared/api/planograms-api';
+import { distributionsApi } from '@/shared/api/distributions-api';
+import { productsApi } from '@/shared/api/products-api';
 import { Button } from '@/shared/ui/button';
 import { Badge } from '@/shared/ui/badge';
-import { Card } from '@/shared/ui/card';
 
 interface ProductPosition {
   row: number;
@@ -21,113 +24,134 @@ interface ProductPosition {
 export function ViewPlanogram({ orderId }: { orderId: string }) {
   const { t } = useLanguage();
   const router = useRouter();
-  const [order, setOrder] = useState<any>(null);
+  const [order, setOrder] = useState<OrderForUI | null>(null);
+  const [grid, setGrid] = useState<ProductPosition[]>([]);
+  const [planogramName, setPlanogramName] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      // Obtener el pedido desde localStorage
-      const orders = JSON.parse(localStorage.getItem('orders') || '[]');
-      const foundOrder = orders.find((o: any) => o.id === orderId);
-      setOrder(foundOrder || null);
-    }
+    let mounted = true;
+
+    (async () => {
+      setLoading(true);
+      const apiOrder = await ordersApi.getOrderById(orderId);
+      if (!mounted || !apiOrder) {
+        if (mounted) {
+          setOrder(apiOrder || null);
+          setLoading(false);
+        }
+        return;
+      }
+      setOrder(apiOrder);
+
+      const activePlan = await planogramsApi.getActive();
+      if (!mounted || !activePlan) {
+        setGrid([]);
+        setLoading(false);
+        return;
+      }
+      setPlanogramName(activePlan.name ?? null);
+
+      const distList = await distributionsApi.getByPlanogram(activePlan.id);
+      if (!mounted) return;
+
+      const products = await productsApi.fetchAll();
+      const productMap = new Map(products.map((p) => [p.id, p]));
+      products.forEach((p) => {
+        const numId = Number(p.id);
+        if (!Number.isNaN(numId)) productMap.set(String(numId), p);
+      });
+      const getProduct = (id: string) => productMap.get(id) ?? productMap.get(String(Number(id)));
+
+      const orderItemsByProductId = new Map<string, { productName: string; sku: string; quantity: number; price: number }>();
+      for (const item of apiOrder.items) {
+        const id = String(item.productId ?? item.ProductId ?? '');
+        if (id) {
+          let price = Number(item.price) || 0;
+          if (!price) {
+            const { histpricesApi } = await import('@/shared/api/histprices-api');
+            price = await histpricesApi.getLatest(id);
+          }
+          orderItemsByProductId.set(id, {
+            productName: (item.productName || item.sku || getProduct(id)?.name || '').trim(),
+            sku: item.sku || getProduct(id)?.sku || '',
+            quantity: item.toOrder ?? item.quantity ?? 0,
+            price,
+          });
+        }
+      }
+
+      const planogramGrid: ProductPosition[] = [];
+      for (let row = 0; row < 10; row++) {
+        for (let col = 0; col < 10; col++) {
+          const dist = distList.find((d) => d.xPosition === row && d.yPosition === col);
+          const product = dist ? getProduct(dist.productId) : null;
+          const orderItem = product ? orderItemsByProductId.get(product.id) ?? orderItemsByProductId.get(String(Number(product.id))) : null;
+          planogramGrid.push({
+            row,
+            col,
+            productId: product?.id ?? '',
+            productName: orderItem?.productName ?? product?.name ?? product?.sku ?? '',
+            sku: orderItem?.sku ?? product?.sku ?? '',
+            toOrder: orderItem?.quantity ?? 0,
+            price: orderItem?.price ?? product?.currentPrice ?? 0,
+          });
+        }
+      }
+      if (mounted) setGrid(planogramGrid);
+      setLoading(false);
+    })();
+
+    return () => { mounted = false; };
   }, [orderId]);
 
-  if (!order) {
+  if (loading || !order) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
-        <div className="text-center">
-          <p className="text-slate-600 mb-4">{t('no_orders_found')}</p>
-          <Button onClick={() => router.push('/history')}>
-            {t('order_history')}
-          </Button>
-        </div>
+        {loading ? (
+          <div className="flex flex-col items-center gap-3">
+            <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
+            <p className="text-sm text-slate-600">{t('loading')}...</p>
+          </div>
+        ) : (
+          <div className="text-center">
+            <p className="text-slate-600 mb-4">{t('no_orders_found')}</p>
+            <Button onClick={() => router.push('/history')}>{t('order_history')}</Button>
+          </div>
+        )}
       </div>
     );
   }
 
-  // Crear un grid 10x10 y mapear los productos del pedido
-  const createPlanogramGrid = (): ProductPosition[][] => {
-    const grid: ProductPosition[][] = [];
-    
-    // Inicializar grid 10x10 vacío
-    for (let row = 0; row < 10; row++) {
-      grid[row] = [];
-      for (let col = 0; col < 10; col++) {
-        grid[row][col] = {
-          row,
-          col,
-          productId: '',
-          productName: '',
-          sku: '',
-          toOrder: 0,
-          price: 0
-        };
-      }
-    }
+  const totalToOrder = grid.reduce((s, i) => s + i.toOrder, 0);
+  const totalValue = grid.reduce((s, i) => s + i.toOrder * i.price, 0);
+  const productsWithQty = grid.filter((i) => i.productId && i.toOrder > 0).length;
 
-    // Llenar con los productos del pedido
-    order.items.forEach((item: any) => {
-      const row = item.row;
-      const col = item.col;
-      if (row >= 0 && row < 10 && col >= 0 && col < 10) {
-        grid[row][col] = {
-          row,
-          col,
-          productId: item.productId,
-          productName: item.productName,
-          sku: item.sku,
-          toOrder: item.toOrder || item.quantity || 0,
-          price: item.price
-        };
-      }
-    });
-
-    return grid;
-  };
-
-  const planogramGrid = createPlanogramGrid();
-  const flatGrid = planogramGrid.flat();
-  
-  const totalToOrder = order.items.reduce((sum: number, item: any) => sum + (item.toOrder || item.quantity || 0), 0);
-  const totalValue = order.total;
-  const uniqueProducts = order.items.length;
-
-  const getCellColor = (toOrder: number) => {
-    if (toOrder === 0) return 'bg-slate-100 border-slate-200';
-    if (toOrder > 0) return 'bg-blue-50 border-blue-300';
+  const getCellStyle = (item: ProductPosition) => {
+    if (!item.productId) return 'bg-slate-400 border-slate-500';
+    if (item.toOrder > 0) return 'bg-blue-50 border-blue-300';
     return 'bg-slate-100 border-slate-200';
   };
 
   return (
     <div className="min-h-screen bg-slate-50">
-      {/* Header */}
       <div className="bg-white border-b border-slate-200 px-4 py-3 sticky top-0 z-10">
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-3">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => router.push(`/order/${orderId}`)}
-              className="p-2 h-auto"
-            >
+            <Button variant="ghost" size="sm" onClick={() => router.push(`/order/${orderId}`)} className="p-2 h-auto">
               <ArrowLeft className="h-5 w-5" />
             </Button>
             <div>
-              <h2 className="text-slate-900 text-sm">{t('planogram')}</h2>
-              <p className="text-xs text-slate-500">{order.id}</p>
+              <h2 className="text-slate-900 text-sm">{planogramName ?? t('planogram')}</h2>
+              <p className="text-xs text-slate-500">{order.storeName}</p>
             </div>
           </div>
-          
-          <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200">
-            {t('view_only')}
-          </Badge>
+          <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200">{t('view_only')}</Badge>
         </div>
-
-        {/* Stats Row */}
         <div className="grid grid-cols-3 gap-2">
           <div className="bg-slate-50 rounded-lg p-2 text-center">
             <p className="text-xs text-slate-500 mb-0.5">{t('products')}</p>
-            <p className="text-sm text-slate-900">{uniqueProducts}</p>
+            <p className="text-sm text-slate-900">{productsWithQty}</p>
           </div>
           <div className="bg-blue-50 rounded-lg p-2 text-center">
             <p className="text-xs text-blue-600 mb-0.5">{t('units')}</p>
@@ -140,82 +164,34 @@ export function ViewPlanogram({ orderId }: { orderId: string }) {
         </div>
       </div>
 
-      {/* Planogram Grid */}
       <div className="px-4 py-4">
-        <div className="flex items-center gap-2 mb-3">
-          <Grid3x3 className="h-4 w-4 text-slate-600" />
-          <p className="text-sm text-slate-600">{t('planogram_view_only')}</p>
-        </div>
-
-        {/* 10x10 Grid */}
-        <div className="bg-white rounded-lg p-2 shadow-sm border border-slate-200 overflow-x-auto">
-          <div className="grid grid-cols-10 gap-1 min-w-[600px]">
-            {flatGrid.map((item) => (
+        <p className="text-sm text-slate-600 mb-3">{t('planogram_view_only')}</p>
+        <div className="bg-white rounded-xl p-3 shadow-sm border border-slate-200 overflow-x-auto">
+          <div className="grid grid-cols-10 gap-1.5 min-w-[320px] max-w-2xl mx-auto">
+            {grid.map((item) => (
               <div
                 key={`${item.row}-${item.col}`}
-                className={`aspect-square rounded border-2 ${getCellColor(item.toOrder)} relative`}
+                className={`aspect-square rounded-lg border ${getCellStyle(item)} flex flex-col items-center justify-center p-1 text-center min-h-0`}
               >
-                {/* Row/Col indicator */}
-                <div className="absolute top-0 left-0 text-[8px] text-slate-400 px-0.5">
-                  {item.row},{item.col}
-                </div>
-                
-                {/* Product indicator */}
-                {item.toOrder > 0 && (
-                  <div className="absolute inset-0 flex items-center justify-center">
-                    <div className="text-xs font-semibold text-blue-900">
-                      {item.toOrder}
-                    </div>
-                  </div>
-                )}
+                {item.productId ? (
+                  <>
+                    <span className="text-[9px] leading-tight font-medium text-slate-800 break-words line-clamp-2 w-full" title={item.productName || item.sku}>
+                      {item.productName || item.sku}
+                    </span>
+                    <span className="text-[9px] text-slate-600 mt-0.5">${(item.price || 0).toFixed(2)}</span>
+                    {item.toOrder > 0 && (
+                      <span className="text-xs font-semibold text-blue-700 mt-0.5">{item.toOrder} u</span>
+                    )}
+                  </>
+                ) : null}
               </div>
             ))}
           </div>
         </div>
-
-        {/* Legend */}
-        <div className="mt-4 flex flex-wrap gap-3 text-xs">
-          <div className="flex items-center gap-1.5">
-            <div className="w-4 h-4 rounded bg-slate-100 border-2 border-slate-200"></div>
-            <span className="text-slate-600">{t('no_quantity')}</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <div className="w-4 h-4 rounded bg-blue-50 border-2 border-blue-300"></div>
-            <span className="text-slate-600">{t('with_quantity')}</span>
-          </div>
+        <div className="mt-4 flex flex-wrap gap-4 text-xs text-slate-500">
+          <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-slate-400" />{t('no_quantity')}</span>
+          <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-blue-50 border border-blue-300" />{t('with_quantity')}</span>
         </div>
-
-        {/* Products List */}
-        <Card className="mt-4 border-slate-200">
-          <div className="p-4 border-b border-slate-100">
-            <h3 className="text-slate-900 text-sm">{t('order_items')}</h3>
-          </div>
-          <div className="divide-y divide-slate-100">
-            {order.items.map((item: any, index: number) => {
-              const quantity = item.toOrder || item.quantity || 0;
-              return (
-                <div key={index} className="p-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex-1">
-                      <p className="text-sm text-slate-900 mb-0.5">{item.productName}</p>
-                      <div className="flex items-center gap-2 text-xs text-slate-500">
-                        <span>{item.sku}</span>
-                        <span>•</span>
-                        <span>Pos: {item.row},{item.col}</span>
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200 text-xs mb-1">
-                        {quantity} {t('units')}
-                      </Badge>
-                      <p className="text-xs text-slate-900">${(quantity * item.price).toFixed(2)}</p>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </Card>
       </div>
     </div>
   );

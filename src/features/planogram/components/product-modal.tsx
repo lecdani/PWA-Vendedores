@@ -65,67 +65,77 @@ export function ProductModal({ open, onClose, position, onUpdate }: ProductModal
                 <Package className="h-5 w-5 text-blue-600" />
               </div>
               <div className="flex-1">
-                <p className="text-sm text-slate-900 mb-1">{position.productName}</p>
-                <p className="text-xs text-slate-600 mb-2">{position.sku}</p>
-                <div className="flex items-center gap-4 text-xs">
-                  <div>
-                    <span className="text-slate-500">{t('price')}: </span>
-                    <span className="text-slate-900">${position.price}</span>
-                  </div>
-                </div>
+                {position.productId ? (
+                  <>
+                    <p className="text-sm text-slate-900 mb-1">{position.productName || position.sku}</p>
+                    <p className="text-xs text-slate-600 mb-2">{position.sku}</p>
+                    <div className="flex items-center gap-4 text-xs">
+                      <div>
+                        <span className="text-slate-500">{t('price')}: </span>
+                        <span className="text-slate-900">${position.price}</span>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <p className="text-sm text-amber-800">{t('position_without_product')}</p>
+                )}
               </div>
             </div>
           </div>
 
-          {/* Quantity Input */}
-          <div>
-            <Label className="text-sm text-slate-700 mb-2">{t('quantity_to_order')}</Label>
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setToOrder(Math.max(0, toOrder - 1))}
-                className="h-10 w-10 p-0"
-              >
-                <Minus className="h-4 w-4" />
-              </Button>
-              <Input
-                type="number"
-                value={toOrder}
-                onChange={(e) => {
-                  const val = parseInt(e.target.value) || 0;
-                  setToOrder(Math.max(0, val));
-                }}
-                className="text-center h-10 bg-blue-50 border-blue-200"
-                min="0"
-              />
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setToOrder(toOrder + 1)}
-                className="h-10 w-10 p-0"
-              >
-                <Plus className="h-4 w-4" />
-              </Button>
-            </div>
-          </div>
-
-          {/* Subtotal */}
-          <div className="bg-green-50 rounded-lg p-3 border border-green-200">
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-green-700">{t('subtotal')}</span>
-              <span className="text-lg text-green-900">${(toOrder * position.price).toFixed(2)}</span>
-            </div>
-          </div>
+          {/* Quantity Input y Subtotal - solo si hay producto */}
+          {position.productId && (
+            <>
+              <div>
+                <Label className="text-sm text-slate-700 mb-2 block">{t('quantity_to_order')}</Label>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setToOrder(Math.max(0, toOrder - 1))}
+                    className="h-10 w-10 p-0"
+                  >
+                    <Minus className="h-4 w-4" />
+                  </Button>
+                  <Input
+                    type="number"
+                    value={toOrder}
+                    onChange={(e) => {
+                      const val = parseInt(e.target.value) || 0;
+                      setToOrder(Math.max(0, val));
+                    }}
+                    className="text-center h-10 bg-blue-50 border-blue-200"
+                    min="0"
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setToOrder(toOrder + 1)}
+                    className="h-10 w-10 p-0"
+                  >
+                    <Plus className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+              <div className="bg-green-50 rounded-lg p-3 border border-green-200">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-green-700">{t('subtotal')}</span>
+                  <span className="text-lg text-green-900">${(toOrder * position.price).toFixed(2)}</span>
+                </div>
+              </div>
+            </>
+          )}
 
           {/* Action Buttons */}
           <div className="flex gap-3 pt-2">
             <Button variant="outline" onClick={onClose} className="flex-1">
               {t('cancel')}
             </Button>
-            <Button onClick={handleSave} className="flex-1 bg-blue-600 hover:bg-blue-700">
-              {t('save')}
-            </Button>
+            {position.productId && (
+              <Button onClick={handleSave} className="flex-1 bg-blue-600 hover:bg-blue-700">
+                {t('save')}
+              </Button>
+            )}
           </div>
         </div>
       </div>

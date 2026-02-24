@@ -1,10 +1,9 @@
 'use client';
 
 import { usePathname, useRouter } from 'next/navigation';
-import { Home, ShoppingCart, BarChart3, User, Bell, LogOut } from 'lucide-react';
+import { Home, ShoppingCart, BarChart3, User, LogOut } from 'lucide-react';
 import { LanguageSelector } from '@/shared/i18n/language-selector';
 import { useLanguage } from '@/shared/i18n/language-provider';
-import { Badge } from '@/shared/ui/badge';
 import { useAuth } from '@/shared/auth/auth-provider';
 
 export function MainLayout({ children }: { children: React.ReactNode }) {
@@ -28,7 +27,7 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
     { id: 'orders', label: t('orders'), icon: ShoppingCart, path: '/history', action: null },
     { id: 'pod', label: t('pod'), icon: BarChart3, path: '/pending-pod', action: null },
     { id: 'profile', label: t('profile'), icon: User, path: '/profile', action: null },
-    { id: 'logout', label: 'Salir', icon: LogOut, path: null, action: logout },
+    { id: 'logout', label: t('logout'), icon: LogOut, path: null, action: logout },
   ];
 
   const handleNavClick = (item: typeof menuItems[0]) => {
@@ -58,12 +57,6 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
             </div>
             
             <div className="flex items-center gap-2">
-              <button className="relative p-2 hover:bg-slate-100 rounded-lg transition-colors">
-                <Bell className="h-5 w-5 text-slate-600" />
-                <span className="absolute -top-1 -right-1 h-5 w-5 flex items-center justify-center rounded-full bg-red-500 text-white text-[10px] font-semibold">
-                  2
-                </span>
-              </button>
               <LanguageSelector />
             </div>
           </div>

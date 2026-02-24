@@ -2,13 +2,18 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { ArrowLeft, Send, Grid3x3 } from 'lucide-react';
+import { ArrowLeft, Send, Grid3x3, Loader2 } from 'lucide-react';
 import { useLanguage } from '@/shared/i18n/language-provider';
 import { Button } from '@/shared/ui/button';
 import { Badge } from '@/shared/ui/badge';
 import { ProductModal } from './product-modal';
+import { planogramsApi } from '@/shared/api/planograms-api';
+import { distributionsApi } from '@/shared/api/distributions-api';
+import { productsApi } from '@/shared/api/products-api';
+import { histpricesApi } from '@/shared/api/histprices-api';
+import { ordersApi } from '@/shared/api/orders-api';
 
-interface ProductPosition {
+export interface ProductPosition {
   row: number;
   col: number;
   productId: string;
@@ -20,67 +25,119 @@ interface ProductPosition {
   price: number;
 }
 
-export function Planogram({ storeId }: { storeId: string }) {
+export function Planogram({ storeId, orderId }: { storeId: string; orderId?: string }) {
   const { t } = useLanguage();
   const router = useRouter();
   const [selectedPosition, setSelectedPosition] = useState<ProductPosition | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [storeInfo, setStoreInfo] = useState<any>(null);
-
-  // Mock planogram data 10x10
-  const [planogramData, setPlanogramData] = useState<ProductPosition[]>(() => {
-    const data: ProductPosition[] = [];
-    const products = [
-      { id: 'LIP-001', name: 'Eternal Matte Lipstick', price: 24.99, ideal: 6 },
-      { id: 'LIP-002', name: 'Velvet Lip Gloss', price: 19.99, ideal: 8 },
-      { id: 'EYE-001', name: 'HD Eyeshadow Palette', price: 45.99, ideal: 4 },
-      { id: 'EYE-002', name: 'Precision Eyeliner', price: 16.99, ideal: 10 },
-      { id: 'FAC-001', name: 'Foundation Perfect Match', price: 38.99, ideal: 5 },
-      { id: 'FAC-002', name: 'HD Powder', price: 28.99, ideal: 6 },
-      { id: 'BLU-001', name: 'Natural Blush', price: 22.99, ideal: 7 },
-      { id: 'MAS-001', name: 'Volume Mascara', price: 21.99, ideal: 9 },
-    ];
-
-    for (let row = 0; row < 10; row++) {
-      for (let col = 0; col < 10; col++) {
-        const product = products[Math.floor(Math.random() * products.length)];
-        data.push({
-          row,
-          col,
-          productId: product.id,
-          productName: product.name,
-          sku: `SKU-${product.id}`,
-          idealStock: product.ideal,
-          currentStock: 0,
-          toOrder: 0,
-          price: product.price
-        });
-      }
-    }
-    return data;
-  });
+  const [planogramData, setPlanogramData] = useState<ProductPosition[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [planogramId, setPlanogramId] = useState<string | null>(null);
+  const [planogramName, setPlanogramName] = useState<string | null>(null);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
-      // Obtener información de la tienda del sessionStorage
-      const storedData = sessionStorage.getItem('storeInfo');
-      if (storedData) {
-        setStoreInfo(JSON.parse(storedData));
-      }
-
-      // Obtener datos del planograma guardados
-      const savedData = sessionStorage.getItem('planogramData');
-      if (savedData) {
-        const data = JSON.parse(savedData);
-        if (data.planogramData) {
-          setPlanogramData(data.planogramData);
-        }
-        if (data.storeInfo) {
-          setStoreInfo(data.storeInfo);
-        }
-      }
+      const stored = sessionStorage.getItem('storeInfo');
+      if (stored) setStoreInfo(JSON.parse(stored));
     }
   }, []);
+
+  useEffect(() => {
+    let mounted = true;
+
+    (async () => {
+      setLoading(true);
+      setLoadError(null);
+      try {
+        const [activePlan, products] = await Promise.all([
+          planogramsApi.getActive(),
+          productsApi.fetchAll(),
+        ]);
+
+        if (!mounted) return;
+        if (!activePlan) {
+          setLoadError(t('no_active_planogram') || 'No hay planograma activo. Activa uno en el Admin.');
+          setPlanogramData([]);
+          setLoading(false);
+          return;
+        }
+
+        setPlanogramId(activePlan.id);
+        setPlanogramName(activePlan.name ?? null);
+        const distList = await distributionsApi.getByPlanogram(activePlan.id);
+        if (!mounted) return;
+
+        const productMap = new Map<string, (typeof products)[0]>();
+        products.forEach((p) => {
+          productMap.set(p.id, p);
+          const numId = Number(p.id);
+          if (!Number.isNaN(numId)) productMap.set(String(numId), p);
+        });
+        const getProduct = (productId: string) =>
+          productMap.get(productId) ?? productMap.get(String(Number(productId)));
+
+        const uniqueProductIds = [...new Set(distList.map((d) => d.productId).filter(Boolean))];
+        const priceResults = await Promise.all(
+          uniqueProductIds.map(async (id) => ({ id, price: await histpricesApi.getLatest(id) }))
+        );
+        const priceMap = new Map(priceResults.map((r) => [r.id, r.price]));
+
+        const grid: ProductPosition[] = [];
+
+        for (let row = 0; row < 10; row++) {
+          for (let col = 0; col < 10; col++) {
+            const dist = distList.find((d) => d.xPosition === row && d.yPosition === col);
+            const product = dist ? getProduct(dist.productId) : null;
+            const productIdStr = product?.id ?? '';
+            const price =
+              productIdStr && priceMap.has(productIdStr)
+                ? priceMap.get(productIdStr)!
+                : product?.currentPrice ?? 0;
+            grid.push({
+              row,
+              col,
+              productId: productIdStr,
+              productName: product?.name ?? '',
+              sku: product?.sku ?? '',
+              idealStock: 0,
+              currentStock: 0,
+              toOrder: 0,
+              price,
+            });
+          }
+        }
+
+        if (orderId && mounted) {
+          const details = await ordersApi.getOrderDetailsByOrderIdRaw(orderId);
+          const qtyByProduct = new Map<string, number>();
+          details.forEach((d: any) => {
+            const pid = String(d?.productId ?? d?.ProductId ?? '');
+            const qty = Number(d?.quantity ?? d?.Quantity ?? 0);
+            if (pid) qtyByProduct.set(pid, (qtyByProduct.get(pid) ?? 0) + qty);
+          });
+          const merged = grid.map((item) => {
+            const qty = item.productId
+              ? (qtyByProduct.get(item.productId) ?? qtyByProduct.get(String(Number(item.productId))) ?? 0)
+              : 0;
+            return { ...item, toOrder: qty };
+          });
+          setPlanogramData(merged);
+        } else {
+          setPlanogramData(grid);
+        }
+      } catch (e) {
+        if (mounted) setLoadError((e as Error)?.message ?? 'Error al cargar planograma');
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    })();
+
+    return () => {
+      mounted = false;
+    };
+  }, [storeId, orderId, t]);
 
   const handleCellClick = (position: ProductPosition) => {
     setSelectedPosition(position);
@@ -102,26 +159,55 @@ export function Planogram({ storeId }: { storeId: string }) {
 
   const totalToOrder = planogramData.reduce((sum, item) => sum + item.toOrder, 0);
   const totalValue = planogramData.reduce((sum, item) => sum + (item.toOrder * item.price), 0);
-  const completedCount = planogramData.filter(item => item.currentStock > 0).length;
-  const progressPercent = Math.round((completedCount / planogramData.length) * 100);
+  const productsCount = planogramData.filter((item) => item.productId).length;
+  const completedCount = planogramData.filter((item) => item.currentStock > 0 || item.toOrder > 0).length;
+  const progressPercent = planogramData.length > 0 ? Math.round((completedCount / planogramData.length) * 100) : 0;
 
-  const getCellColor = (item: ProductPosition) => {
-    if (item.toOrder === 0) return 'bg-slate-100 border-slate-200';
+  const getCellStyle = (item: ProductPosition) => {
+    const hasProduct = !!item.productId;
+    if (!hasProduct) return 'bg-slate-400 border-slate-500'; // vacío: solo más oscuro
     if (item.toOrder > 0) return 'bg-blue-50 border-blue-300';
     return 'bg-slate-100 border-slate-200';
   };
 
   const handleSendOrder = () => {
     if (typeof window !== 'undefined') {
-      // Guardar datos en sessionStorage para OrderReview
-      sessionStorage.setItem('orderReviewData', JSON.stringify({
+      const payload: Record<string, unknown> = {
         storeId,
         storeInfo,
-        planogramData: planogramData
-      }));
+        planogramId: planogramId ?? undefined,
+        planogramData: planogramData,
+      };
+      if (orderId) payload.editOrderId = orderId;
+      sessionStorage.setItem('orderReviewData', JSON.stringify(payload));
     }
     router.push('/order-review');
   };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <div className="flex flex-col items-center gap-3">
+          <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
+          <p className="text-sm text-slate-600">{t('loading')}...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <div className="text-center max-w-sm">
+          <p className="text-red-600 mb-4">{loadError}</p>
+          <Button variant="outline" onClick={() => router.push('/select-store')}>
+            <ArrowLeft className="h-4 w-4 mr-2" />
+            {t('back')}
+          </Button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -138,8 +224,8 @@ export function Planogram({ storeId }: { storeId: string }) {
               <ArrowLeft className="h-5 w-5" />
             </Button>
             <div>
-              <h2 className="text-slate-900 text-sm">{t('product_organization')}</h2>
-              <p className="text-xs text-slate-500">{storeId}</p>
+              <h2 className="text-slate-900 text-sm">{storeInfo?.name ?? t('product_organization')}</h2>
+              <p className="text-xs text-slate-500">{planogramName ?? t('planogram')}</p>
             </div>
           </div>
           
@@ -152,7 +238,7 @@ export function Planogram({ storeId }: { storeId: string }) {
         <div className="grid grid-cols-3 gap-2">
           <div className="bg-slate-50 rounded-lg p-2 text-center">
             <p className="text-xs text-slate-500 mb-0.5">{t('products')}</p>
-            <p className="text-sm text-slate-900">100</p>
+            <p className="text-sm text-slate-900">{productsCount}</p>
           </div>
           <div className="bg-blue-50 rounded-lg p-2 text-center">
             <p className="text-xs text-blue-600 mb-0.5">{t('units')}</p>
@@ -172,43 +258,52 @@ export function Planogram({ storeId }: { storeId: string }) {
           <p className="text-sm text-slate-600">{t('tap_position_to_count')}</p>
         </div>
 
+        {productsCount === 0 && (
+          <div className="mb-4 p-4 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-sm">
+            {t('no_products_in_planogram')}
+          </div>
+        )}
+
+        {productsCount > 0 && (
+          <p className="text-xs text-slate-500 mb-2">{t('planogram_loaded')}</p>
+        )}
+
         {/* 10x10 Grid */}
-        <div className="bg-white rounded-lg p-2 shadow-sm border border-slate-200 overflow-x-auto">
-          <div className="grid grid-cols-10 gap-1 min-w-[600px]">
+        <div className="bg-white rounded-xl p-3 shadow-sm border border-slate-200 overflow-x-auto">
+          <div className="grid grid-cols-10 gap-1.5 min-w-[320px] max-w-2xl mx-auto">
             {planogramData.map((item) => (
               <button
                 key={`${item.row}-${item.col}`}
                 onClick={() => handleCellClick(item)}
-                className={`aspect-square rounded border-2 ${getCellColor(item)} hover:scale-105 transition-transform relative`}
+                className={`aspect-square rounded-lg border ${getCellStyle(item)} hover:opacity-90 transition-opacity relative flex flex-col items-center justify-center p-1 text-center min-h-0`}
               >
-                {/* Row/Col indicator */}
-                <div className="absolute top-0 left-0 text-[8px] text-slate-400 px-0.5">
-                  {item.row},{item.col}
-                </div>
-                
-                {/* Product indicator */}
-                {item.toOrder > 0 && (
-                  <div className="absolute inset-0 flex items-center justify-center">
-                    <div className="text-xs font-semibold">
-                      {item.toOrder}
-                    </div>
-                  </div>
-                )}
+                {item.productId ? (
+                  <>
+                    <span className="text-[10px] leading-tight font-medium text-slate-800 break-words line-clamp-2 w-full" title={item.productName || item.sku}>
+                      {item.productName || item.sku}
+                    </span>
+                    {item.toOrder > 0 && (
+                      <span className="text-xs font-semibold text-blue-700 mt-0.5">
+                        {item.toOrder}
+                      </span>
+                    )}
+                  </>
+                ) : null}
               </button>
             ))}
           </div>
         </div>
 
         {/* Legend */}
-        <div className="mt-4 flex flex-wrap gap-3 text-xs">
-          <div className="flex items-center gap-1.5">
-            <div className="w-4 h-4 rounded bg-slate-100 border-2 border-slate-200"></div>
-            <span className="text-slate-600">{t('no_quantity')}</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <div className="w-4 h-4 rounded bg-blue-50 border-2 border-blue-300"></div>
-            <span className="text-slate-600">{t('with_quantity')}</span>
-          </div>
+        <div className="mt-4 flex flex-wrap gap-4 text-xs text-slate-500">
+          <span className="flex items-center gap-1.5">
+            <span className="w-3 h-3 rounded bg-slate-400" />
+            {t('no_quantity')}
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="w-3 h-3 rounded bg-blue-50 border border-blue-300" />
+            {t('with_quantity')}
+          </span>
         </div>
       </div>
 
