@@ -4,11 +4,11 @@ import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { ArrowLeft, Download, FileText, TrendingUp, Package, DollarSign, Store as StoreIcon, MapPin } from 'lucide-react';
 import { useLanguage } from '@/shared/i18n/language-provider';
+import { histpricesApi } from '@/shared/api/histprices-api';
+import { productsApi } from '@/shared/api/products-api';
 import { useAuth } from '@/shared/auth/auth-provider';
 import { ordersApi, OrderForUI } from '@/shared/api/orders-api';
 import { storesApi } from '@/shared/api/stores-api';
-import { histpricesApi } from '@/shared/api/histprices-api';
-import { productsApi } from '@/shared/api/products-api';
 import { Button } from '@/shared/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/shared/ui/card';
 import { Badge } from '@/shared/ui/badge';
@@ -86,6 +86,7 @@ export function SalesReport() {
 
       if (!mounted) return;
 
+      // Enriquecer pedidos con precios e información de producto cuando falten
       const productNameCache = new Map<string, { name: string; sku: string }>();
       const resolveProductName = async (productId: string, currentName: string, currentSku: string) => {
         if (!productId) return { name: currentName, sku: currentSku };
@@ -102,40 +103,47 @@ export function SalesReport() {
         return cached;
       };
 
-      let enriched = await Promise.all(
+      let enriched: OrderForUI[] = await Promise.all(
         apiOrders.map(async (order): Promise<OrderForUI> => {
-          let o = order;
-          const items = order.items?.length
-            ? await Promise.all(
-                order.items.map(async (item: any) => {
-                  let price = Number(item.price) || 0;
-                  if (item.productId && !price) {
-                    price = await histpricesApi.getLatest(String(item.productId));
-                  }
-                  const resolved = await resolveProductName(
-                    String(item?.productId ?? item?.ProductId ?? ''),
-                    String(item?.productName ?? item?.ProductName ?? item?.description ?? '').trim(),
-                    String(item?.sku ?? item?.Sku ?? '').trim()
-                  );
-                  return {
-                    ...item,
-                    price,
-                    productName: resolved.name || (item?.productName ?? item?.ProductName ?? ''),
-                    sku: resolved.sku || (item?.sku ?? item?.Sku ?? ''),
-                  };
-                })
-              )
-            : order.items ?? [];
-          if (order.items?.length && (Number(order.total) <= 0 || !o.subtotal)) {
-            const subtotal = items.reduce((s, i) => s + (i.quantity ?? i.toOrder ?? 0) * (i.price ?? 0), 0);
-            const total = subtotal + Number(order.tax ?? 0);
-            if (total > 0) o = { ...order, items, subtotal, total };
-          } else if (items !== order.items) {
-            o = { ...order, items };
+          let o: OrderForUI = order;
+          if (order.items?.length) {
+            const items = await Promise.all(
+              order.items.map(async (item: any) => {
+                let price = Number(item.price) || 0;
+                if (item.productId && !price) {
+                  price = await histpricesApi.getLatest(String(item.productId));
+                }
+                const resolved = await resolveProductName(
+                  String(item?.productId ?? item?.ProductId ?? ''),
+                  String(item?.productName ?? item?.ProductName ?? item?.description ?? '').trim(),
+                  String(item?.sku ?? item?.Sku ?? '').trim()
+                );
+                return {
+                  ...item,
+                  price,
+                  productName: resolved.name || (item?.productName ?? item?.ProductName ?? ''),
+                  sku: resolved.sku || (item?.sku ?? item?.Sku ?? ''),
+                };
+              })
+            );
+
+            // Si el pedido no trae total/subtotal fiables, recalcularlos desde los ítems
+            if (Number(order.total) <= 0 || !o.subtotal) {
+              const subtotal = items.reduce(
+                (s, i) => s + (i.quantity ?? i.toOrder ?? 0) * (i.price ?? 0),
+                0
+              );
+              const total = subtotal + Number(order.tax ?? 0);
+              if (total > 0) o = { ...order, items, subtotal, total };
+              else o = { ...order, items };
+            } else if (items !== order.items) {
+              o = { ...order, items };
+            }
           }
           return o;
         })
       );
+
       if (typeof window !== 'undefined') {
         try {
           const statusRaw = sessionStorage.getItem('orderStatusByOrderId');

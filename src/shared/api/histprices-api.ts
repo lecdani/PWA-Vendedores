@@ -45,17 +45,37 @@ function takeLatestFromResponse(res: any): any {
   return res;
 }
 
+// Cache en memoria para evitar múltiples peticiones por el mismo producto
+const latestPriceCache = new Map<string, Promise<number>>();
+
 export const histpricesApi = {
   /**
    * Obtiene el último precio del historial de un producto.
    * GET /histprices/histprices/latest/{productId}
    * Si la API devuelve lista, se usa el último registro (el más reciente).
+   * Las peticiones se cachean por productId en memoria para acelerar vistas como historial, pendientes, etc.
    */
   async getLatest(productId: string): Promise<number> {
-    const res = await safeGet<any>(
-      `/histprices/histprices/latest/${encodeURIComponent(productId)}`
-    );
-    const last = takeLatestFromResponse(res);
-    return last != null ? parsePrice(last) : 0;
+    const key = String(productId ?? '').trim();
+    if (!key) return 0;
+
+    let cached = latestPriceCache.get(key);
+    if (!cached) {
+      cached = (async () => {
+        const res = await safeGet<any>(
+          `/histprices/histprices/latest/${encodeURIComponent(key)}`
+        );
+        const last = takeLatestFromResponse(res);
+        return last != null ? parsePrice(last) : 0;
+      })();
+      latestPriceCache.set(key, cached);
+    }
+
+    try {
+      return await cached;
+    } catch {
+      latestPriceCache.delete(key);
+      return 0;
+    }
   },
 };

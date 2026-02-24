@@ -25,13 +25,24 @@ function toStore(raw: any): StoreForUI {
   };
 }
 
+// Cache simple en memoria por id de tienda
+const storeCache = new Map<string, Promise<StoreForUI | null>>();
+
 export const storesApi = {
   async fetchStores(): Promise<StoreForUI[]> {
     try {
       const res = await apiClient.get<any>('/stores/stores');
       const list = Array.isArray(res) ? res : res?.data ?? res?.items ?? [];
       const all = (list as any[]).map(toStore);
-      return all.filter((s) => s.status === 'active');
+      const active = all.filter((s) => s.status === 'active');
+      // Pre-cargar cache por id para evitar peticiones repetidas en vistas que resuelven nombres
+      active.forEach((s) => {
+        const key = String(s.id).trim();
+        if (key && !storeCache.has(key)) {
+          storeCache.set(key, Promise.resolve(s));
+        }
+      });
+      return active;
     } catch (error) {
       const err = error as ApiError;
       console.error('[stores-api] GET /stores/stores failed:', err.message || err);
@@ -40,10 +51,26 @@ export const storesApi = {
   },
 
   async fetchStoreById(id: string): Promise<StoreForUI | null> {
+    const key = String(id ?? '').trim();
+    if (!key) return null;
+
+    let cached = storeCache.get(key);
+    if (!cached) {
+      cached = (async () => {
+        try {
+          const res = await apiClient.get<any>(`/stores/stores/${encodeURIComponent(key)}`);
+          return res ? toStore(res) : null;
+        } catch {
+          return null;
+        }
+      })();
+      storeCache.set(key, cached);
+    }
+
     try {
-      const res = await apiClient.get<any>(`/stores/stores/${encodeURIComponent(id)}`);
-      return res ? toStore(res) : null;
+      return await cached;
     } catch {
+      storeCache.delete(key);
       return null;
     }
   },
