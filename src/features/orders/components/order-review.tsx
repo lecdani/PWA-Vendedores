@@ -7,6 +7,7 @@ import { useLanguage } from '@/shared/i18n/language-provider';
 import { useAuth } from '@/shared/auth/auth-provider';
 import { ordersApi } from '@/shared/api/orders-api';
 import { storesApi, StoreForUI } from '@/shared/api/stores-api';
+import { getOrderReviewPayload, setOrderReviewPayload } from '@/shared/order-review-payload';
 import { Button } from '@/shared/ui/button';
 import { Card, CardContent } from '@/shared/ui/card';
 import { Separator } from '@/shared/ui/separator';
@@ -32,15 +33,12 @@ export function OrderReview() {
   const [sendError, setSendError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const storedData = sessionStorage.getItem('orderReviewData');
-      if (storedData) {
-        const data = JSON.parse(storedData);
-        setStoreId(data.storeId || 'CVS-001');
-        setStoreInfo(data.storeInfo);
-        setPlanogramData(data.planogramData || []);
-        setEditOrderId(data.editOrderId ?? null);
-      }
+    const data = getOrderReviewPayload();
+    if (data) {
+      setStoreId(data.storeId || 'CVS-001');
+      setStoreInfo(data.storeInfo ?? null);
+      setPlanogramData(data.planogramData || []);
+      setEditOrderId(data.editOrderId ?? null);
     }
   }, []);
 
@@ -95,40 +93,16 @@ export function OrderReview() {
 
     if (editOrderId) {
       const orderBeforeUpdate = await ordersApi.getOrderById(editOrderId);
-      let invoiceIdHint: string | number | null = null;
-      if (typeof window !== 'undefined') {
-        try {
-          const raw = sessionStorage.getItem('invoiceIdByOrder');
-          const map = raw ? JSON.parse(raw) : {};
-          invoiceIdHint = map[editOrderId] ?? null;
-        } catch {
-          invoiceIdHint = null;
-        }
-      }
-      if (invoiceIdHint == null) {
-        const fromApi = await ordersApi.getInvoiceIdForOrder(editOrderId);
-        if (fromApi != null) invoiceIdHint = fromApi;
-      }
-      const ok = await ordersApi.updateOrder(editOrderId, orderPayload, invoiceIdHint);
+      const invoiceIdHint = await ordersApi.getInvoiceIdForOrder(editOrderId);
+      const ok = await ordersApi.updateOrder(editOrderId, orderPayload, invoiceIdHint ?? undefined);
       setSending(false);
       if (!ok) {
         setSendError(t('error_saving_order') || 'No se pudo guardar el pedido. Revisa la conexión e inténtalo de nuevo.');
         return;
       }
-      // Actualizar solo el VisitLog de ESTE pedido (varios pedidos pueden ser misma tienda y misma fecha)
       if (user?.id) {
         let visitLogIdToUpdate: string | number | null = null;
-        if (typeof window !== 'undefined') {
-          try {
-            const raw = sessionStorage.getItem('visitLogIdByOrderId');
-            const map = raw ? JSON.parse(raw) : {};
-            const stored = map[editOrderId];
-            if (typeof stored === 'string' || typeof stored === 'number') visitLogIdToUpdate = stored;
-          } catch {
-            // ignore
-          }
-        }
-        if (visitLogIdToUpdate == null && orderBeforeUpdate) {
+        if (orderBeforeUpdate) {
           const originalStoreId = String(orderBeforeUpdate.storeId ?? '').trim().toLowerCase();
           const orderDateStr = (orderBeforeUpdate.date || '').toString().slice(0, 10);
           if (originalStoreId && orderDateStr) {
@@ -157,8 +131,8 @@ export function OrderReview() {
           }
         }
       }
-      sessionStorage.setItem('orderConfirmation', JSON.stringify({ orderId: editOrderId, showConfirmation: true }));
-      router.push(`/order/${editOrderId}`);
+      setSending(false);
+      router.push(`/order/${editOrderId}?confirmed=1`);
       return;
     }
 
@@ -172,49 +146,23 @@ export function OrderReview() {
 
     const orderIdToUse = String(orderIdRaw);
     if (user?.id) {
-      const visitLogId = await ordersApi.createVisitLog({
+      await ordersApi.createVisitLog({
         storeId,
         salespersonId: user.id,
         visitDate: new Date().toISOString().slice(0, 10),
       });
-      if (typeof window !== 'undefined' && visitLogId != null) {
-        try {
-          const raw = sessionStorage.getItem('visitLogIdByOrderId');
-          const map = raw ? JSON.parse(raw) : {};
-          map[orderIdToUse] = visitLogId;
-          sessionStorage.setItem('visitLogIdByOrderId', JSON.stringify(map));
-        } catch {
-          // ignore
-        }
-      }
     }
-    if (typeof window !== 'undefined' && apiResult.invoiceId != null) {
-      try {
-        const map: Record<string, string | number> = {};
-        const raw = sessionStorage.getItem('invoiceIdByOrder');
-        if (raw) Object.assign(map, JSON.parse(raw));
-        map[orderIdToUse] = apiResult.invoiceId;
-        sessionStorage.setItem('invoiceIdByOrder', JSON.stringify(map));
-      } catch {
-        // ignore
-      }
-    }
-
-    sessionStorage.setItem('orderConfirmation', JSON.stringify({ orderId: orderIdToUse, showConfirmation: true }));
     setSending(false);
-    router.push(`/order/${orderIdToUse}`);
+    router.push(`/order/${orderIdToUse}?confirmed=1`);
   };
 
   const handleEditOrder = () => {
-    if (typeof window !== 'undefined') {
-      const payload: Record<string, unknown> = {
-        storeId,
-        storeInfo,
-        planogramData: planogramData,
-      };
-      if (editOrderId) payload.editOrderId = editOrderId;
-      sessionStorage.setItem('orderReviewData', JSON.stringify(payload));
-    }
+    setOrderReviewPayload({
+      storeId,
+      storeInfo,
+      planogramData,
+      editOrderId: editOrderId ?? undefined,
+    });
     router.push(`/planogram/${storeId}${editOrderId ? `?orderId=${editOrderId}` : ''}`);
   };
 

@@ -12,6 +12,8 @@ import { distributionsApi } from '@/shared/api/distributions-api';
 import { productsApi } from '@/shared/api/products-api';
 import { histpricesApi } from '@/shared/api/histprices-api';
 import { ordersApi } from '@/shared/api/orders-api';
+import { storesApi } from '@/shared/api/stores-api';
+import { setOrderReviewPayload } from '@/shared/order-review-payload';
 
 export interface ProductPosition {
   row: number;
@@ -38,11 +40,12 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
   const [planogramName, setPlanogramName] = useState<string | null>(null);
 
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const stored = sessionStorage.getItem('storeInfo');
-      if (stored) setStoreInfo(JSON.parse(stored));
+    if (storeId) {
+      storesApi.fetchStoreById(storeId).then((store) => {
+        if (store) setStoreInfo({ name: store.name, address: store.address, id: store.id });
+      });
     }
-  }, []);
+  }, [storeId]);
 
   useEffect(() => {
     let mounted = true;
@@ -171,16 +174,13 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
   };
 
   const handleSendOrder = () => {
-    if (typeof window !== 'undefined') {
-      const payload: Record<string, unknown> = {
-        storeId,
-        storeInfo,
-        planogramId: planogramId ?? undefined,
-        planogramData: planogramData,
-      };
-      if (orderId) payload.editOrderId = orderId;
-      sessionStorage.setItem('orderReviewData', JSON.stringify(payload));
-    }
+    setOrderReviewPayload({
+      storeId,
+      storeInfo,
+      planogramId: planogramId ?? undefined,
+      planogramData,
+      editOrderId: orderId ?? undefined,
+    });
     router.push('/order-review');
   };
 

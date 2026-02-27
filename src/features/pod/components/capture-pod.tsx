@@ -42,30 +42,7 @@ export function CapturePOD({ orderId }: { orderId: string }) {
         setOrderLoadError(true);
         return;
       }
-      // Fusionar POD/estado desde sessionStorage (por si se añadió desde el detalle del pedido)
       let orderToUse = order;
-      if (typeof window !== 'undefined') {
-        try {
-          const podRaw = sessionStorage.getItem('podByOrderId');
-          const podMap = podRaw ? JSON.parse(podRaw) : {};
-          const statusRaw = sessionStorage.getItem('orderStatusByOrderId');
-          const statusMap = statusRaw ? JSON.parse(statusRaw) : {};
-          const idKey = String(orderId);
-          const cachedPod = podMap[idKey] ?? podMap[order.id];
-          const cachedStatus = statusMap[idKey] ?? statusMap[order.id];
-          if (cachedPod?.podImageUrl || cachedPod?.podFileName) {
-            orderToUse = {
-              ...orderToUse,
-              podUploaded: true,
-              podImageUrl: orderToUse.podImageUrl || cachedPod.podImageUrl,
-              podFileName: orderToUse.podFileName || cachedPod.podFileName,
-            };
-          }
-          if (cachedStatus) orderToUse = { ...orderToUse, status: cachedStatus };
-        } catch {
-          // ignorar
-        }
-      }
       // Enriquecer ítems con precio (y nombre si falta) como en detalle del pedido
       const needsPrice = orderToUse.items?.some((i: any) => i.productId && !Number(i.price));
       const needsProductName = orderToUse.items?.some((i: any) => i.productId && !(i.productName || i.sku || '').trim());
@@ -154,15 +131,6 @@ export function CapturePOD({ orderId }: { orderId: string }) {
     try {
       const backendOrderId = orderData?.backendOrderId ?? orderData?.id ?? orderId;
       let invoiceId: string | number | null = orderData?.invoiceId ?? null;
-      if (invoiceId == null && typeof window !== 'undefined') {
-        try {
-          const raw = sessionStorage.getItem('invoiceIdByOrder');
-          const map = raw ? JSON.parse(raw) : {};
-          invoiceId = map[orderId] ?? map[String(backendOrderId)] ?? null;
-        } catch {
-          invoiceId = null;
-        }
-      }
       if (invoiceId == null) invoiceId = await ordersApi.getInvoiceIdForOrder(orderId);
       if (invoiceId == null) invoiceId = await ordersApi.getInvoiceIdForOrder(String(backendOrderId));
 
@@ -194,27 +162,6 @@ export function CapturePOD({ orderId }: { orderId: string }) {
       }
 
       setPodSuccessMessage(t('pod_success') || 'Comprobante cargado correctamente. Redirigiendo al pedido...');
-      if (typeof window !== 'undefined') {
-        try {
-          if (podImage) {
-            const raw = sessionStorage.getItem('podByOrderId');
-            const map = raw ? JSON.parse(raw) : {};
-            const entry = { podImageUrl: podImage, podFileName };
-            map[String(orderId)] = entry;
-            const backendId = orderData?.backendOrderId ?? orderData?.id;
-            if (backendId != null && String(backendId) !== String(orderId)) map[String(backendId)] = entry;
-            sessionStorage.setItem('podByOrderId', JSON.stringify(map));
-          }
-          const statusRaw = sessionStorage.getItem('orderStatusByOrderId');
-          const statusMap = statusRaw ? JSON.parse(statusRaw) : {};
-          statusMap[String(orderId)] = 'DELIVERED';
-          const backendId = orderData?.backendOrderId ?? orderData?.id;
-          if (backendId != null && String(backendId) !== String(orderId)) statusMap[String(backendId)] = 'DELIVERED';
-          sessionStorage.setItem('orderStatusByOrderId', JSON.stringify(statusMap));
-        } catch {
-          // ignorar
-        }
-      }
       await new Promise((resolve) => setTimeout(resolve, 1800));
       router.refresh();
       router.push(`/order/${orderId}`);

@@ -30,27 +30,6 @@ export function PendingPOD() {
       setLoading(true);
       if (user?.id) {
         let all = await ordersApi.getOrdersByUser(user.id);
-        if (typeof window !== 'undefined') {
-          try {
-            const statusRaw = sessionStorage.getItem('orderStatusByOrderId');
-            const statusMap = statusRaw ? JSON.parse(statusRaw) : {};
-            const podRaw = sessionStorage.getItem('podByOrderId');
-            const podMap = podRaw ? JSON.parse(podRaw) : {};
-            all = all.map((o) => {
-              let o2 = o;
-              const idKey = String(o.id ?? o.backendOrderId ?? '');
-              const cachedStatus = idKey ? (statusMap[idKey] ?? statusMap[o.id]) : undefined;
-              if (cachedStatus) o2 = { ...o2, status: cachedStatus };
-              const cachedPod = idKey ? (podMap[idKey] ?? podMap[o.id]) : undefined;
-              if (cachedPod?.podImageUrl || cachedPod?.podFileName) {
-                o2 = { ...o2, podUploaded: true };
-              }
-              return o2;
-            });
-          } catch {
-            // ignorar
-          }
-        }
         const pending = all.filter(
           (o) => ((o.status || '').toLowerCase() === 'pending' && (o.podRequired !== false) && !o.podUploaded)
         );

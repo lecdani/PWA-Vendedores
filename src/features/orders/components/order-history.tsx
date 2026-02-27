@@ -57,22 +57,6 @@ export function OrderHistory() {
               const total = subtotal + Number(order.tax ?? 0);
               o = { ...order, items, subtotal, total };
             }
-            if (typeof window !== 'undefined') {
-              try {
-                const statusRaw = sessionStorage.getItem('orderStatusByOrderId');
-                const statusMap = statusRaw ? JSON.parse(statusRaw) : {};
-                const cachedStatus = statusMap[order.id];
-                if (cachedStatus) o = { ...o, status: cachedStatus };
-                const podRaw = sessionStorage.getItem('podByOrderId');
-                const podMap = podRaw ? JSON.parse(podRaw) : {};
-                const cachedPod = podMap[order.id];
-                if (cachedPod?.podImageUrl || cachedPod?.podFileName) {
-                  o = { ...o, podUploaded: true };
-                }
-              } catch {
-                // ignorar
-              }
-            }
             return o;
           })
         );
@@ -121,24 +105,17 @@ export function OrderHistory() {
     return matchesSearch && matchesStatus;
   });
 
+  /** Solo 2 estados: pending e invoiced. */
   const getStatusColor = (status: string) => {
     const s = (status || '').toLowerCase();
-    switch (s) {
-      case 'completed': return 'bg-green-50 text-green-700 border-green-200';
-      case 'invoiced': return 'bg-green-50 text-green-700 border-green-200';
-      case 'pending': return 'bg-amber-50 text-amber-700 border-amber-200';
-      default: return 'bg-slate-50 text-slate-700 border-slate-200';
-    }
+    if (s === 'invoiced') return 'bg-green-50 text-green-700 border-green-200';
+    return 'bg-amber-50 text-amber-700 border-amber-200';
   };
 
   const getStatusText = (status: string) => {
     const s = (status || '').toLowerCase();
-    switch (s) {
-      case 'completed': return t('completed');
-      case 'invoiced': return t('invoiced') || 'Facturado';
-      case 'pending': return t('pending');
-      default: return status;
-    }
+    if (s === 'invoiced') return t('invoiced') || 'Facturado';
+    return t('pending');
   };
 
   return (
@@ -168,7 +145,6 @@ export function OrderHistory() {
           </SelectTrigger>
             <SelectContent className="z-[100] min-w-[var(--radix-select-trigger-width)] bg-white border border-slate-200 shadow-lg">
             <SelectItem value="all" className="text-slate-800 cursor-pointer">{t('filter_all')}</SelectItem>
-            <SelectItem value="completed" className="text-slate-800 cursor-pointer">{t('completed')}</SelectItem>
             <SelectItem value="invoiced" className="text-slate-800 cursor-pointer">{t('invoiced') || 'Facturado'}</SelectItem>
             <SelectItem value="pending" className="text-slate-800 cursor-pointer">{t('pending')}</SelectItem>
           </SelectContent>
@@ -218,7 +194,7 @@ export function OrderHistory() {
                         <Badge variant="outline" className={getStatusColor(order.status)}>
                           {getStatusText(order.status)}
                         </Badge>
-                        {order.podUploaded && (
+                        {(order.podUploaded || order.podImageUrl || order.podFileName) && (
                           <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200">
                             POD ✓
                           </Badge>

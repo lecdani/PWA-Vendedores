@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import Image from 'next/image';
 import { 
   ArrowLeft, 
@@ -19,7 +19,6 @@ import {
 import { useLanguage } from '@/shared/i18n/language-provider';
 import { useAuth } from '@/shared/auth/auth-provider';
 import { ordersApi, OrderForUI } from '@/shared/api/orders-api';
-import { API_BASE_URL } from '@/shared/api/api-client';
 import { storesApi } from '@/shared/api/stores-api';
 import { histpricesApi } from '@/shared/api/histprices-api';
 import { productsApi } from '@/shared/api/products-api';
@@ -32,6 +31,7 @@ import { Invoice } from './invoice';
 export function OrderDetail({ orderId }: { orderId: string }) {
   const { t } = useLanguage();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { user } = useAuth();
   const [showConfirmation, setShowConfirmation] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -45,186 +45,143 @@ export function OrderDetail({ orderId }: { orderId: string }) {
     total: number;
     items: Array<{ qty: number; code: string; description: string; price: number; amount: number }>;
   } | null>(null);
+  const [loadingInvoice, setLoadingInvoice] = useState(false);
+  const [loadingPod, setLoadingPod] = useState(false);
+  const [orderLoadDone, setOrderLoadDone] = useState(false);
+  const [podImageError, setPodImageError] = useState(false);
+
+  const displayPod = (order?.podImageUrl || order?.podFileName || (invoiceFromApi?.pod || '').trim()) || '';
+  const orderStatus = (order?.status || '').toLowerCase() === 'invoiced' ? 'invoiced' : 'pending';
 
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      // Verificar si hay confirmación en sessionStorage
-      const confirmation = sessionStorage.getItem('orderConfirmation');
-      if (confirmation) {
-        const data = JSON.parse(confirmation);
-        if (data.orderId === orderId && data.showConfirmation) {
-          setShowConfirmation(true);
-          sessionStorage.removeItem('orderConfirmation');
-          setTimeout(() => {
-            setShowConfirmation(false);
-          }, 3000);
-        }
-      }
+    if (searchParams.get('confirmed') === '1') {
+      setShowConfirmation(true);
+      setTimeout(() => setShowConfirmation(false), 3000);
+    }
+  }, [searchParams]);
 
-      // Intentar obtener el pedido desde la API
-      const loadOrder = async () => {
-        const apiOrder = await ordersApi.getOrderById(orderId);
-        if (apiOrder) {
-          let orderToSet = apiOrder;
-          const needsPrice = apiOrder.items.some((i: any) => i.productId && !Number(i.price));
-          const needsProductName = apiOrder.items.some((i: any) => i.productId && !(i.productName || i.sku || '').trim());
-          if (needsPrice || needsProductName) {
-            const enrichedItems = await Promise.all(
-              apiOrder.items.map(async (item: any) => {
-                let productName = (item.productName || item.sku || '').trim();
-                let price = Number(item.price) || 0;
-                if (item.productId) {
-                  // Siempre traer el último precio del historial cuando falta o es 0
-                  if (!price) price = await histpricesApi.getLatest(item.productId);
-                  if (!productName) {
-                    const product = await productsApi.getById(item.productId);
-                    if (product) productName = product.name || product.sku || '';
-                  }
+  useEffect(() => {
+    const loadOrder = async () => {
+      const apiOrder = await ordersApi.getOrderById(orderId);
+      if (apiOrder) {
+        let orderToSet = apiOrder;
+        const needsPrice = apiOrder.items.some((i: any) => i.productId && !Number(i.price));
+        const needsProductName = apiOrder.items.some((i: any) => i.productId && !(i.productName || i.sku || '').trim());
+        if (needsPrice || needsProductName) {
+          const enrichedItems = await Promise.all(
+            apiOrder.items.map(async (item: any) => {
+              let productName = (item.productName || item.sku || '').trim();
+              let price = Number(item.price) || 0;
+              if (item.productId) {
+                if (!price) price = await histpricesApi.getLatest(item.productId);
+                if (!productName) {
+                  const product = await productsApi.getById(item.productId);
+                  if (product) productName = product.name || product.sku || '';
                 }
-                return { ...item, productName: productName || item.productName, price };
-              })
-            );
-            const computedSubtotal = enrichedItems.reduce((s: number, i: any) => s + (i.quantity ?? i.toOrder ?? 0) * (i.price || 0), 0);
-            orderToSet = {
-              ...apiOrder,
-              items: enrichedItems,
-              subtotal: apiOrder.subtotal || computedSubtotal,
-              total: apiOrder.total || computedSubtotal + (apiOrder.tax || 0),
-            };
-          }
-          if (typeof window !== 'undefined') {
-            try {
-              const raw = sessionStorage.getItem('podByOrderId');
-              const map = raw ? JSON.parse(raw) : {};
-              const cached = map[orderId];
-              if (cached?.podImageUrl || cached?.podFileName) {
-                orderToSet = {
-                  ...orderToSet,
-                  podImageUrl: orderToSet.podImageUrl || cached.podImageUrl,
-                  podFileName: orderToSet.podFileName || cached.podFileName,
-                  podUploaded: orderToSet.podUploaded || true,
-                };
               }
-              const statusRaw = sessionStorage.getItem('orderStatusByOrderId');
-              const statusMap = statusRaw ? JSON.parse(statusRaw) : {};
-              const cachedStatus = statusMap[orderId];
-              if (cachedStatus && !orderToSet.status?.toLowerCase?.()?.includes('invoiced')) {
-                orderToSet = { ...orderToSet, status: cachedStatus };
-              }
-            } catch {
-              // ignorar
-            }
-          }
-          setOrder(orderToSet);
-          const name = (orderToSet.storeName || '').trim();
-          const looksLikeId = !name || name === orderToSet.storeId || /^[0-9a-f-]{36}$/i.test(name) || /^\d+$/.test(name);
-          if (orderToSet.storeId && looksLikeId) {
-            const store = await storesApi.fetchStoreById(orderToSet.storeId);
-            if (store) {
-              setInvoiceStoreName(store.name);
-              setInvoiceStoreAddress((store.address || '').trim());
-            } else {
-              setInvoiceStoreName(name || '—');
-              setInvoiceStoreAddress(orderToSet.storeAddress || '');
-            }
+              return { ...item, productName: productName || item.productName, price };
+            })
+          );
+          const computedSubtotal = enrichedItems.reduce((s: number, i: any) => s + (i.quantity ?? i.toOrder ?? 0) * (i.price || 0), 0);
+          orderToSet = {
+            ...apiOrder,
+            items: enrichedItems,
+            subtotal: apiOrder.subtotal || computedSubtotal,
+            total: apiOrder.total || computedSubtotal + (apiOrder.tax || 0),
+          };
+        }
+        setOrder(orderToSet);
+        const name = (orderToSet.storeName || '').trim();
+        const looksLikeId = !name || name === orderToSet.storeId || /^[0-9a-f-]{36}$/i.test(name) || /^\d+$/.test(name);
+        if (orderToSet.storeId && looksLikeId) {
+          const store = await storesApi.fetchStoreById(orderToSet.storeId);
+          if (store) {
+            setInvoiceStoreName(store.name);
+            setInvoiceStoreAddress((store.address || '').trim());
           } else {
-            setInvoiceStoreName(name || orderToSet.storeName || '—');
+            setInvoiceStoreName(name || '—');
             setInvoiceStoreAddress(orderToSet.storeAddress || '');
           }
-          // Factura: GET con orderId e invoiceId (del pedido o sessionStorage) para GET /invoice e /invoicedetails
-          const invoiceIdHint =
-            orderToSet.invoiceId ??
-            (typeof window !== 'undefined' && (() => {
-              try {
-                const raw = sessionStorage.getItem('invoiceIdByOrder');
-                const map = raw ? JSON.parse(raw) : {};
-                return map[orderId];
-              } catch {
-                return undefined;
-              }
-            })());
-          const invoiceDisplay = await ordersApi.getInvoiceDisplayForOrder(orderId, invoiceIdHint);
-          setInvoiceFromApi(invoiceDisplay ?? null);
-          if (invoiceDisplay && typeof window !== 'undefined') {
-            try {
-              const invId = await ordersApi.getInvoiceIdForOrder(orderId);
-              if (invId != null) {
-                const raw = sessionStorage.getItem('invoiceIdByOrder');
-                const map = raw ? JSON.parse(raw) : {};
-                map[orderId] = invId;
-                sessionStorage.setItem('invoiceIdByOrder', JSON.stringify(map));
-              }
-            } catch {
-              // ignorar
-            }
-          }
-          return;
-        }
-
-        setInvoiceFromApi(null);
-        // Fallback: buscar en localStorage
-        const orders = JSON.parse(localStorage.getItem('orders') || '[]');
-        const foundOrder = orders.find((o: any) => o.id === orderId);
-
-        if (foundOrder) {
-          const totalUnits = (foundOrder.items || []).reduce(
-            (sum: number, item: any) =>
-              sum + (item.toOrder || item.quantity || 0),
-            0
-          );
-          setInvoiceStoreName(foundOrder.storeName || foundOrder.storeId || '');
-          setInvoiceStoreAddress(foundOrder.storeAddress || '');
-          setOrder({
-            id: String(foundOrder.id),
-            backendOrderId: foundOrder.backendOrderId,
-            storeId: foundOrder.storeId,
-            storeName: foundOrder.storeName || foundOrder.storeId,
-            storeAddress: foundOrder.storeAddress,
-            date: foundOrder.date,
-            deliveryDate: foundOrder.deliveryDate,
-            status: foundOrder.status,
-            items: foundOrder.items || [],
-            totalUnits,
-            subtotal: foundOrder.subtotal,
-            tax: foundOrder.tax,
-            total: foundOrder.total,
-            podRequired: foundOrder.podRequired,
-            podUploaded: foundOrder.podUploaded,
-            podImageUrl: foundOrder.podImageUrl,
-            vendorNumber: foundOrder.vendorNumber,
-            comments: foundOrder.comments,
-          });
         } else {
-          setInvoiceStoreName('');
-          setInvoiceStoreAddress('');
-          setOrder({
-            id: orderId,
-            backendOrderId: undefined,
-            storeId: 'N/A',
-            storeName: '—',
-            storeAddress: '',
-            date: new Date().toISOString(),
-            deliveryDate: undefined,
-            status: 'pending',
-            items: [],
-            totalUnits: 0,
-            subtotal: 0,
-            tax: 0,
-            total: 0,
-            podRequired: true,
-            podUploaded: false,
-          });
+          setInvoiceStoreName(name || orderToSet.storeName || '—');
+          setInvoiceStoreAddress(orderToSet.storeAddress || '');
         }
-      };
-
-      loadOrder();
-    }
+        const invoiceIdHint = orderToSet.invoiceId ?? await ordersApi.getInvoiceIdForOrder(orderId)
+          ?? (orderToSet.backendOrderId != null ? await ordersApi.getInvoiceIdForOrder(String(orderToSet.backendOrderId)) : null);
+        const invoiceDisplay = await ordersApi.getInvoiceDisplayForOrder(orderId, invoiceIdHint ?? undefined);
+        setInvoiceFromApi(invoiceDisplay ?? null);
+        if (invoiceDisplay?.pod) {
+          setOrder((prev) =>
+            prev ? { ...prev, podImageUrl: invoiceDisplay.pod, podFileName: invoiceDisplay.pod, podUploaded: true } : prev
+          );
+        }
+        setOrderLoadDone(true);
+        return;
+      }
+      setInvoiceFromApi(null);
+      setInvoiceStoreName('');
+      setInvoiceStoreAddress('');
+      setOrder(null);
+      setOrderLoadDone(true);
+    };
+    setOrderLoadDone(false);
+    loadOrder();
   }, [orderId]);
+
+  // Sincronizar POD de la factura al pedido (la factura devuelve orderId y pod)
+  useEffect(() => {
+    if (!order || !invoiceFromApi?.pod) return;
+    const pod = (invoiceFromApi.pod || '').trim();
+    if (!pod || (order.podImageUrl === pod && order.podFileName === pod)) return;
+    setOrder((prev) => (prev ? { ...prev, podImageUrl: pod, podFileName: pod, podUploaded: true } : prev));
+  }, [order?.id, invoiceFromApi?.pod, order?.podImageUrl, order?.podFileName]);
+
+  // Fallback: si no hay POD, cargar factura (devuelve orderId y pod); usa order.invoiceId o resuelve por orderId
+  useEffect(() => {
+    if (!order || order.podImageUrl || order.podFileName || invoiceFromApi?.pod) return;
+    let cancelled = false;
+    setLoadingPod(true);
+    ordersApi.getInvoiceDisplayForOrder(orderId, order.invoiceId ?? undefined).then((display) => {
+      if (cancelled) return;
+      setLoadingPod(false);
+      if (!display) return;
+      setInvoiceFromApi(display);
+      if (display.pod) setOrder((prev) => (prev ? { ...prev, podImageUrl: display.pod, podFileName: display.pod, podUploaded: true } : prev));
+    });
+    return () => { cancelled = true; };
+  }, [orderId, order?.id, order?.invoiceId, order?.podImageUrl, order?.podFileName, invoiceFromApi?.pod]);
+
+  useEffect(() => {
+    setPodImageError(false);
+  }, [displayPod]);
+
+  // Pedido facturado sin POD en estado: forzar carga de factura por API para obtener POD
+  useEffect(() => {
+    const isInvoiced = (order?.status || '').toLowerCase() === 'invoiced';
+    if (!order || !isInvoiced || order.podImageUrl || order.podFileName || invoiceFromApi?.pod) return;
+    let cancelled = false;
+    setLoadingPod(true);
+    ordersApi.getInvoiceDisplayForOrder(orderId, order.invoiceId ?? undefined).then((display) => {
+      if (cancelled) return;
+      setLoadingPod(false);
+      if (!display?.pod) return;
+      setInvoiceFromApi((prev) => (prev ? { ...prev, pod: display.pod } : { invoiceNumber: '', date: '', total: 0, items: [], pod: display.pod }));
+      setOrder((prev) => (prev ? { ...prev, podImageUrl: display.pod, podFileName: display.pod, podUploaded: true } : prev));
+    });
+    return () => { cancelled = true; };
+  }, [order?.id, order?.status, order?.invoiceId, order?.podImageUrl, order?.podFileName, invoiceFromApi?.pod, orderId]);
 
   if (!order) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
-        <p className="text-slate-600">Cargando...</p>
+        {orderLoadDone ? (
+          <div className="text-center">
+            <p className="text-slate-600 mb-4">Pedido no encontrado</p>
+            <Button variant="outline" onClick={() => router.back()}>Volver</Button>
+          </div>
+        ) : (
+          <p className="text-slate-600">Cargando...</p>
+        )}
       </div>
     );
   }
@@ -232,24 +189,17 @@ export function OrderDetail({ orderId }: { orderId: string }) {
   const totalUnits = order.totalUnits;
   const displayTotal = order.total > 0 ? order.total : order.items.reduce((s, i) => s + (i.toOrder ?? i.quantity ?? 0) * (i.price ?? 0), 0);
 
+  /** Solo 2 estados: pending e invoiced. */
   const getStatusColor = (status: string) => {
     const s = (status || '').toLowerCase();
-    switch (s) {
-      case 'completed': return 'bg-green-50 text-green-700 border-green-200';
-      case 'invoiced': return 'bg-green-50 text-green-700 border-green-200';
-      case 'pending': return 'bg-amber-50 text-amber-700 border-amber-200';
-      default: return 'bg-slate-50 text-slate-700 border-slate-200';
-    }
+    if (s === 'invoiced') return 'bg-green-50 text-green-700 border-green-200';
+    return 'bg-amber-50 text-amber-700 border-amber-200';
   };
 
   const getStatusText = (status: string) => {
     const s = (status || '').toLowerCase();
-    switch (s) {
-      case 'completed': return t('completed');
-      case 'invoiced': return t('invoiced') || 'Facturado';
-      case 'pending': return t('pending');
-      default: return status;
-    }
+    if (s === 'invoiced') return t('invoiced') || 'Facturado';
+    return t('pending');
   };
 
   const handleDownloadInvoice = () => {
@@ -260,14 +210,56 @@ export function OrderDetail({ orderId }: { orderId: string }) {
     window.print();
   };
 
+  /** Reconstruye la URL de la imagen: ruta local C:\Users\danie\OneDrive + nombre archivo. Sin localhost ni IP; se sirve por /api/pod-image. */
+  const buildPodImageUrl = (podPath: string): string => {
+    const raw = (podPath || '').trim();
+    if (!raw) return '';
+    if (raw.startsWith('data:') || raw.startsWith('http://') || raw.startsWith('https://')) return raw;
+    return `/api/pod-image?path=${encodeURIComponent(raw)}`;
+  };
+
+  const podImageUrl = displayPod ? buildPodImageUrl(displayPod) : '';
+  const isPodPath = displayPod && !displayPod.startsWith('data:') && !displayPod.startsWith('http');
+
   const vendorName = [user?.name, user?.lastName].filter(Boolean).join(' ') || user?.email || order.vendorNumber || '';
   const invoiceStoreDisplayName = invoiceStoreName || order.storeName || '';
   const cleanAddress = (addr: string) => (addr || '').replace(/,?\s*[0-9a-f-]{36}\s*$/i, '').replace(/,?\s*\d+\s*$/, '').trim();
   const invoiceStoreDisplayAddress = cleanAddress(invoiceStoreAddress || order.storeAddress || '');
-  // Solo API: lo que ve el cliente es únicamente lo que devuelve la BD (GET invoice + invoicedetails). Nada local.
-  const invoiceItems = invoiceFromApi?.items ?? [];
-  const invoiceNumber = invoiceFromApi?.invoiceNumber ?? '—';
-  const invoiceDate = invoiceFromApi?.date ? (invoiceFromApi.date.includes(',') ? invoiceFromApi.date : new Date(invoiceFromApi.date).toLocaleDateString('en-US')) : '—';
+  const invoiceItems =
+    invoiceFromApi?.items?.length
+      ? invoiceFromApi.items
+      : (order.items || []).map((i: any) => {
+          const qty = i.toOrder ?? i.quantity ?? 0;
+          const price = Number(i.price) ?? 0;
+          return {
+            qty,
+            code: (i.sku || i.productId || '').trim() || '—',
+            description: (i.productName || i.sku || '').trim() || '—',
+            price,
+            amount: qty * price,
+          };
+        });
+  const invoiceNumber = invoiceFromApi?.invoiceNumber ?? order.invoiceId ?? order.id ?? '—';
+  const invoiceDate = invoiceFromApi?.date
+    ? (invoiceFromApi.date.includes(',') ? invoiceFromApi.date : new Date(invoiceFromApi.date).toLocaleDateString('en-US'))
+    : (order.date ? new Date(order.date).toLocaleDateString('en-US') : '—');
+
+  const handleRetryInvoice = async () => {
+    setLoadingInvoice(true);
+    try {
+      const hint = order.invoiceId ?? await ordersApi.getInvoiceIdForOrder(orderId)
+        ?? (order.backendOrderId != null ? await ordersApi.getInvoiceIdForOrder(String(order.backendOrderId)) : null);
+      const display = await ordersApi.getInvoiceDisplayForOrder(orderId, hint ?? undefined);
+      setInvoiceFromApi(display ?? null);
+      if (display?.pod) {
+        setOrder((prev) =>
+          prev ? { ...prev, podImageUrl: display.pod, podFileName: display.pod, podUploaded: true } : prev
+        );
+      }
+    } finally {
+      setLoadingInvoice(false);
+    }
+  };
 
   const handleCapturePOD = () => {
     router.push(`/capture-pod/${orderId}`);
@@ -277,37 +269,13 @@ export function OrderDetail({ orderId }: { orderId: string }) {
     router.push(`/view-planogram/${orderId}`);
   };
 
-  const canEditOrder = (order.status || '').toLowerCase() === 'pending' && !order.podUploaded;
+  const canEditOrder = orderStatus === 'pending' && !order.podUploaded;
   const handleEditOrder = () => {
-    if (typeof window !== 'undefined' && order.storeId) {
-      sessionStorage.setItem('storeInfo', JSON.stringify({
-        name: invoiceStoreDisplayName || order.storeName,
-        address: invoiceStoreDisplayAddress || order.storeAddress,
-      }));
-    }
-    router.push(`/planogram/${order.storeId}?orderId=${orderId}`);
+    if (order.storeId) router.push(`/planogram/${order.storeId}?orderId=${orderId}`);
   };
 
   const handleDeleteOrder = async () => {
     setDeleting(true);
-    if (typeof window !== 'undefined') {
-      try {
-        const raw = sessionStorage.getItem('visitLogIdByOrderId');
-        const map = raw ? JSON.parse(raw) : {};
-        const storedId = map[orderId];
-        const visitLogId =
-          typeof storedId === 'string' || typeof storedId === 'number'
-            ? storedId
-            : null;
-        if (visitLogId != null) {
-          await ordersApi.deleteVisitLog(visitLogId);
-          delete map[orderId];
-          sessionStorage.setItem('visitLogIdByOrderId', JSON.stringify(map));
-        }
-      } catch {
-        // ignorar
-      }
-    }
     const ok = await ordersApi.deleteOrder(orderId);
     setDeleting(false);
     setShowDeleteConfirm(false);
@@ -325,7 +293,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
             <CheckCircle2 className="h-5 w-5" />
             <div className="flex-1">
               <p className="text-sm">
-                {order.status === 'completed' ? t('delivery_completed_success') : t('order_sent_success')}
+                {(order.status || '').toLowerCase() === 'invoiced' ? t('delivery_completed_success') : t('order_sent_success')}
               </p>
               <p className="text-xs opacity-90">{invoiceStoreDisplayName || order.storeName} · {new Date(order.date).toLocaleDateString()}</p>
             </div>
@@ -521,7 +489,17 @@ export function OrderDetail({ orderId }: { orderId: string }) {
           <CardHeader className="px-4 pt-4 pb-2">
             <div className="flex items-center justify-between">
               <CardTitle className="text-sm">{t('invoice')}</CardTitle>
-              <div className="flex gap-2">
+              <div className="flex gap-2 flex-wrap">
+                {!invoiceFromApi && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleRetryInvoice}
+                    disabled={loadingInvoice}
+                  >
+                    {loadingInvoice ? t('loading') + '...' : (t('retry') || 'Reintentar factura')}
+                  </Button>
+                )}
                 <Button
                   variant="outline"
                   size="sm"
@@ -554,41 +532,52 @@ export function OrderDetail({ orderId }: { orderId: string }) {
           </CardContent>
         </Card>
 
-        {/* Sección POD: si hay POD en BD se muestra el texto; si no, se muestra cargar */}
+        {/* Sección POD: mostrar si hay POD en pedido o en la factura cargada (pedidos viejos) */}
         <Card className="border-slate-200 overflow-hidden">
           <CardHeader className="px-4 pt-4 pb-2">
             <CardTitle className="text-sm">{t('delivery_proof') || 'Comprobante de entrega (POD)'}</CardTitle>
           </CardHeader>
           <CardContent className="px-4 pb-4 pt-0">
-            {order.podImageUrl || order.podFileName ? (
-              <div className="flex flex-col gap-2">
-                <div className="flex items-start gap-3">
-                  <CheckCircle2 className="h-5 w-5 text-green-600 mt-0.5 shrink-0" />
-                  <div>
-                    <p className="text-xs text-slate-500 mb-1">
-                      {t('pod_uploaded') || 'Comprobante registrado'}
-                    </p>
-                    <p className="text-sm text-green-800 font-mono">
-                      {(order.podImageUrl || order.podFileName || '').startsWith('data:')
-                        ? (order.podFileName || t('pod_uploaded') || 'Comprobante registrado')
-                        : (order.podImageUrl || order.podFileName)}
-                    </p>
-                  </div>
+            {displayPod ? (
+              <div className="flex flex-col gap-3">
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 className="h-5 w-5 text-green-600 shrink-0" />
+                  <p className="text-xs text-slate-500">
+                    {t('pod_uploaded') || 'Comprobante registrado'}
+                  </p>
                 </div>
-                {(() => {
-                  const path = (order.podImageUrl || order.podFileName || '').trim();
-                  if (!path) return null;
-                  const imageUrl = path.startsWith('data:') || path.startsWith('http')
-                    ? path
-                    : `${API_BASE_URL.replace(/\/$/, '')}/${path.replace(/^\//, '')}`;
-                  return (
-                    <div className="relative w-full aspect-video rounded-lg border border-slate-200 overflow-hidden bg-slate-50">
-                      <img src={imageUrl} alt="POD" className="w-full h-full object-contain" />
-                    </div>
-                  );
-                })()}
+                {/* Ruta que viene de la BD (ej. /imagenes/dani.png) */}
+                {isPodPath && (
+                  <p className="text-xs text-slate-500 font-mono break-all">{displayPod}</p>
+                )}
+                {/* Imagen: se lee desde tu laptop (base + ubicación de la BD) y se sirve por /api/pod-image */}
+                {podImageUrl && (
+                  <div className="relative w-full rounded-lg border border-slate-200 overflow-hidden bg-slate-50 min-h-[200px] flex items-center justify-center">
+                    {podImageError ? (
+                      <div className="flex flex-col items-center justify-center py-8 px-4 text-center">
+                        <p className="text-sm text-amber-700 mb-1">No se pudo cargar la imagen</p>
+                        <p className="text-xs text-slate-500 mb-2">Ruta: {displayPod}</p>
+                        <a href={podImageUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 underline break-all">
+                          Abrir enlace
+                        </a>
+                      </div>
+                    ) : (
+                      <img
+                        key={podImageUrl}
+                        src={podImageUrl}
+                        alt={t('delivery_proof') || 'Comprobante de entrega (POD)'}
+                        className="w-full max-h-[320px] object-contain"
+                        referrerPolicy="no-referrer"
+                        loading="lazy"
+                        decoding="async"
+                        onLoad={() => setPodImageError(false)}
+                        onError={() => setPodImageError(true)}
+                      />
+                    )}
+                  </div>
+                )}
               </div>
-            ) : order.status === 'pending' ? (
+            ) : orderStatus === 'pending' ? (
               <>
                 <p className="text-sm text-slate-600 mb-3">
                   {t('pod_not_uploaded') || 'No has cargado el comprobante de entrega'}
@@ -604,6 +593,8 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                   {t('capture_pod')}
                 </Button>
               </>
+            ) : loadingPod ? (
+              <p className="text-sm text-slate-600">Cargando comprobante...</p>
             ) : (
               <p className="text-xs text-slate-500">
                 {t('pod_already_invoiced') || 'Este pedido ya está facturado y no requiere cargar POD aquí.'}

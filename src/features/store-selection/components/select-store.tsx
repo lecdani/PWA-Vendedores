@@ -40,11 +40,6 @@ export function SelectStore() {
   );
 
   const handleSelectStore = (storeId: string) => {
-    const selectedStore = stores.find(s => s.id === storeId);
-    if (selectedStore && typeof window !== 'undefined') {
-      // Guardar información de la tienda en sessionStorage
-      sessionStorage.setItem('storeInfo', JSON.stringify(selectedStore));
-    }
     router.push(`/planogram/${storeId}`);
   };
 

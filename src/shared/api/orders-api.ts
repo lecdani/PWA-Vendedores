@@ -78,13 +78,39 @@ async function safeGet<T>(endpoint: string): Promise<T | null> {
   }
 }
 
+/** Extrae el primer array que encuentre en un objeto (cualquier nivel de anidación, 2 niveles). */
+function extractFirstArray(obj: any, depth = 0): any[] | null {
+  if (obj == null || depth > 2) return null;
+  if (Array.isArray(obj)) return obj.length > 0 ? obj : null;
+  if (typeof obj !== 'object') return null;
+  for (const v of Object.values(obj)) {
+    if (Array.isArray(v)) return v.length > 0 ? (v as any[]) : null;
+    const nested = extractFirstArray(v, depth + 1);
+    if (nested && nested.length > 0) return nested;
+  }
+  return null;
+}
+
+/** Normaliza la respuesta de GET /invoice/invoices (array directo o { data/invoices/Data/Invoices: [...] }). */
 function normalizeInvoiceList(list: any): any[] {
+  if (list == null) return [];
   if (Array.isArray(list)) return list;
   if (list?.invoices) return Array.isArray(list.invoices) ? list.invoices : [];
-  if (list?.data) return Array.isArray(list.data) ? list.data : [];
+  if (list?.Invoices) return Array.isArray(list.Invoices) ? list.Invoices : [];
+  if (list?.data) {
+    if (Array.isArray(list.data)) return list.data;
+    if (list.data && typeof list.data === 'object') {
+      const inner = list.data?.items ?? list.data?.Items ?? list.data?.data ?? list.data?.invoices ?? list.data?.Invoices ?? list.data;
+      if (Array.isArray(inner)) return inner;
+    }
+  }
+  if (list?.Data) return Array.isArray(list.Data) ? list.Data : [];
   if (list?.items) return Array.isArray(list.items) ? list.items : [];
   if (list?.value) return Array.isArray(list.value) ? list.value : [];
   if (list?.Results) return Array.isArray(list.Results) ? list.Results : [];
+  if (list?.result) return Array.isArray(list.result) ? list.result : [];
+  const extracted = extractFirstArray(list);
+  if (extracted) return extracted;
   if (list && typeof list === 'object') {
     const arr: any[] = [];
     for (const v of Object.values(list)) {
@@ -95,44 +121,82 @@ function normalizeInvoiceList(list: any): any[] {
   return [];
 }
 
-async function getInvoiceList(): Promise<any[]> {
-  const list = await safeGet<any>('/invoice/invoices');
-  if (list == null) {
-    const listSingular = await safeGet<any>('/invoice/invoice');
-    return normalizeInvoiceList(listSingular);
-  }
-  return normalizeInvoiceList(list);
+/** Unwrap invoice object from API (cada elemento puede ser { value: {...} } o { data: {...} }). */
+function unwrapInvoiceItem(x: any): any {
+  if (x == null) return null;
+  if (x?.value && typeof x.value === 'object') return x.value;
+  if (x?.data && typeof x.data === 'object') return x.data;
+  return x;
 }
 
-/** GET factura por id. Usar este endpoint cuando tengas el invoiceId. Todo desde BD. */
+async function getInvoiceList(): Promise<any[]> {
+  const list = await safeGet<any>('/invoice/invoices');
+  const arr = list != null ? normalizeInvoiceList(list) : [];
+  if (typeof process !== 'undefined' && process.env.NODE_ENV === 'development' && arr.length === 0 && list != null) {
+    console.warn('[orders-api] GET /invoice/invoices devolvió datos pero la lista normalizada está vacía. Keys del response:', list && typeof list === 'object' ? Object.keys(list) : typeof list);
+  }
+  return arr;
+}
+
+/** Devuelve el objeto "factura" interno de una respuesta GET (para total, id, etc.). */
+function unwrapInvoiceResponse(res: any): any {
+  if (res == null) return res;
+  return res?.data ?? res?.invoice ?? res?.value ?? res?.result ?? res?.resultData ?? res?.Response ?? res;
+}
+
+/** GET factura por id. GET /invoice/invoices/{id} — devuelve la respuesta COMPLETA para poder leer Pod en cualquier nivel. */
 async function getInvoiceById(invoiceId: string): Promise<any | null> {
   const id = String(invoiceId).trim();
   if (!id) return null;
-  let one = await safeGet<any>(`/invoice/invoices/${encodeURIComponent(id)}`);
-  if (one == null) one = await safeGet<any>(`/invoice/invoice/${encodeURIComponent(id)}`);
-  if (one == null) return null;
-  // Desempaquetar si la API devuelve { data: {...} } o { invoice: {...} }
-  if (one?.data && typeof one.data === 'object') return one.data;
-  if (one?.invoice && typeof one.invoice === 'object') return one.invoice;
-  if (one?.value && typeof one.value === 'object') return one.value;
-  return one;
+  const one = await safeGet<any>(`/invoice/invoices/${encodeURIComponent(id)}`);
+  return one ?? null;
 }
 
 /**
- * Lee la referencia al POD de una factura (ruta, URL o data URL).
- * Si el backend devuelve podBase64, se convierte a data URL para poder mostrarla.
+ * Lee la ruta/link del POD de la factura (igual que Sistema Web Admin: en BD se guarda la ruta, ej. imagenes/Dani.png).
  */
 function getPodFromInvoice(inv: any): string {
   if (inv == null) return '';
-  const root = inv?.data ?? inv?.invoice ?? inv;
-  const v = root?.pod ?? root?.Pod ?? root?.POD ?? root?.podUrl ?? root?.PodUrl ?? root?.podImageUrl ?? root?.PodImageUrl
-    ?? root?.fileName ?? root?.FileName ?? root?.PodFileName ?? root?.url ?? root?.Url ?? root?.Reference;
-  const str = typeof v === 'string' ? v.trim() : '';
+  const root = inv?.data ?? inv?.invoice ?? inv?.value ?? inv?.result ?? inv;
+  const v =
+    root?.pod ??
+    root?.Pod ??
+    root?.POD ??
+    root?.podUrl ??
+    root?.PodUrl ??
+    root?.podImageUrl ??
+    root?.PodImageUrl ??
+    root?.podPath ??
+    root?.PodPath ??
+    root?.ruta ??
+    root?.Ruta ??
+    root?.imagePath ??
+    root?.ImagePath ??
+    root?.filePath ??
+    root?.FilePath ??
+    root?.fileName ??
+    root?.FileName ??
+    root?.PodFileName ??
+    root?.url ??
+    root?.Url ??
+    root?.link ??
+    root?.Link ??
+    root?.Reference ??
+    root?.reference ??
+    inv?.pod ??
+    inv?.Pod ??
+    inv?.POD ??
+    inv?.podUrl ??
+    inv?.PodUrl ??
+    inv?.podPath ??
+    inv?.podImageUrl ??
+    inv?.ruta ??
+    inv?.url ??
+    inv?.link;
+  const str = typeof v === 'string' ? v.trim() : v != null && v !== '' ? String(v).trim() : '';
   if (str) return str;
-  const base64 = root?.podBase64 ?? root?.PodBase64;
-  if (typeof base64 === 'string' && base64.length > 0) {
-    return `data:image/png;base64,${base64}`;
-  }
+  const base64 = root?.podBase64 ?? root?.PodBase64 ?? inv?.podBase64 ?? inv?.PodBase64;
+  if (typeof base64 === 'string' && base64.length > 0) return `data:image/png;base64,${base64}`;
   return '';
 }
 
@@ -248,6 +312,22 @@ export interface OrderForUI {
   salespersonId?: string;
 }
 
+/** Solo hay 2 estados: pending o invoiced. La BD puede enviar "pending"/"invoiced" o true/false (isInvoiced). Acepta respuesta envuelta (data/order). */
+function normalizeOrderStatus(raw: any): 'pending' | 'invoiced' {
+  const inner = raw?.data ?? raw?.order ?? raw?.Order ?? raw?.value ?? raw?.result ?? raw;
+  const v =
+    inner?.status ?? inner?.Status ?? inner?.isInvoiced ?? inner?.IsInvoiced
+    ?? inner?.orderStatus ?? inner?.OrderStatus ?? inner?.state ?? inner?.State
+    ?? inner?.invoiceStatus ?? inner?.InvoiceStatus ?? inner?.order_state
+    ?? raw?.status ?? raw?.Status ?? raw?.isInvoiced ?? raw?.IsInvoiced
+    ?? raw?.orderStatus ?? raw?.OrderStatus ?? raw?.state ?? raw?.State;
+  if (v === true) return 'invoiced';
+  if (v === false) return 'pending';
+  const s = String(v ?? '').trim().toLowerCase();
+  if (s === 'invoiced' || s === 'facturado' || s === 'completed' || s === 'delivered' || s === '1') return 'invoiced';
+  return 'pending';
+}
+
 function mapRawOrderToUI(raw: any, details: any[] = []): OrderForUI {
   const id = String(raw?.orderId ?? raw?.OrderId ?? raw?.id ?? raw?.Id ?? '');
   const date = raw?.createdAt ?? raw?.CreatedAt ?? raw?.date ?? raw?.Date ?? new Date().toISOString();
@@ -280,6 +360,7 @@ function mapRawOrderToUI(raw: any, details: any[] = []): OrderForUI {
   if (total === 0 && computedSubtotal > 0) total = computedSubtotal + tax;
   if (total === 0 && subtotal > 0) total = subtotal + tax;
   const salespersonIdRaw = raw?.salespersonId ?? raw?.SalespersonId ?? raw?.userId ?? raw?.UserId;
+  const statusNorm = normalizeOrderStatus(raw);
   return {
     id,
     backendOrderId: raw?.orderId ?? raw?.OrderId ?? raw?.id ?? raw?.Id,
@@ -288,7 +369,7 @@ function mapRawOrderToUI(raw: any, details: any[] = []): OrderForUI {
     storeAddress: raw?.storeAddress ?? raw?.StoreAddress ?? raw?.store?.address ?? raw?.Store?.Address ?? '',
     date: typeof date === 'string' ? date : (date instanceof Date ? date.toISOString() : new Date().toISOString()),
     deliveryDate: raw?.deliveryDate ?? raw?.DeliveryDate,
-    status: String(raw?.status ?? raw?.Status ?? 'pending'),
+    status: statusNorm,
     items,
     totalUnits,
     subtotal,
@@ -300,7 +381,11 @@ function mapRawOrderToUI(raw: any, details: any[] = []): OrderForUI {
     podFileName: raw?.podFileName ?? raw?.PodFileName,
     vendorNumber: raw?.vendorNumber ?? raw?.VendorNumber,
     comments: raw?.comments ?? raw?.Comments,
-    invoiceId: raw?.invoiceId ?? raw?.InvoiceId ?? raw?.invoice?.id ?? raw?.Invoice?.Id,
+    invoiceId:
+      raw?.invoiceId ?? raw?.InvoiceId ?? raw?.Invoice_ID ?? raw?.invoice_id
+      ?? raw?.invoice?.id ?? raw?.invoice?.invoiceId ?? raw?.invoice?.InvoiceId
+      ?? raw?.Invoice?.Id ?? raw?.Invoice?.invoiceId ?? raw?.Invoice?.InvoiceId
+      ?? raw?.invoice?.Id ?? raw?.Invoice?.id,
     salespersonId: salespersonIdRaw != null ? String(salespersonIdRaw) : undefined,
   };
 }
@@ -382,7 +467,7 @@ export const ordersApi = {
       await safePost<any>('/orderdetails/orderdetails', detailBody);
     }
 
-    // 3) Crear factura (INVOICE) y sus detalles en la API para que la factura muestre los productos
+    // 3) Crear factura: POST /invoice/invoices enviando el id del pedido para vincular factura ↔ pedido
     let invoiceId: number | string | undefined;
     const invoiceBody = {
       orderId,
@@ -437,7 +522,7 @@ export const ordersApi = {
   /**
    * Actualiza un pedido existente (solo si está pendiente).
    * PUT /orders/order/{id}, PUT/POST/DELETE orderdetails, PUT invoice, PUT invoicedetails.
-   * optionalInvoiceId: si el backend no devuelve invoiceId en el pedido, pasar el id de la factura (p. ej. desde sessionStorage o getInvoiceIdForOrder).
+   * optionalInvoiceId: si el backend no devuelve invoiceId en el pedido, pasar el id de la factura (p. ej. desde getInvoiceIdForOrder).
    */
   async updateOrder(orderId: string | number, input: CreateOrderInput, optionalInvoiceId?: string | number | null): Promise<boolean> {
     const id = String(orderId);
@@ -517,7 +602,7 @@ export const ordersApi = {
       }
     }
 
-    // Obtener invoiceId: pedido, lista por orderId, o el pasado desde la UI (sessionStorage / getInvoiceIdForOrder)
+    // Obtener invoiceId: pedido, lista por orderId, o getInvoiceIdForOrder
     let invoiceId: string | number | null = null;
     if (existingOrder) {
       const fromOrder =
@@ -532,7 +617,8 @@ export const ordersApi = {
 
     if (invoiceId != null) {
       const invIdStr = String(invoiceId).trim();
-      const existingInvoice = await getInvoiceById(invIdStr) ?? await this.getInvoiceForOrder(id);
+      const rawInv = await getInvoiceById(invIdStr) ?? await this.getInvoiceForOrder(id);
+      const existingInvoice = unwrapInvoiceResponse(rawInv) ?? rawInv;
       const orderIdForBody = id;
       const invBody: Record<string, unknown> = {
         id: invIdStr,
@@ -557,14 +643,8 @@ export const ordersApi = {
         }
       }
 
-      // Backend devuelve 404 con rutas singulares; intentar plural primero
-      let putInvRes = await safePut<any>(`/invoice/invoices/${encodeURIComponent(invIdStr)}`, invBody);
-      if (putInvRes === null) putInvRes = await safePut<any>(`/invoice/invoice/${encodeURIComponent(invIdStr)}`, invBody);
-      if (putInvRes === null) putInvRes = await safePatch<any>(`/invoice/invoices/${encodeURIComponent(invIdStr)}`, invBody);
-      if (putInvRes === null) putInvRes = await safePatch<any>(`/invoice/invoice/${encodeURIComponent(invIdStr)}`, invBody);
-      if (putInvRes === null) {
-        return false;
-      }
+      const putInvRes = await safePut<any>(`/invoice/invoices/${encodeURIComponent(invIdStr)}`, invBody);
+      if (putInvRes === null) return false;
 
       const invDetailsList = await this.getInvoiceDetailsByInvoiceId(invIdStr);
       const invByProduct = new Map<string, { id: string; detail: any }>();
@@ -601,14 +681,8 @@ export const ordersApi = {
               if (detailBody[k] === undefined) detailBody[k] = v;
             }
           }
-          // Backend devuelve 404 con ruta singular; intentar plural primero
-          let putDetailRes = await safePut<any>(`/invoicedetails/invoicedetails/${encodeURIComponent(existing.id)}`, detailBody);
-          if (putDetailRes === null) putDetailRes = await safePut<any>(`/invoicedetails/invoicedetail/${encodeURIComponent(existing.id)}`, detailBody);
-          if (putDetailRes === null) putDetailRes = await safePatch<any>(`/invoicedetails/invoicedetails/${encodeURIComponent(existing.id)}`, detailBody);
-          if (putDetailRes === null) putDetailRes = await safePatch<any>(`/invoicedetails/invoicedetail/${encodeURIComponent(existing.id)}`, detailBody);
-          if (putDetailRes === null) {
-            return false;
-          }
+          const putDetailRes = await safePut<any>(`/invoicedetails/invoicedetails/${encodeURIComponent(existing.id)}`, detailBody);
+          if (putDetailRes === null) return false;
         } else {
           const postBody = {
             invoiceId: invIdStr,
@@ -649,14 +723,8 @@ export const ordersApi = {
               if (zeroBody[k] === undefined) zeroBody[k] = v;
             }
           }
-          // Backend devuelve 404 con ruta singular; intentar plural primero
-          let putZeroRes = await safePut<any>(`/invoicedetails/invoicedetails/${encodeURIComponent(detailId)}`, zeroBody);
-          if (putZeroRes === null) putZeroRes = await safePut<any>(`/invoicedetails/invoicedetail/${encodeURIComponent(detailId)}`, zeroBody);
-          if (putZeroRes === null) putZeroRes = await safePatch<any>(`/invoicedetails/invoicedetails/${encodeURIComponent(detailId)}`, zeroBody);
-          if (putZeroRes === null) putZeroRes = await safePatch<any>(`/invoicedetails/invoicedetail/${encodeURIComponent(detailId)}`, zeroBody);
-          if (putZeroRes === null) {
-            return false;
-          }
+          const putZeroRes = await safePut<any>(`/invoicedetails/invoicedetails/${encodeURIComponent(detailId)}`, zeroBody);
+          if (putZeroRes === null) return false;
         }
       }
     }
@@ -664,65 +732,64 @@ export const ordersApi = {
   },
 
   /**
-   * Detalles de factura por invoiceId.
-   * 1) GET /invoicedetails/invoicedetails/invoice/{invoiceId}
-   * 2) GET /invoice/invoices/{id}/details (por si el backend expone detalles como subrecurso)
-   * 3) GET /invoicedetails/invoicedetails y filtrar por invoiceId
+   * Detalles de factura por invoiceId. GET /invoicedetails/invoicedetails/invoice/{invoiceId}
    */
   async getInvoiceDetailsByInvoiceId(invoiceId: string): Promise<any[]> {
     const id = String(invoiceId).trim();
     if (!id) return [];
-    const byInvoice = await safeGet<any>(`/invoicedetails/invoicedetails/invoice/${encodeURIComponent(id)}`);
-    let result = normalizeDetailList(byInvoice);
-    if (result.length > 0) return result;
-    const byInvoiceDetails = await safeGet<any>(`/invoice/invoices/${encodeURIComponent(id)}/details`);
-    result = normalizeDetailList(byInvoiceDetails);
-    if (result.length > 0) return result;
-    const list = await safeGet<any>('/invoicedetails/invoicedetails');
-    const arr = normalizeDetailList(list);
-    const idLower = id.toLowerCase();
-    return arr.filter((d: any) => {
-      const invId = d?.invoiceId ?? d?.InvoiceId ?? d?.invoice_id;
-      return invId != null && String(invId).toLowerCase() === idLower;
-    });
+    const res = await safeGet<any>(`/invoicedetails/invoicedetails/invoice/${encodeURIComponent(id)}`);
+    return normalizeDetailList(res);
   },
 
   /**
-   * Obtiene el id de la factura asociada a un pedido (para subir POD).
-   * Lista GET /invoice/invoices y filtra por OrderId (el backend no expone GET por orderId).
+   * Obtiene el id de la factura asociada a un pedido.
+   * Flujo: GET /invoice/invoices → se compara cada factura.orderId/OrderId con el orderId del pedido seleccionado → se devuelve factura.id.
    */
   async getInvoiceIdForOrder(orderId: string): Promise<string | number | null> {
-    const orderIdStr = String(orderId).toLowerCase();
-    const orderIdNum = Number(orderId);
-
+    const orderIdNorm = String(orderId).trim();
+    if (!orderIdNorm) return null;
+    const orderIdLower = orderIdNorm.toLowerCase();
+    const orderIdNum = Number(orderIdNorm);
     const arr = await getInvoiceList();
-    const found = (arr as any[]).find((x: any) => {
-      const invOrder =
-        x?.orderId ?? x?.OrderId ?? x?.order_id ?? x?.Order_Id
-        ?? x?.order?.id ?? x?.Order?.Id ?? x?.order?.orderId ?? x?.Order?.OrderId;
-      if (invOrder == null) return false;
-      if (String(invOrder).toLowerCase() === orderIdStr) return true;
-      if (String(invOrder) === orderId) return true;
-      if (!Number.isNaN(orderIdNum) && Number(invOrder) === orderIdNum) return true;
-      return false;
-    });
-    if (found) {
-      const id = found?.id ?? found?.Id ?? found?.invoiceId ?? found?.InvoiceId;
-      return id != null ? id : null;
+    for (const x of arr as any[]) {
+      const item = unwrapInvoiceItem(x) ?? x;
+      const invOrderId =
+        item?.orderId ?? item?.OrderId ?? item?.OrderID ?? (item as any)?.Order_ID ?? item?.order_id ?? item?.Order_Id
+        ?? item?.order?.id ?? item?.Order?.Id ?? item?.order?.orderId ?? item?.Order?.OrderId
+        ?? x?.orderId ?? x?.OrderId ?? (x as any)?.OrderID ?? x?.order_id ?? x?.order?.id ?? x?.Order?.Id;
+      if (invOrderId == null || invOrderId === '') continue;
+      const invOrderStr = String(invOrderId).trim();
+      const invOrderNum = Number(invOrderId);
+      const match =
+        invOrderStr === orderIdNorm ||
+        invOrderStr.toLowerCase() === orderIdLower ||
+        (!Number.isNaN(orderIdNum) && !Number.isNaN(invOrderNum) && invOrderNum === orderIdNum) ||
+        (invOrderStr && orderIdNorm && invOrderStr.length === orderIdNorm.length && invOrderStr.toLowerCase() === orderIdLower) ||
+        invOrderId == orderIdNorm ||
+        invOrderId === orderIdNum;
+      if (match) {
+        const id = item?.id ?? item?.Id ?? item?.invoiceId ?? item?.InvoiceId ?? (item as any)?.InvoiceId ?? x?.id ?? x?.Id ?? x?.invoiceId ?? x?.InvoiceId;
+        if (id != null && id !== '') return id;
+      }
     }
     return null;
   },
 
-  /** Devuelve el objeto factura completo para este pedido (para hacer PUT con todos los campos). */
+  /** Devuelve el objeto factura completo cuyo orderId/OrderId coincide con el pedido seleccionado. */
   async getInvoiceForOrder(orderId: string): Promise<any | null> {
-    const orderIdStr = String(orderId).toLowerCase();
+    const orderIdNorm = String(orderId).trim();
+    const orderIdLower = orderIdNorm.toLowerCase();
     const arr = await getInvoiceList();
-    const found = (arr as any[]).find((x: any) => {
-      const invOrder = x?.orderId ?? x?.OrderId ?? x?.order?.id ?? x?.Order?.Id;
-      if (invOrder == null) return false;
-      return String(invOrder).toLowerCase() === orderIdStr;
-    });
-    return found ?? null;
+    for (const x of arr as any[]) {
+      const item = unwrapInvoiceItem(x) ?? x;
+      const invOrderId =
+        item?.orderId ?? item?.OrderId ?? item?.order_id ?? item?.Order_Id
+        ?? item?.order?.id ?? item?.Order?.Id ?? x?.orderId ?? x?.OrderId ?? x?.order?.id ?? x?.Order?.Id;
+      if (invOrderId == null) continue;
+      const invOrderStr = String(invOrderId).trim();
+      if (invOrderStr === orderIdNorm || invOrderStr.toLowerCase() === orderIdLower) return item ?? x;
+    }
+    return null;
   },
 
   /**
@@ -776,10 +843,9 @@ export const ordersApi = {
   },
 
   /**
-   * Datos de la factura para pantalla: usa endpoints concretos.
-   * - Factura: GET /invoice/invoices/{id} cuando hay invoiceId.
-   * - Detalles: del cuerpo de la factura (si vienen anidados) o GET /invoicedetails/invoicedetails/invoice/{id}.
-   * - Cantidad/subtotal leídos con todas las variantes de nombres que devuelve la API.
+   * Datos de la factura para pantalla.
+   * Flujo: con el orderId del pedido seleccionado se busca la factura en GET /invoice/invoices (comparando orderId),
+   * luego GET /invoice/invoices/{id} y GET /invoicedetails/invoicedetails/invoice/{invoiceId} para items y totales.
    */
   async getInvoiceDisplayForOrder(orderId: string, optionalInvoiceId?: string | number): Promise<{
     invoiceNumber: string;
@@ -787,30 +853,44 @@ export const ordersApi = {
     total: number;
     storeId?: string;
     items: Array<{ qty: number; code: string; description: string; price: number; amount: number }>;
+    /** Ruta del POD desde la factura (ej. /imagenes/dani.png) para pedidos viejos */
+    pod?: string;
   } | null> {
-    const order = await this.getOrderById(orderId);
     let invId = '';
     let invoice: any = null;
 
-    if (order?.invoiceId != null) invId = String(order.invoiceId);
-    if (!invId && optionalInvoiceId != null) invId = String(optionalInvoiceId);
+    // 1) Id de factura pasado opcionalmente o obtenido por API
+    if (optionalInvoiceId != null && String(optionalInvoiceId).trim()) invId = String(optionalInvoiceId).trim();
+    // 2) Comparar orderId en lista: GET /invoice/invoices y buscar donde factura.orderId === orderId del pedido seleccionado
+    if (!invId) {
+      const idFromList = await this.getInvoiceIdForOrder(orderId);
+      if (idFromList != null) invId = String(idFromList);
+    }
+    let rawInvoice: any = null;
     if (!invId) {
       const fromList = await this.getInvoiceForOrder(orderId);
       invoice = fromList;
+      rawInvoice = fromList;
       if (invoice?.data && typeof invoice.data === 'object') invoice = invoice.data;
       if (invoice?.invoice && typeof invoice.invoice === 'object') invoice = invoice.invoice;
-      invId = invoice != null ? String(invoice?.id ?? invoice?.Id ?? invoice?.invoiceId ?? invoice?.InvoiceId ?? '') : '';
+      if (invoice != null) invId = String(invoice?.id ?? invoice?.Id ?? invoice?.invoiceId ?? invoice?.InvoiceId ?? '').trim();
     }
-    if (!invId) {
-      const idFromList = await this.getInvoiceIdForOrder(orderId)
-        ?? (order?.backendOrderId != null ? await this.getInvoiceIdForOrder(String(order.backendOrderId)) : null);
-      if (idFromList != null) invId = String(idFromList);
+    // 3) Pedido desde API (puede traer invoiceId o backendOrderId)
+    const order = await this.getOrderById(orderId);
+    if (!invId && order?.invoiceId != null) invId = String(order.invoiceId);
+    if (!invId && order?.backendOrderId != null) {
+      const byBackend = await this.getInvoiceIdForOrder(String(order.backendOrderId));
+      if (byBackend != null) invId = String(byBackend);
     }
     if (!invId) return null;
 
-    if (!invoice) invoice = await getInvoiceById(invId);
-    if (invoice?.data && typeof invoice.data === 'object') invoice = invoice.data;
-    if (invoice?.invoice && typeof invoice.invoice === 'object') invoice = invoice.invoice;
+    if (!invoice) {
+      rawInvoice = await getInvoiceById(invId);
+    } else if (!rawInvoice) {
+      rawInvoice = await getInvoiceById(invId);
+    }
+    invoice = unwrapInvoiceResponse(rawInvoice ?? invoice);
+    if (invoice == null && rawInvoice != null) invoice = rawInvoice;
 
     let details = normalizeDetailList(invoice);
     if (details.length === 0) details = await this.getInvoiceDetailsByInvoiceId(invId);
@@ -861,6 +941,7 @@ export const ordersApi = {
     const totalFromDetails = items.reduce((s, i) => s + i.amount, 0);
     const date = invoice?.date ?? invoice?.Date ?? invoice?.createdAt ?? invoice?.CreatedAt ?? order?.date ?? new Date().toISOString();
     const invNumber = invoice?.invoiceNumber ?? invoice?.InvoiceNumber ?? invoice?.invoiceId ?? invoice?.InvoiceId ?? invId;
+    const podFromInvoice = getPodFromInvoice(rawInvoice) || getPodFromInvoice(invoice);
 
     return {
       invoiceNumber: String(invNumber),
@@ -868,6 +949,7 @@ export const ordersApi = {
       total: total > 0 ? total : totalFromDetails,
       storeId: invoice?.storeId ?? invoice?.StoreId ?? order?.storeId,
       items,
+      ...(podFromInvoice ? { pod: podFromInvoice } : {}),
     };
   },
 
@@ -1025,11 +1107,8 @@ export const ordersApi = {
       IsInvoiced: isInvoiced,
     };
     const id = encodeURIComponent(idStr);
-    let res = await safePut<any>(`/orders/order/${id}/status`, body);
-    if (res == null) {
-      res = await safePut<any>(`/orders/orders/${id}/status`, body);
-    }
-    return !!res;
+    const res = await safePut<any>(`/orders/order/${id}/status`, body);
+    return res !== null;
   },
 
   /**
@@ -1047,25 +1126,38 @@ export const ordersApi = {
    */
   async getOrdersByUser(userId: string): Promise<OrderForUI[]> {
     const list = await safeGet<any>(`/orders/orders/user/${encodeURIComponent(userId)}`);
-    const arr = Array.isArray(list) ? list : list?.data ?? list?.items ?? [];
+    const arr = Array.isArray(list) ? list : list?.data ?? list?.Data ?? list?.items ?? list?.Items ?? list?.value ?? list?.Value ?? [];
     if (!arr.length) return [];
-    const ids = (arr as any[]).map((raw: any) => String(raw?.orderId ?? raw?.OrderId ?? raw?.id ?? raw?.Id ?? '')).filter(Boolean);
-    const [fullOrders, invoicesList] = await Promise.all([
+    const ids = (arr as any[]).map((raw: any) =>
+      String(raw?.orderId ?? raw?.OrderId ?? (raw as any)?.OrderID ?? raw?.id ?? raw?.Id ?? '')
+    ).filter(Boolean);
+    const [fullOrders, invoicesRaw] = await Promise.all([
       Promise.all(ids.map((id) => this.getOrderById(id))),
-      safeGet<any>('/invoice/invoices').then((inv: any) => Array.isArray(inv) ? inv : inv?.invoices ?? inv?.data ?? inv?.items ?? []),
+      safeGet<any>('/invoice/invoices'),
     ]);
+    const invoicesList = invoicesRaw != null ? normalizeInvoiceList(invoicesRaw) : [];
     let orders = fullOrders.filter((o): o is OrderForUI => o != null);
-    // Solo pedidos del vendedor actual (por si el backend devuelve más)
     const uid = String(userId);
     orders = orders.filter((o) => {
       const sid = o.salespersonId ?? (o as any).salespersonId;
       if (sid != null && sid !== '') return String(sid) === uid;
       return true;
     });
-    const byOrderId = new Map<string, any>();
-    (invoicesList as any[]).forEach((inv: any) => {
-      const oid = String(inv?.orderId ?? inv?.OrderId ?? inv?.order?.id ?? inv?.Order?.Id ?? '');
-      if (oid) byOrderId.set(oid, inv);
+    const byOrderId = new Map<string, { inv: any; invId: string | number }>();
+    (invoicesList as any[]).forEach((x: any) => {
+      const inv = unwrapInvoiceItem(x) ?? x;
+      const oid =
+        inv?.orderId ?? inv?.OrderId ?? (inv as any)?.OrderID ?? inv?.order_id ?? inv?.Order_Id
+        ?? inv?.order?.id ?? inv?.Order?.Id ?? inv?.order?.orderId ?? inv?.Order?.OrderId
+        ?? x?.orderId ?? x?.OrderId ?? x?.order?.id ?? x?.Order?.Id;
+      const invId = inv?.id ?? inv?.Id ?? inv?.invoiceId ?? inv?.InvoiceId ?? x?.id ?? x?.Id ?? x?.invoiceId ?? x?.InvoiceId;
+      if (oid != null && oid !== '' && invId != null && invId !== '') {
+        const oidStr = String(oid).trim();
+        byOrderId.set(oidStr, { inv, invId });
+        byOrderId.set(oidStr.toLowerCase(), { inv, invId });
+        const oidNum = Number(oid);
+        if (!Number.isNaN(oidNum)) byOrderId.set(String(oidNum), { inv, invId });
+      }
     });
     const sumFromDetails = (inv: any): number => {
       const details = inv?.invoiceDetails ?? inv?.InvoiceDetails ?? inv?.details ?? inv?.Details ?? inv?.items ?? inv?.Items ?? [];
@@ -1074,21 +1166,55 @@ export const ordersApi = {
     };
 
     const result = orders.map((o) => {
-      if (Number(o.total) > 0) return o;
-      const inv = byOrderId.get(o.id) ?? byOrderId.get(String(o.backendOrderId ?? ''));
-      if (inv == null) return o;
+      const match = byOrderId.get(String(o.id).trim())
+        ?? byOrderId.get(String(o.backendOrderId ?? '').trim())
+        ?? byOrderId.get(String(o.id).toLowerCase())
+        ?? byOrderId.get(String(o.backendOrderId ?? '').toLowerCase());
+      let next = o;
+      if (match) {
+        const invId = match.invId;
+        const inv = match.inv;
+        if (next.invoiceId == null || next.invoiceId === '') next = { ...next, invoiceId: invId };
+        const podFromInv = getPodFromInvoice(inv);
+        if (podFromInv) {
+          next = { ...next, podImageUrl: next.podImageUrl || podFromInv, podFileName: next.podFileName || podFromInv, podUploaded: true };
+        }
+        if (Number(next.total) <= 0) {
+          let invTotal = Number(inv?.total ?? inv?.Total ?? inv?.amount ?? inv?.Amount ?? inv?.totalAmount ?? inv?.TotalAmount ?? inv?.grandTotal ?? inv?.GrandTotal ?? 0);
+          if (invTotal <= 0) invTotal = sumFromDetails(inv);
+          if (invTotal > 0) next = { ...next, total: invTotal, subtotal: next.subtotal || invTotal };
+        }
+        if (Number(next.total) > 0) return next;
+      }
+      const inv = match?.inv ?? byOrderId.get(String(o.id).trim())?.inv ?? byOrderId.get(String(o.backendOrderId ?? '').trim())?.inv;
+      if (inv == null) return next;
       let invTotal = Number(
         inv?.total ?? inv?.Total ?? inv?.amount ?? inv?.Amount ?? inv?.totalAmount ?? inv?.TotalAmount ?? inv?.grandTotal ?? inv?.GrandTotal ?? 0
       );
       if (invTotal <= 0) invTotal = sumFromDetails(inv);
-      if (invTotal > 0) return { ...o, total: invTotal, subtotal: o.subtotal || invTotal };
-      return o;
+      if (invTotal > 0) return { ...next, total: invTotal, subtotal: next.subtotal || invTotal };
+      return next;
     });
     for (let i = 0; i < result.length; i++) {
       if (Number(result[i].total) <= 0) {
         const fallback = await this.getInvoiceTotalForOrder(result[i].id) ?? await this.getInvoiceTotalForOrder(String(result[i].backendOrderId ?? ''));
         if (fallback > 0) result[i] = { ...result[i], total: fallback, subtotal: result[i].subtotal || fallback };
       }
+    }
+    // Pedidos con factura pero sin POD en la lista: traer POD desde GET factura (la factura devuelve orderId y pod)
+    const conFacturaSinPod = result
+      .map((o, idx) => (o.invoiceId && !o.podUploaded ? idx : -1))
+      .filter((i) => i >= 0);
+    if (conFacturaSinPod.length > 0) {
+      await Promise.all(
+        conFacturaSinPod.map(async (idx) => {
+          const invRaw = await getInvoiceById(String(result[idx].invoiceId!));
+          const pod = getPodFromInvoice(invRaw);
+          if (pod) {
+            result[idx] = { ...result[idx], podImageUrl: pod, podFileName: pod, podUploaded: true };
+          }
+        })
+      );
     }
     return result;
   },
@@ -1099,33 +1225,68 @@ export const ordersApi = {
   async getOrderById(orderId: string): Promise<OrderForUI | null> {
     const raw = await safeGet<any>(`/orders/orders/${encodeURIComponent(orderId)}`);
     if (!raw) return null;
+    const orderRaw = raw?.data ?? raw?.order ?? raw?.Order ?? raw?.value ?? raw?.result ?? raw;
     let details = await this.getOrderDetailsByOrderIdRaw(orderId);
-    if (!details?.length && raw) {
-      const nested = raw?.orderDetails ?? raw?.OrderDetails ?? raw?.details ?? raw?.Details ?? raw?.items ?? raw?.Items;
+    if (!details?.length && orderRaw) {
+      const nested = orderRaw?.orderDetails ?? orderRaw?.OrderDetails ?? orderRaw?.details ?? orderRaw?.Details ?? orderRaw?.items ?? orderRaw?.Items ?? raw?.orderDetails ?? raw?.OrderDetails ?? raw?.details ?? raw?.Details ?? raw?.items ?? raw?.Items;
       details = Array.isArray(nested) ? nested : [];
     }
-    const backendId = raw?.orderId ?? raw?.OrderId ?? raw?.id ?? raw?.Id ?? orderId;
+    const backendId = orderRaw?.orderId ?? orderRaw?.OrderId ?? orderRaw?.id ?? orderRaw?.Id ?? raw?.orderId ?? raw?.OrderId ?? raw?.id ?? raw?.Id ?? orderId;
     if (!details?.length && backendId !== orderId) {
       const altDetails = await this.getOrderDetailsByOrderIdRaw(String(backendId));
       if (altDetails?.length) details = altDetails;
     }
-    const result = mapRawOrderToUI(raw, details);
+    const result = mapRawOrderToUI(orderRaw, details);
     if (result?.items?.length) {
       result.items = await enrichOrderItemsWithProductNames(result.items);
     }
-    // Asegurar invoiceId para POD: si el backend no lo devuelve en el pedido, buscarlo por orderId
-    if (result && (result.invoiceId == null || result.invoiceId === '')) {
-      const invId = await this.getInvoiceIdForOrder(orderId) ?? await this.getInvoiceIdForOrder(String(backendId));
-      if (invId != null) result.invoiceId = invId;
-    }
-    // Traer el POD de la factura (en BD está guardado como "pod") y mostrarlo en el detalle
-    if (result?.invoiceId) {
-      const inv = await getInvoiceById(String(result.invoiceId));
-      const podText = getPodFromInvoice(inv);
+    // POD desde factura anidada en la respuesta del pedido (si el backend la incluye)
+    const nestedInv = orderRaw?.invoice ?? orderRaw?.Invoice ?? orderRaw?.InvoiceData ?? raw?.invoice ?? raw?.Invoice ?? raw?.InvoiceData;
+    if (nestedInv && typeof nestedInv === 'object') {
+      const podText = getPodFromInvoice(nestedInv);
       if (podText) {
         result.podImageUrl = result.podImageUrl || podText;
         result.podFileName = result.podFileName || podText;
         if (!result.podUploaded) result.podUploaded = true;
+      }
+      if ((result.invoiceId == null || result.invoiceId === '') && (nestedInv?.id ?? nestedInv?.Id ?? nestedInv?.invoiceId ?? nestedInv?.InvoiceId)) {
+        result.invoiceId = nestedInv?.id ?? nestedInv?.Id ?? nestedInv?.invoiceId ?? nestedInv?.InvoiceId;
+      }
+    }
+    // Asegurar invoiceId: del pedido (todas las variantes en raw/orderRaw), por lista, o por endpoint
+    if (result && (result.invoiceId == null || result.invoiceId === '')) {
+      const fromRaw =
+        raw?.invoiceId ?? raw?.InvoiceId ?? raw?.Invoice_ID ?? raw?.invoice_id
+        ?? raw?.data?.invoiceId ?? raw?.data?.InvoiceId ?? raw?.data?.Invoice_ID
+        ?? raw?.Data?.InvoiceId ?? raw?.Data?.invoiceId ?? raw?.Order?.InvoiceId ?? raw?.order?.invoiceId
+        ?? orderRaw?.invoiceId ?? orderRaw?.InvoiceId ?? orderRaw?.Invoice_ID ?? orderRaw?.invoice_id
+        ?? orderRaw?.invoice?.id ?? orderRaw?.Invoice?.Id ?? orderRaw?.invoice?.invoiceId ?? orderRaw?.Invoice?.invoiceId
+        ?? orderRaw?.Invoice?.Id ?? orderRaw?.invoice?.Id;
+      if (fromRaw != null && fromRaw !== '') {
+        result.invoiceId = fromRaw;
+      } else {
+        const invId = await this.getInvoiceIdForOrder(orderId) ?? await this.getInvoiceIdForOrder(String(backendId));
+        if (invId != null) result.invoiceId = invId;
+      }
+    }
+    // Traer POD desde la factura (igual que Sistema Web Admin: GET factura por id, luego getInvoiceForOrder si hace falta).
+    let invForPod: any = null;
+    if (result?.invoiceId) {
+      invForPod = await getInvoiceById(String(result.invoiceId));
+    }
+    if (!invForPod && result) {
+      invForPod = await this.getInvoiceForOrder(orderId);
+    }
+    if (invForPod) {
+      const podText = getPodFromInvoice(invForPod);
+      if (podText) {
+        result.podImageUrl = result.podImageUrl || podText;
+        result.podFileName = result.podFileName || podText;
+        if (!result.podUploaded) result.podUploaded = true;
+      }
+      const invRoot = unwrapInvoiceResponse(invForPod);
+      if (result.status === 'pending' && (podText || (invRoot && (invRoot?.isInvoiced === true || invRoot?.IsInvoiced === true || String(invRoot?.status ?? invRoot?.Status ?? '').toLowerCase() === 'invoiced')))) {
+        result.status = 'invoiced';
       }
     }
     return result;

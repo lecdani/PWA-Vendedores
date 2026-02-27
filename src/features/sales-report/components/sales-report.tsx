@@ -144,27 +144,6 @@ export function SalesReport() {
         })
       );
 
-      if (typeof window !== 'undefined') {
-        try {
-          const statusRaw = sessionStorage.getItem('orderStatusByOrderId');
-          const statusMap = statusRaw ? JSON.parse(statusRaw) : {};
-          const podRaw = sessionStorage.getItem('podByOrderId');
-          const podMap = podRaw ? JSON.parse(podRaw) : {};
-          enriched = enriched.map((o) => {
-            let o2 = o;
-            const idKey = String(o.id ?? (o as any).backendOrderId ?? '');
-            const cachedStatus = idKey ? (statusMap[idKey] ?? statusMap[o.id]) : undefined;
-            if (cachedStatus) o2 = { ...o2, status: cachedStatus };
-            const cachedPod = idKey ? (podMap[idKey] ?? podMap[o.id]) : undefined;
-            if (cachedPod?.podImageUrl || cachedPod?.podFileName) {
-              o2 = { ...o2, podUploaded: true };
-            }
-            return o2;
-          });
-        } catch {
-          // ignorar
-        }
-      }
       setOrders(enriched);
       setVisitLogs(logs);
       setLoading(false);
