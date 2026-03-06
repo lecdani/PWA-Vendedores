@@ -17,6 +17,8 @@ export interface CreateOrderInput {
   storeAddress?: string;
   salespersonId?: string;
   vendorNumber?: string;
+  /** Código PO (Purchase Order), requerido y único en el sistema. */
+  po?: string;
   items: OrderItemInput[];
   subtotal: number;
   tax: number;
@@ -24,8 +26,10 @@ export interface CreateOrderInput {
 }
 
 export interface CreatedOrderResult {
-  orderId: number | string;
+  orderId?: number | string;
   invoiceId?: number | string;
+  /** Mensaje de error del backend (ej. PO duplicado). */
+  errorMessage?: string;
 }
 
 async function safePost<T>(endpoint: string, body: unknown): Promise<T | null> {
@@ -310,6 +314,8 @@ export interface OrderForUI {
   invoiceId?: number | string;
   /** Id del vendedor asignado al pedido. */
   salespersonId?: string;
+  /** Código PO (Purchase Order), único. */
+  po?: string;
 }
 
 /** Solo hay 2 estados: pending o invoiced. La BD puede enviar "pending"/"invoiced" o true/false (isInvoiced). Acepta respuesta envuelta (data/order). */
@@ -387,6 +393,7 @@ function mapRawOrderToUI(raw: any, details: any[] = []): OrderForUI {
       ?? raw?.Invoice?.Id ?? raw?.Invoice?.invoiceId ?? raw?.Invoice?.InvoiceId
       ?? raw?.invoice?.Id ?? raw?.Invoice?.id,
     salespersonId: salespersonIdRaw != null ? String(salespersonIdRaw) : undefined,
+    po: raw?.po ?? raw?.Po ?? raw?.purchaseOrder ?? raw?.PurchaseOrder ?? raw?.PO ?? undefined,
   };
 }
 
@@ -399,9 +406,9 @@ export const ordersApi = {
    * Devuelve el id del pedido creado en backend (orderId) si se pudo obtener.
    */
   async createOrder(input: CreateOrderInput): Promise<CreatedOrderResult | null> {
-    // 1) Crear header de pedido
-    const headerBody = {
-      // Campos en camelCase y PascalCase para mayor compatibilidad con .NET
+    // 1) Crear header de pedido (el backend espera PO como varchar, único)
+    const poTrimmed = (input.po ?? '').trim();
+    const headerBody: Record<string, unknown> = {
       storeId: input.storeId,
       StoreId: input.storeId,
       salespersonId: input.salespersonId,
@@ -419,10 +426,17 @@ export const ordersApi = {
       total: input.total,
       Total: input.total,
     };
+    if (poTrimmed) {
+      headerBody.po = poTrimmed;
+      headerBody.Po = poTrimmed;
+    }
 
-    const createdOrder = await safePost<any>('/orders/orders', headerBody);
-    if (!createdOrder) {
-      return null;
+    let createdOrder: any;
+    try {
+      createdOrder = await apiClient.post<any>('/orders/orders', headerBody);
+    } catch (error) {
+      const err = error as ApiError;
+      return { errorMessage: err.message || 'Error al crear el pedido' };
     }
 
     let orderId: string | number | null = null;
@@ -447,7 +461,7 @@ export const ordersApi = {
 
     if (orderId == null || orderId === '') {
       console.warn('[orders-api] createOrder: respuesta sin orderId.', createdOrder);
-      return null;
+      return { errorMessage: 'El servidor no devolvió el ID del pedido.' };
     }
 
     // 2) Crear detalles de pedido
@@ -524,7 +538,7 @@ export const ordersApi = {
    * PUT /orders/order/{id}, PUT/POST/DELETE orderdetails, PUT invoice, PUT invoicedetails.
    * optionalInvoiceId: si el backend no devuelve invoiceId en el pedido, pasar el id de la factura (p. ej. desde getInvoiceIdForOrder).
    */
-  async updateOrder(orderId: string | number, input: CreateOrderInput, optionalInvoiceId?: string | number | null): Promise<boolean> {
+  async updateOrder(orderId: string | number, input: CreateOrderInput, optionalInvoiceId?: string | number | null): Promise<{ ok: boolean; errorMessage?: string }> {
     const id = String(orderId);
     const existingOrder = await safeGet<any>(`/orders/orders/${encodeURIComponent(id)}`);
     let salespersonId = input.salespersonId;
@@ -544,13 +558,21 @@ export const ordersApi = {
       total: input.total,
       Total: input.total,
     };
-    // El backend exige FK_ORDER_USER_SALESPERSON_ID: incluir salespersonId en el PUT para no violarla
     if (salespersonId) {
       headerBody.salespersonId = salespersonId;
       headerBody.SalespersonId = salespersonId;
     }
-    const putOrderRes = await safePut<any>(`/orders/order/${encodeURIComponent(id)}`, headerBody);
-    if (putOrderRes === null) return false;
+    const poTrimmed = (input.po ?? '').trim();
+    if (poTrimmed) {
+      headerBody.po = poTrimmed;
+      headerBody.Po = poTrimmed;
+    }
+    try {
+      await apiClient.put<any>(`/orders/order/${encodeURIComponent(id)}`, headerBody);
+    } catch (error) {
+      const err = error as ApiError;
+      return { ok: false, errorMessage: err.message || 'Error al actualizar el pedido' };
+    }
 
     const existingDetails = await this.getOrderDetailsByOrderIdRaw(id);
     const byProductId = new Map<string, { id: string; detail: any }>();
@@ -644,7 +666,7 @@ export const ordersApi = {
       }
 
       const putInvRes = await safePut<any>(`/invoice/invoices/${encodeURIComponent(invIdStr)}`, invBody);
-      if (putInvRes === null) return false;
+      if (putInvRes === null) return { ok: false, errorMessage: 'Error al actualizar la factura' };
 
       const invDetailsList = await this.getInvoiceDetailsByInvoiceId(invIdStr);
       const invByProduct = new Map<string, { id: string; detail: any }>();
@@ -682,7 +704,7 @@ export const ordersApi = {
             }
           }
           const putDetailRes = await safePut<any>(`/invoicedetails/invoicedetails/${encodeURIComponent(existing.id)}`, detailBody);
-          if (putDetailRes === null) return false;
+          if (putDetailRes === null) return { ok: false, errorMessage: 'Error al actualizar detalle de factura' };
         } else {
           const postBody = {
             invoiceId: invIdStr,
@@ -695,9 +717,7 @@ export const ordersApi = {
             Subtotal: Number(lineSubtotal),
           };
           const postRes = await safePost<any>('/invoicedetails/invoicedetails', postBody);
-          if (postRes === null) {
-            return false;
-          }
+          if (postRes === null) return { ok: false, errorMessage: 'Error al crear detalle de factura' };
         }
       }
       for (const [pid, { id: detailId, detail: d }] of invByProduct) {
@@ -724,11 +744,11 @@ export const ordersApi = {
             }
           }
           const putZeroRes = await safePut<any>(`/invoicedetails/invoicedetails/${encodeURIComponent(detailId)}`, zeroBody);
-          if (putZeroRes === null) return false;
+          if (putZeroRes === null) return { ok: false, errorMessage: 'Error al actualizar factura' };
         }
       }
     }
-    return true;
+    return { ok: true };
   },
 
   /**
@@ -954,36 +974,24 @@ export const ordersApi = {
   },
 
   /**
-   * Guarda en la factura el POD: ruta y opcionalmente la imagen en base64.
-   * PATCH /invoice/invoices/{id}/pod con { id, pod (ruta), podBase64? }.
-   * Si el backend acepta podBase64, puede guardar el archivo en la ruta indicada.
+   * Asocia el POD a la factura enviando solo el fileName (clave en S3).
+   * La imagen debe subirse antes con POST /images/upload; este PATCH solo envía el link/fileName.
+   * PATCH /invoice/invoices/{id}/pod — body: { id, pod: fileName } (sin base64).
    */
   async uploadPODForInvoice(params: {
     invoiceId: number | string;
-    /** Nombre del archivo (ej. "Dani.png"); se envía como ruta "imagenes/Dani.png" */
+    /** Nombre del archivo devuelto por POST /images/upload (clave S3). */
     fileName: string;
-    contentType?: string;
     notes?: string;
-    /** Imagen en data URL (data:image/png;base64,...). Se envía como podBase64 al backend. */
-    imageDataUrl?: string | null;
   }): Promise<boolean> {
     const id = String(params.invoiceId).trim();
-    const name = (params.fileName || 'POD.png').trim();
-    const podPath = name.startsWith('imagenes/') ? name : `imagenes/${name}`;
-    let podBase64: string | undefined;
-    if (params.imageDataUrl && typeof params.imageDataUrl === 'string' && params.imageDataUrl.startsWith('data:')) {
-      const base64 = params.imageDataUrl.replace(/^data:image\/[^;]+;base64,/, '');
-      if (base64.length > 0) podBase64 = base64;
-    }
-    const body: Record<string, unknown> = { id, pod: podPath };
-    if (podBase64) body.podBase64 = podBase64;
+    const fileName = (params.fileName || '').trim();
+    if (!fileName) return false;
+    const body: Record<string, unknown> = { id, pod: fileName };
+    if (params.notes) body.notes = params.notes;
     try {
       const res = await safePatch<any>(`/invoice/invoices/${encodeURIComponent(id)}/pod`, body);
-      const ok = res !== null && res !== undefined;
-      if (typeof process !== 'undefined' && process.env.NODE_ENV === 'development' && !ok) {
-        console.warn('[orders-api] uploadPODForInvoice: PATCH devolvió', res);
-      }
-      return ok;
+      return res !== null && res !== undefined;
     } catch (e) {
       console.error('[orders-api] uploadPODForInvoice failed:', e);
       return false;
@@ -1217,6 +1225,29 @@ export const ordersApi = {
       );
     }
     return result;
+  },
+
+  /**
+   * Indica si un código PO ya está en uso por otro pedido (para validación antes de crear/editar).
+   * Si se pasa excludeOrderId, ese pedido se ignora (edición: el mismo PO del mismo pedido está permitido).
+   */
+  async isPoAlreadyUsed(
+    po: string,
+    options?: { excludeOrderId?: string; userId?: string }
+  ): Promise<boolean> {
+    const poNorm = (po ?? '').trim().toLowerCase();
+    if (!poNorm) return false;
+    const userId = options?.userId;
+    if (!userId) return false;
+    const orders = await this.getOrdersByUser(userId);
+    const excludeId = options?.excludeOrderId ? String(options.excludeOrderId).trim() : '';
+    const found = orders.some((o) => {
+      const oid = String(o.id ?? o.backendOrderId ?? '').trim();
+      if (excludeId && oid === excludeId) return false;
+      const opo = (o.po ?? '').trim().toLowerCase();
+      return opo === poNorm;
+    });
+    return found;
   },
 
   /**

@@ -7,6 +7,7 @@ import { useLanguage } from '@/shared/i18n/language-provider';
 import { useAuth } from '@/shared/auth/auth-provider';
 import { ordersApi, OrderForUI } from '@/shared/api/orders-api';
 import { storesApi } from '@/shared/api/stores-api';
+import { citiesApi } from '@/shared/api/cities-api';
 import { histpricesApi } from '@/shared/api/histprices-api';
 import { Card, CardContent } from '@/shared/ui/card';
 import { Badge } from '@/shared/ui/badge';
@@ -23,7 +24,7 @@ export function PendingPOD() {
   const { user } = useAuth();
   const [pendingOrders, setPendingOrders] = useState<OrderForUI[]>([]);
   const [loading, setLoading] = useState(true);
-  const [storeCache, setStoreCache] = useState<Record<string, { name: string; address: string }>>({});
+  const [storeCache, setStoreCache] = useState<Record<string, { name: string; address: string; city: string }>>({});
 
   useEffect(() => {
     const load = async () => {
@@ -77,11 +78,17 @@ export function PendingPOD() {
     if (needStore.length === 0) return;
     let mounted = true;
     (async () => {
-      const next: Record<string, { name: string; address: string }> = {};
+      const next: Record<string, { name: string; address: string; city: string }> = {};
       for (const id of needStore) {
         if (!mounted) break;
         const store = await storesApi.fetchStoreById(id);
-        if (store && mounted) next[id] = { name: store.name, address: store.address || '' };
+        if (store && mounted) {
+          const cityRaw = (store.city || '').trim();
+          const city = cityRaw && citiesApi.looksLikeCityId(cityRaw)
+            ? (await citiesApi.getCityNameById(cityRaw)) || ''
+            : cityRaw;
+          next[id] = { name: store.name, address: store.address || '', city };
+        }
       }
       if (mounted) setStoreCache((prev) => ({ ...prev, ...next }));
     })();
@@ -114,6 +121,10 @@ export function PendingPOD() {
             const cached = order.storeId ? storeCache[order.storeId] : null;
             const displayStoreName = cached?.name || (order.storeName && !looksLikeId(order.storeName) ? order.storeName : t('store'));
             const displayAddress = (cached?.address || order.storeAddress || '').trim();
+            const displayCity = (cached?.city || '').trim();
+            const displayPo = (order.po || '').trim();
+            const titleMain = displayPo ? `PO - ${displayPo}` : displayStoreName;
+            const subtitleStore = displayPo ? displayStoreName : null;
             const computedTotal = order.items?.length
               ? order.items.reduce((s: number, i: any) => s + (i.quantity ?? i.toOrder ?? 0) * (Number(i.price) || 0), 0)
               : 0;
@@ -136,10 +147,18 @@ export function PendingPOD() {
                 <CardContent className="p-4">
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-slate-900 truncate">{displayStoreName}</p>
-                      {displayAddress ? (
-                        <p className="text-xs text-slate-500 mt-0.5 truncate" title={displayAddress}>{displayAddress}</p>
+                      <p className="text-sm font-medium text-slate-900 truncate">{titleMain}</p>
+                      {subtitleStore ? (
+                        <p className="text-xs text-slate-500 mt-0.5 truncate" title={subtitleStore}>{subtitleStore}</p>
                       ) : null}
+                      {((displayAddress || displayCity) && (() => {
+                        const ubicacion = [displayAddress, displayCity].filter(Boolean).join(', ');
+                        return ubicacion ? (
+                          <p className="text-xs text-slate-500 mt-0.5 truncate" title={ubicacion}>
+                            {t('location')}: {ubicacion}
+                          </p>
+                        ) : null;
+                      })())}
                       <p className="text-xs text-slate-400 mt-0.5">{new Date(order.date).toLocaleDateString()}</p>
                       <div className="flex items-center gap-2 mt-2 flex-wrap">
                         <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200">

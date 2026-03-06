@@ -17,6 +17,7 @@ interface ProductPosition {
   currentStock: number;
   toOrder: number;
   price: number;
+  imageUrl?: string;
 }
 
 interface ProductModalProps {
@@ -61,10 +62,16 @@ export function ProductModal({ open, onClose, position, onUpdate }: ProductModal
           {/* Product Info */}
           <div className="bg-blue-50 rounded-lg p-4 border border-blue-100">
             <div className="flex items-start gap-3">
-              <div className="p-2 bg-blue-100 rounded-lg">
-                <Package className="h-5 w-5 text-blue-600" />
-              </div>
-              <div className="flex-1">
+              {position.imageUrl ? (
+                <div className="w-12 h-12 rounded-lg overflow-hidden bg-white border border-blue-100 flex-shrink-0">
+                  <img src={position.imageUrl} alt="" className="object-cover w-full h-full" />
+                </div>
+              ) : (
+                <div className="p-2 bg-blue-100 rounded-lg flex-shrink-0">
+                  <Package className="h-5 w-5 text-blue-600" />
+                </div>
+              )}
+              <div className="flex-1 min-w-0">
                 {position.productId ? (
                   <>
                     <p className="text-sm text-slate-900 mb-1">{position.productName || position.sku}</p>

@@ -10,6 +10,7 @@ import { ordersApi } from '@/shared/api/orders-api';
 import { storesApi } from '@/shared/api/stores-api';
 import { histpricesApi } from '@/shared/api/histprices-api';
 import { productsApi } from '@/shared/api/products-api';
+import { uploadImage } from '@/shared/api/images-api';
 import { Button } from '@/shared/ui/button';
 import { Card, CardContent } from '@/shared/ui/card';
 import { Label } from '@/shared/ui/label';
@@ -21,8 +22,7 @@ export function CapturePOD({ orderId }: { orderId: string }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   
   const [podImage, setPodImage] = useState<string | null>(null);
-  const [podFileName, setPodFileName] = useState<string>('POD.png');
-  const [podContentType, setPodContentType] = useState<string>('image/png');
+  const [podFile, setPodFile] = useState<File | null>(null);
   const [notes, setNotes] = useState('');
   const [uploading, setUploading] = useState(false);
   const [orderData, setOrderData] = useState<any>(null);
@@ -100,8 +100,7 @@ export function CapturePOD({ orderId }: { orderId: string }) {
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file) {
-      setPodFileName(file.name || 'POD.png');
-      setPodContentType(file.type || 'image/png');
+      setPodFile(file);
       const reader = new FileReader();
       reader.onloadend = () => {
         setPodImage(reader.result as string);
@@ -116,10 +115,11 @@ export function CapturePOD({ orderId }: { orderId: string }) {
 
   const handleRemoveImage = () => {
     setPodImage(null);
+    setPodFile(null);
   };
 
   const handleSubmit = async () => {
-    if (!podImage) {
+    if (!podImage || !podFile) {
       setPodUploadError(t('pod_image_required') || 'Debes agregar una foto o imagen del comprobante de entrega.');
       return;
     }
@@ -135,12 +135,11 @@ export function CapturePOD({ orderId }: { orderId: string }) {
       if (invoiceId == null) invoiceId = await ordersApi.getInvoiceIdForOrder(String(backendOrderId));
 
       if (invoiceId != null) {
+        const { fileName } = await uploadImage(podFile);
         const podOk = await ordersApi.uploadPODForInvoice({
           invoiceId,
-          fileName: podFileName,
-          contentType: podContentType,
-          notes,
-          imageDataUrl: podImage,
+          fileName,
+          notes: notes || undefined,
         });
         if (!podOk) {
           setPodUploadError(t('pod_upload_failed') || 'No se pudo guardar el comprobante. Revisa tu conexión e intenta de nuevo.');

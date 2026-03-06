@@ -111,6 +111,10 @@ export const translations = {
     'order_deleted': 'Pedido eliminado',
     'send_order': 'Enviar Pedido',
     'save_changes': 'Guardar cambios',
+    'po_code': 'Código PO',
+    'po_code_placeholder': 'Ingrese el código PO (único)',
+    'po_code_required': 'Ingrese el código PO antes de enviar el pedido.',
+    'po_duplicate': 'Ese código PO ya existe. Use otro código único.',
     'order_sent_success': 'Pedido enviado exitosamente',
     'delivery_completed_success': 'Entrega completada exitosamente',
     'planogram': 'Planograma',
@@ -130,6 +134,7 @@ export const translations = {
     'no_orders_found': 'No se encontraron pedidos',
     'articles': 'artículos',
     'store': 'Tienda',
+    'location': 'Ubicación',
     'total_not_available': 'N/D',
 
     // Order Detail
@@ -340,6 +345,10 @@ export const translations = {
     'order_deleted': 'Order deleted',
     'send_order': 'Send Order',
     'save_changes': 'Save changes',
+    'po_code': 'PO Code',
+    'po_code_placeholder': 'Enter PO code (unique)',
+    'po_code_required': 'Enter the PO code before sending the order.',
+    'po_duplicate': 'That PO code already exists. Use a unique code.',
     'order_sent_success': 'Order sent successfully',
     'delivery_completed_success': 'Delivery completed successfully',
     'planogram': 'Planogram',
@@ -359,6 +368,7 @@ export const translations = {
     'no_orders_found': 'No orders found',
     'articles': 'items',
     'store': 'Store',
+    'location': 'Location',
     'total_not_available': 'N/A',
 
     // Order Detail

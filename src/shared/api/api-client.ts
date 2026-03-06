@@ -1,5 +1,17 @@
 export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://100.127.113.86:5107';
 
+/** Si true, las URLs de imágenes (y assets) se sirven por /api/proxy para evitar CORS. */
+const USE_PROXY = process.env.NEXT_PUBLIC_USE_API_PROXY !== 'false';
+
+/** URL para mostrar imágenes del backend (productos, POD). Acepta path relativo o absoluto. Con proxy evita CORS. */
+export function getBackendAssetUrl(path: string | null | undefined): string {
+  if (!path || path.startsWith('data:') || path.startsWith('http')) return path ?? '';
+  const clean = path.replace(/^\//, '');
+  if (USE_PROXY) return `/api/proxy/${clean}`;
+  const base = API_BASE_URL.replace(/\/$/, '');
+  return `${base}/${clean}`;
+}
+
 export interface ApiError {
   message: string;
   status?: number;
@@ -185,6 +197,38 @@ export class ApiClient {
       method: 'POST',
       body: data ? JSON.stringify(data) : undefined,
     });
+  }
+
+  /** POST con FormData (upload de archivos). No envía Content-Type para que el navegador ponga multipart/form-data. */
+  async postFormData<T = any>(endpoint: string, formData: FormData): Promise<T> {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('auth_token') : null;
+    const headers: HeadersInit = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const url = `${this.baseUrl}${endpoint}`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: formData,
+    });
+    const contentType = response.headers.get('content-type') || '';
+    let data: any;
+    const text = await response.text();
+    if (contentType.includes('application/json') && text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = { message: text };
+      }
+    } else {
+      data = text ? { message: text } : {};
+    }
+    if (!response.ok) {
+      throw {
+        message: data?.message || data?.error || response.statusText || 'Error en la solicitud',
+        status: response.status,
+      } as ApiError;
+    }
+    return data as T;
   }
 
   async put<T>(endpoint: string, data?: any, options?: RequestInit): Promise<T> {

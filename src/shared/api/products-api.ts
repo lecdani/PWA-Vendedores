@@ -1,4 +1,4 @@
-import { apiClient, ApiError } from './api-client';
+import { apiClient, ApiError, getBackendAssetUrl } from './api-client';
 
 /** Producto para la PWA (solo lectura desde API) */
 export interface ProductForUI {
@@ -8,9 +8,13 @@ export interface ProductForUI {
   category: string;
   currentPrice: number;
   isActive: boolean;
+  image?: string;
+  imageFileName?: string;
 }
 
 function toProduct(raw: any): ProductForUI {
+  const imageVal = raw?.image ?? raw?.Image ?? raw?.imageUrl ?? raw?.ImageUrl ?? raw?.imagePath ?? raw?.ImagePath;
+  const imageFileNameVal = raw?.imageFileName ?? raw?.ImageFileName;
   return {
     id: String(raw?.id ?? raw?.Id ?? ''),
     sku: String(raw?.sku ?? raw?.Sku ?? ''),
@@ -18,11 +22,26 @@ function toProduct(raw: any): ProductForUI {
     category: String(raw?.category ?? raw?.Category ?? raw?.categoryName ?? raw?.CategoryName ?? ''),
     currentPrice: Number(raw?.currentPrice ?? raw?.CurrentPrice ?? raw?.price ?? raw?.Price ?? 0),
     isActive: typeof raw?.isActive === 'boolean' ? raw.isActive : (raw?.IsActive ?? true),
+    image: imageVal != null && imageVal !== '' ? String(imageVal) : undefined,
+    imageFileName: imageFileNameVal != null && imageFileNameVal !== '' ? String(imageFileNameVal) : undefined,
   };
 }
 
 // Cache en memoria para productos individuales (por id)
 const productCache = new Map<string, Promise<ProductForUI | null>>();
+
+/** URL para mostrar la imagen del producto (S3 vía backend). */
+export function getProductImageUrl(p: { image?: string; imageFileName?: string } | null): string {
+  if (!p) return '';
+  const img = p.image?.trim();
+  if (img) {
+    // Si ya es ruta (contiene /) o URL, usarla; si es solo nombre de archivo, prefijar images/url/
+    const path = img.includes('/') || img.startsWith('http') ? img : 'images/url/' + img;
+    return getBackendAssetUrl(path);
+  }
+  if (p.imageFileName) return getBackendAssetUrl('images/url/' + p.imageFileName);
+  return '';
+}
 
 export const productsApi = {
   /** Lista todos los productos. GET /products/products */

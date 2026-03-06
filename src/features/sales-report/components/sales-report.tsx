@@ -9,6 +9,7 @@ import { productsApi } from '@/shared/api/products-api';
 import { useAuth } from '@/shared/auth/auth-provider';
 import { ordersApi, OrderForUI } from '@/shared/api/orders-api';
 import { storesApi } from '@/shared/api/stores-api';
+import { citiesApi } from '@/shared/api/cities-api';
 import { Button } from '@/shared/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/shared/ui/card';
 import { Badge } from '@/shared/ui/badge';
@@ -60,6 +61,7 @@ export function SalesReport() {
   const [orders, setOrders] = useState<OrderForUI[]>([]);
   const [visitLogs, setVisitLogs] = useState<Array<{ id: string | number; storeId: string; visitDate: string }>>([]);
   const [storeCache, setStoreCache] = useState<Record<string, string>>({});
+  const [storeCityCache, setStoreCityCache] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const now = new Date();
   const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
@@ -164,13 +166,22 @@ export function SalesReport() {
     let mounted = true;
     (async () => {
       const next: Record<string, string> = {};
+      const cityNext: Record<string, string> = {};
       for (const id of storeIds) {
         if (!mounted) break;
-    
         const store = await storesApi.fetchStoreById(id);
         if (store?.name) next[id] = store.name;
+        if (store?.city) {
+          const cityRaw = store.city.trim();
+          cityNext[id] = cityRaw && citiesApi.looksLikeCityId(cityRaw)
+            ? (await citiesApi.getCityNameById(cityRaw)) || cityRaw
+            : cityRaw;
+        }
       }
-      if (mounted) setStoreCache((prev) => ({ ...prev, ...next }));
+      if (mounted) {
+        setStoreCache((prev) => ({ ...prev, ...next }));
+        setStoreCityCache((prev) => ({ ...prev, ...cityNext }));
+      }
     })();
     return () => {
       mounted = false;
@@ -179,6 +190,7 @@ export function SalesReport() {
 
   const getStoreName = (storeId: string, fallback?: string) =>
     storeCache[storeId] || (orders.find((o) => o.storeId === storeId)?.storeName) || fallback || storeId;
+  const getStoreCity = (storeId: string) => storeCityCache[storeId] || '';
 
   const filteredOrders = orders.filter((order) => {
     const statusNorm = (order.status || '').toLowerCase();
@@ -376,15 +388,16 @@ export function SalesReport() {
   };
 
   const handleExportReport = () => {
-    const headers = ['ID', 'Fecha', 'Tienda', 'Estado', 'Total', 'Productos'];
+    const headers = ['PO', 'Fecha', 'Tienda', 'Ciudad', 'Estado', 'Total', 'Productos'];
     const rows = filteredOrders.map((order) => {
       const products = (order.items || [])
         .map((item: any) => `${getItemDisplayName(item)} (${item.toOrder ?? item.quantity ?? 0})`)
         .join('; ') || '—';
       return [
-        order.id,
+        order.po ? `PO - ${order.po}` : '—',
         new Date(order.date).toLocaleDateString('es-MX', { dateStyle: 'short' }),
         getStoreName(order.storeId, order.storeName),
+        getStoreCity(order.storeId) || '—',
         getStatusText(order.status),
         formatCurrency(Number(order.total) || 0),
         products,
@@ -480,9 +493,10 @@ export function SalesReport() {
           <table>
             <thead>
               <tr>
-                <th>ID</th>
+                <th>PO</th>
                 <th>Fecha</th>
                 <th>Tienda</th>
+                <th>Ciudad</th>
                 <th>Estado</th>
                 <th>Total</th>
                 <th>Productos</th>
@@ -491,9 +505,10 @@ export function SalesReport() {
             <tbody>
               {sortedFilteredOrders.map((order) => (
                 <tr key={order.id}>
-                  <td>{order.id}</td>
+                  <td><strong>{order.po ? `PO - ${order.po}` : '—'}</strong></td>
                   <td>{new Date(order.date).toLocaleDateString('es-MX', { dateStyle: 'short' })}</td>
                   <td>{getStoreName(order.storeId, order.storeName)}</td>
+                  <td>{getStoreCity(order.storeId) || '—'}</td>
                   <td>{getStatusText(order.status)}</td>
                   <td>{formatCurrency(Number(order.total) || 0)}</td>
                   <td>{(order.items || []).map((item: any) => `${getItemDisplayName(item)} (${item.toOrder ?? item.quantity ?? 0})`).join('; ') || '—'}</td>
@@ -906,9 +921,12 @@ export function SalesReport() {
                 >
                   <div className="flex items-start justify-between gap-4">
                     <div className="flex-1 min-w-0">
-                      <p className="text-xs font-mono text-slate-500 mb-0.5">{order.id}</p>
-                      <p className="text-sm font-medium text-slate-900">
+                      <p className="text-base font-semibold text-slate-900 mb-1">
+                        {order.po ? `PO - ${order.po}` : order.id}
+                      </p>
+                      <p className="text-sm text-slate-700">
                         {getStoreName(order.storeId, order.storeName)}
+                        {getStoreCity(order.storeId) ? ` · ${getStoreCity(order.storeId)}` : ''}
                       </p>
                       <p className="text-xs text-slate-500 mt-0.5">{new Date(order.date).toLocaleDateString('es-ES', { dateStyle: 'medium' })}</p>
                     </div>

@@ -9,12 +9,14 @@ import { Input } from '@/shared/ui/input';
 import { Button } from '@/shared/ui/button';
 import { Badge } from '@/shared/ui/badge';
 import { storesApi, StoreForUI } from '@/shared/api/stores-api';
+import { citiesApi } from '@/shared/api/cities-api';
 
 export function SelectStore() {
   const { t } = useLanguage();
   const router = useRouter();
   const [searchQuery, setSearchQuery] = useState('');
   const [stores, setStores] = useState<StoreForUI[]>([]);
+  const [cityNames, setCityNames] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -33,11 +35,38 @@ export function SelectStore() {
     };
   }, []);
 
-  const filteredStores = stores.filter(store =>
-    store.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    store.address.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    store.id.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  useEffect(() => {
+    const ids = stores
+      .map((s) => (s.city || '').trim())
+      .filter((c) => c && citiesApi.looksLikeCityId(c));
+    if (ids.length === 0) return;
+    let mounted = true;
+    (async () => {
+      const next: Record<string, string> = {};
+      for (const id of [...new Set(ids)]) {
+        if (!mounted) break;
+        const name = await citiesApi.getCityNameById(id);
+        if (mounted && name) next[id] = name;
+      }
+      if (mounted) setCityNames((prev) => ({ ...prev, ...next }));
+    })();
+    return () => { mounted = false; };
+  }, [stores]);
+
+  const getDisplayCity = (store: StoreForUI) =>
+    (store.city && citiesApi.looksLikeCityId(store.city))
+      ? (cityNames[store.city] ?? '')
+      : (store.city || '');
+
+  const filteredStores = stores.filter(store => {
+    const displayCity = getDisplayCity(store);
+    return (
+      store.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (store.address || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+      displayCity.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      store.id.toLowerCase().includes(searchQuery.toLowerCase())
+    );
+  });
 
   const handleSelectStore = (storeId: string) => {
     router.push(`/planogram/${storeId}`);
@@ -113,17 +142,16 @@ export function SelectStore() {
                       </Badge>
                     </div>
                     
-                    {store.address && (
-                      <div className="flex items-center gap-1 text-xs text-slate-500 mb-1">
-                        <MapPin className="h-3 w-3" />
-                        <span>{store.address}</span>
-                      </div>
-                    )}
-                    
-                    <div className="flex items-center gap-1 text-xs text-slate-500">
-                      <span>{t('last_visit')}:</span>
-                      <span>{new Date(store.lastVisit).toLocaleDateString()}</span>
-                    </div>
+                    {(() => {
+                      const cityDisplay = getDisplayCity(store) || (store.city && !citiesApi.looksLikeCityId(store.city) ? store.city : '');
+                      const ubicacion = [store.address, cityDisplay].filter(Boolean).join(', ');
+                      return ubicacion ? (
+                        <div className="flex items-center gap-1 text-xs text-slate-500 mt-0.5">
+                          <MapPin className="h-3 w-3 flex-shrink-0" />
+                          <span>{t('location')}: {ubicacion}</span>
+                        </div>
+                      ) : null;
+                    })()}
                   </div>
 
                   <ChevronRight className="h-5 w-5 text-slate-400 flex-shrink-0" />

@@ -2,12 +2,12 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { ArrowLeft, Grid3x3, Loader2 } from 'lucide-react';
+import { ArrowLeft, Grid3x3, Loader2, Package } from 'lucide-react';
 import { useLanguage } from '@/shared/i18n/language-provider';
 import { ordersApi, OrderForUI } from '@/shared/api/orders-api';
 import { planogramsApi } from '@/shared/api/planograms-api';
 import { distributionsApi } from '@/shared/api/distributions-api';
-import { productsApi } from '@/shared/api/products-api';
+import { productsApi, getProductImageUrl } from '@/shared/api/products-api';
 import { Button } from '@/shared/ui/button';
 import { Badge } from '@/shared/ui/badge';
 
@@ -19,6 +19,7 @@ interface ProductPosition {
   sku: string;
   toOrder: number;
   price: number;
+  imageUrl?: string;
 }
 
 export function ViewPlanogram({ orderId }: { orderId: string }) {
@@ -95,6 +96,7 @@ export function ViewPlanogram({ orderId }: { orderId: string }) {
             sku: orderItem?.sku ?? product?.sku ?? '',
             toOrder: orderItem?.quantity ?? 0,
             price: orderItem?.price ?? product?.currentPrice ?? 0,
+            imageUrl: product ? getProductImageUrl(product) : undefined,
           });
         }
       }
@@ -175,10 +177,16 @@ export function ViewPlanogram({ orderId }: { orderId: string }) {
               >
                 {item.productId ? (
                   <>
-                    <span className="text-[9px] leading-tight font-medium text-slate-800 break-words line-clamp-2 w-full" title={item.productName || item.sku}>
+                    {item.imageUrl ? (
+                      <img src={item.imageUrl} alt="" className="w-5 h-5 rounded object-cover flex-shrink-0 mx-auto" />
+                    ) : (
+                      <div className="w-5 h-5 rounded bg-slate-200 flex items-center justify-center flex-shrink-0 mx-auto">
+                        <Package className="h-2.5 w-2.5 text-slate-500" />
+                      </div>
+                    )}
+                    <span className="text-[9px] leading-tight font-medium text-slate-800 break-words line-clamp-2 w-full mt-0.5" title={item.productName || item.sku}>
                       {item.productName || item.sku}
                     </span>
-                    <span className="text-[9px] text-slate-600 mt-0.5">${(item.price || 0).toFixed(2)}</span>
                     {item.toOrder > 0 && (
                       <span className="text-xs font-semibold text-blue-700 mt-0.5">{item.toOrder} u</span>
                     )}

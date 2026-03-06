@@ -29,6 +29,7 @@ export function OrderReview() {
   const [planogramData, setPlanogramData] = useState<any[]>([]);
   const [editOrderId, setEditOrderId] = useState<string | null>(null);
   const [stores, setStores] = useState<StoreForUI[]>([]);
+  const [po, setPo] = useState('');
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
 
@@ -46,8 +47,14 @@ export function OrderReview() {
     if (!editOrderId) return;
     let mounted = true;
     (async () => {
-      const list = await storesApi.fetchStores();
-      if (mounted) setStores(list);
+      const [list, order] = await Promise.all([
+        storesApi.fetchStores(),
+        ordersApi.getOrderById(editOrderId),
+      ]);
+      if (mounted) {
+        setStores(list);
+        if (order?.po) setPo(String(order.po).trim());
+      }
     })();
     return () => { mounted = false; };
   }, [editOrderId]);
@@ -67,8 +74,23 @@ export function OrderReview() {
 
   const handleSendOrder = async () => {
     if (typeof window === 'undefined') return;
+    const poTrimmed = (po ?? '').trim();
+    if (!poTrimmed) {
+      setSendError(t('po_code_required'));
+      return;
+    }
     setSending(true);
     setSendError(null);
+
+    const poAlreadyUsed = await ordersApi.isPoAlreadyUsed(poTrimmed, {
+      userId: user?.id,
+      ...(editOrderId ? { excludeOrderId: editOrderId } : {}),
+    });
+    if (poAlreadyUsed) {
+      setSendError(t('po_duplicate'));
+      setSending(false);
+      return;
+    }
 
     const subtotal = totalAmount;
     const tax = 0;
@@ -79,6 +101,7 @@ export function OrderReview() {
       storeAddress: storeInfo ? `${storeInfo.address || ''}${storeInfo.city ? `, ${storeInfo.city}` : ''}` : '',
       salespersonId: user?.id,
       vendorNumber: '2F318',
+      po: poTrimmed,
       items: orderItems.map((item: any) => ({
         productId: item.productId,
         sku: item.sku,
@@ -94,10 +117,15 @@ export function OrderReview() {
     if (editOrderId) {
       const orderBeforeUpdate = await ordersApi.getOrderById(editOrderId);
       const invoiceIdHint = await ordersApi.getInvoiceIdForOrder(editOrderId);
-      const ok = await ordersApi.updateOrder(editOrderId, orderPayload, invoiceIdHint ?? undefined);
+      const updateResult = await ordersApi.updateOrder(editOrderId, orderPayload, invoiceIdHint ?? undefined);
       setSending(false);
-      if (!ok) {
-        setSendError(t('error_saving_order') || 'No se pudo guardar el pedido. Revisa la conexión e inténtalo de nuevo.');
+      if (!updateResult.ok) {
+        const msg = (updateResult.errorMessage || '').toLowerCase();
+        setSendError(
+          msg.includes('duplicate') || msg.includes('unique') || msg.includes('ya existe') || msg.includes('already exists')
+            ? t('po_duplicate')
+            : (updateResult.errorMessage || t('error_saving_order') || 'No se pudo guardar el pedido.')
+        );
         return;
       }
       if (user?.id) {
@@ -138,6 +166,16 @@ export function OrderReview() {
 
     const apiResult = await ordersApi.createOrder(orderPayload);
     const orderIdRaw = apiResult?.orderId;
+    if (apiResult?.errorMessage) {
+      const msg = apiResult.errorMessage.toLowerCase();
+      setSendError(
+        msg.includes('duplicate') || msg.includes('unique') || msg.includes('ya existe') || msg.includes('already exists')
+          ? t('po_duplicate')
+          : apiResult.errorMessage
+      );
+      setSending(false);
+      return;
+    }
     if (orderIdRaw == null || orderIdRaw === '' || String(orderIdRaw).toLowerCase() === 'unknown') {
       setSendError(t('error_saving_order') || 'No se pudo crear el pedido. Revisa la conexión e inténtalo de nuevo.');
       setSending(false);
@@ -187,6 +225,30 @@ export function OrderReview() {
       </div>
 
       <div className="px-4 py-4">
+        {/* Código PO (requerido, único) */}
+        <Card className="mb-4 border-slate-200 overflow-visible shadow-sm">
+          <CardContent className="p-4">
+            <label className="block text-sm font-medium text-slate-700 mb-2">
+              {t('po_code')} <span className="text-red-500">*</span>
+            </label>
+            <input
+              type="text"
+              value={po}
+              onChange={(e) => {
+                setPo(e.target.value);
+                setSendError(null);
+              }}
+              placeholder={t('po_code_placeholder')}
+              className="w-full h-11 rounded-lg border border-slate-200 bg-white px-3 shadow-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 text-slate-900 placeholder:text-slate-400"
+              maxLength={255}
+            />
+            <p className="text-xs text-slate-500 mt-1.5">{t('po_code_placeholder')}</p>
+            {sendError && (
+              <p className="text-sm text-red-600 mt-2">{sendError}</p>
+            )}
+          </CardContent>
+        </Card>
+
         {/* Selector de tienda (solo en edición) */}
         {editOrderId && stores.length > 0 && (
           <Card className="mb-4 border-slate-200 overflow-visible shadow-sm">
@@ -261,7 +323,14 @@ export function OrderReview() {
             {orderItems.map((item: any, index: number) => (
               <div key={index} className="p-4">
                 <div className="flex items-start justify-between gap-3">
-                  <div className="flex-1">
+                  {item.imageUrl ? (
+                    <img src={item.imageUrl} alt="" className="w-10 h-10 rounded object-cover flex-shrink-0" />
+                  ) : (
+                    <div className="w-10 h-10 rounded bg-slate-200 flex items-center justify-center flex-shrink-0">
+                      <Package className="h-5 w-5 text-slate-500" />
+                    </div>
+                  )}
+                  <div className="flex-1 min-w-0">
                     <p className="text-sm text-slate-900 mb-1">{item.productName}</p>
                     <p className="text-xs text-slate-500 mb-2">{item.sku}</p>
                     <div className="flex items-center gap-2 text-xs">
@@ -271,7 +340,6 @@ export function OrderReview() {
                       <span className="text-slate-500">× ${item.price}</span>
                     </div>
                   </div>
-                  
                   <div className="text-right">
                     <p className="text-slate-900">${(item.toOrder * item.price).toFixed(2)}</p>
                     <p className="text-xs text-slate-500 mt-1">
@@ -283,12 +351,6 @@ export function OrderReview() {
             ))}
           </div>
         </Card>
-
-        {sendError && (
-          <div className="mb-4 p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">
-            {sendError}
-          </div>
-        )}
 
         {/* Total Card */}
         <Card className="border-green-200 bg-green-50 mb-20">

@@ -20,8 +20,10 @@ import { useLanguage } from '@/shared/i18n/language-provider';
 import { useAuth } from '@/shared/auth/auth-provider';
 import { ordersApi, OrderForUI } from '@/shared/api/orders-api';
 import { storesApi } from '@/shared/api/stores-api';
+import { citiesApi } from '@/shared/api/cities-api';
 import { histpricesApi } from '@/shared/api/histprices-api';
-import { productsApi } from '@/shared/api/products-api';
+import { productsApi, getProductImageUrl } from '@/shared/api/products-api';
+import { getBackendAssetUrl } from '@/shared/api/api-client';
 import { Button } from '@/shared/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/shared/ui/card';
 import { Badge } from '@/shared/ui/badge';
@@ -39,6 +41,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
   const [order, setOrder] = useState<OrderForUI | null>(null);
   const [invoiceStoreName, setInvoiceStoreName] = useState('');
   const [invoiceStoreAddress, setInvoiceStoreAddress] = useState('');
+  const [invoiceStoreCity, setInvoiceStoreCity] = useState('');
   const [invoiceFromApi, setInvoiceFromApi] = useState<{
     invoiceNumber: string;
     date: string;
@@ -67,19 +70,22 @@ export function OrderDetail({ orderId }: { orderId: string }) {
         let orderToSet = apiOrder;
         const needsPrice = apiOrder.items.some((i: any) => i.productId && !Number(i.price));
         const needsProductName = apiOrder.items.some((i: any) => i.productId && !(i.productName || i.sku || '').trim());
-        if (needsPrice || needsProductName) {
+        const needsImage = apiOrder.items.some((i: any) => i.productId && !i.imageUrl);
+        if (needsPrice || needsProductName || needsImage) {
           const enrichedItems = await Promise.all(
             apiOrder.items.map(async (item: any) => {
               let productName = (item.productName || item.sku || '').trim();
               let price = Number(item.price) || 0;
+              let imageUrl = item.imageUrl;
               if (item.productId) {
-                if (!price) price = await histpricesApi.getLatest(item.productId);
-                if (!productName) {
-                  const product = await productsApi.getById(item.productId);
-                  if (product) productName = product.name || product.sku || '';
+                const product = await productsApi.getById(item.productId);
+                if (product) {
+                  if (!productName) productName = product.name || product.sku || '';
+                  if (!imageUrl) imageUrl = getProductImageUrl(product);
                 }
+                if (!price) price = await histpricesApi.getLatest(item.productId);
               }
-              return { ...item, productName: productName || item.productName, price };
+              return { ...item, productName: productName || item.productName, price, imageUrl: imageUrl || item.imageUrl };
             })
           );
           const computedSubtotal = enrichedItems.reduce((s: number, i: any) => s + (i.quantity ?? i.toOrder ?? 0) * (i.price || 0), 0);
@@ -98,13 +104,22 @@ export function OrderDetail({ orderId }: { orderId: string }) {
           if (store) {
             setInvoiceStoreName(store.name);
             setInvoiceStoreAddress((store.address || '').trim());
+            const cityRaw = (store.city || '').trim();
+            if (cityRaw && citiesApi.looksLikeCityId(cityRaw)) {
+              const cityName = await citiesApi.getCityNameById(cityRaw);
+              setInvoiceStoreCity(cityName);
+            } else {
+              setInvoiceStoreCity(cityRaw);
+            }
           } else {
             setInvoiceStoreName(name || '—');
             setInvoiceStoreAddress(orderToSet.storeAddress || '');
+            setInvoiceStoreCity('');
           }
         } else {
           setInvoiceStoreName(name || orderToSet.storeName || '—');
           setInvoiceStoreAddress(orderToSet.storeAddress || '');
+          setInvoiceStoreCity('');
         }
         const invoiceIdHint = orderToSet.invoiceId ?? await ordersApi.getInvoiceIdForOrder(orderId)
           ?? (orderToSet.backendOrderId != null ? await ordersApi.getInvoiceIdForOrder(String(orderToSet.backendOrderId)) : null);
@@ -121,6 +136,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
       setInvoiceFromApi(null);
       setInvoiceStoreName('');
       setInvoiceStoreAddress('');
+      setInvoiceStoreCity('');
       setOrder(null);
       setOrderLoadDone(true);
     };
@@ -210,12 +226,12 @@ export function OrderDetail({ orderId }: { orderId: string }) {
     window.print();
   };
 
-  /** Reconstruye la URL de la imagen: ruta local C:\Users\danie\OneDrive + nombre archivo. Sin localhost ni IP; se sirve por /api/pod-image. */
+  /** URL de la imagen POD: data/base64 o URL absoluta se devuelve tal cual; nombre de archivo (S3) se resuelve vía backend. */
   const buildPodImageUrl = (podPath: string): string => {
     const raw = (podPath || '').trim();
     if (!raw) return '';
     if (raw.startsWith('data:') || raw.startsWith('http://') || raw.startsWith('https://')) return raw;
-    return `/api/pod-image?path=${encodeURIComponent(raw)}`;
+    return getBackendAssetUrl('images/url/' + raw);
   };
 
   const podImageUrl = displayPod ? buildPodImageUrl(displayPod) : '';
@@ -239,7 +255,9 @@ export function OrderDetail({ orderId }: { orderId: string }) {
             amount: qty * price,
           };
         });
-  const invoiceNumber = invoiceFromApi?.invoiceNumber ?? order.invoiceId ?? order.id ?? '—';
+  const invoiceNumberDisplay = order.po
+    ? `PO - ${order.po}`
+    : (invoiceFromApi?.invoiceNumber ?? order.invoiceId ?? order.id ?? '—');
   const invoiceDate = invoiceFromApi?.date
     ? (invoiceFromApi.date.includes(',') ? invoiceFromApi.date : new Date(invoiceFromApi.date).toLocaleDateString('en-US'))
     : (order.date ? new Date(order.date).toLocaleDateString('en-US') : '—');
@@ -314,7 +332,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
               <ArrowLeft className="h-5 w-5" />
             </Button>
             <div className="flex-1 min-w-0">
-              <h2 className="text-sm text-slate-900 font-medium">{t('order_detail')}</h2>
+              <h2 className="text-sm text-slate-900 font-medium">{order.po ? `PO - ${order.po}` : t('order_detail')}</h2>
               <p className="text-xs text-slate-500 truncate">{invoiceStoreDisplayName || order.storeName} · {new Date(order.date).toLocaleDateString()}</p>
             </div>
           </div>
@@ -325,7 +343,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
       </div>
 
       <div className="px-4 pb-24 space-y-4">
-        {/* Store Info - misma info que en historial: tienda, fecha, dirección */}
+        {/* Pedido / Tienda: resaltar PO, tienda como secundario */}
         <Card className="border-slate-200 shadow-sm overflow-hidden">
           <CardContent className="p-4">
             <div className="flex items-start gap-3">
@@ -333,12 +351,22 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                 <StoreIcon className="h-5 w-5 text-blue-600" />
               </div>
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-slate-900 mb-1">{invoiceStoreDisplayName || order.storeName || t('store')}</p>
-                {invoiceStoreDisplayAddress ? (
-                  <p className="text-xs text-slate-600 mb-1">{invoiceStoreDisplayAddress}</p>
-                ) : (order.storeAddress ? (
-                  <p className="text-xs text-slate-600 mb-1">{order.storeAddress}</p>
-                ) : null)}
+                {order.po ? (
+                  <>
+                    <p className="text-base font-semibold text-slate-900 mb-1.5">PO - {order.po}</p>
+                    <p className="text-xs text-slate-500 mb-0.5">{t('store')}: {invoiceStoreDisplayName || order.storeName || '—'}</p>
+                  </>
+                ) : (
+                  <p className="text-sm font-medium text-slate-900 mb-1">{invoiceStoreDisplayName || order.storeName || t('store')}</p>
+                )}
+                {(() => {
+                  const addr = invoiceStoreDisplayAddress || order.storeAddress || '';
+                  const city = invoiceStoreCity || '';
+                  const ubicacion = [addr, city].filter(Boolean).join(', ');
+                  return ubicacion ? (
+                    <p className="text-xs text-slate-600 mb-1">{t('location')}: {ubicacion}</p>
+                  ) : null;
+                })()}
                 <p className="text-xs text-slate-400">{t('order_date')}: {new Date(order.date).toLocaleDateString()}</p>
               </div>
             </div>
@@ -463,10 +491,18 @@ export function OrderDetail({ orderId }: { orderId: string }) {
             {order.items.map((item: any, index: number) => {
               const quantity = item.toOrder || item.quantity || 0;
               const price = item.price ?? 0;
+              const imgUrl = item.imageUrl;
               return (
                 <div key={index} className="p-4">
                   <div className="flex items-start justify-between gap-3">
-                    <div className="flex-1">
+                    {imgUrl ? (
+                      <img src={imgUrl} alt="" className="w-10 h-10 rounded object-cover flex-shrink-0" />
+                    ) : (
+                      <div className="w-10 h-10 rounded bg-slate-200 flex items-center justify-center flex-shrink-0">
+                        <Package className="h-5 w-5 text-slate-500" />
+                      </div>
+                    )}
+                    <div className="flex-1 min-w-0">
                       <p className="text-sm text-slate-900 mb-1">{item.productName}</p>
                       <p className="text-xs text-slate-500 mb-2">{item.sku}</p>
                       <div className="flex items-center gap-2">
@@ -521,7 +557,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
           </CardHeader>
           <CardContent className="px-4 pb-4 pt-0">
             <Invoice
-              invoiceNumber={invoiceNumber}
+              invoiceNumber={invoiceNumberDisplay}
               date={typeof invoiceDate === 'string' && invoiceDate.includes(',') ? invoiceDate : new Date(invoiceDate).toLocaleDateString('en-US')}
               vendorName={vendorName}
               storeName={invoiceStoreDisplayName}
