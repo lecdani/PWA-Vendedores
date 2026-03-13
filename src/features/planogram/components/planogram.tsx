@@ -10,6 +10,7 @@ import { ProductModal } from './product-modal';
 import { planogramsApi } from '@/shared/api/planograms-api';
 import { distributionsApi } from '@/shared/api/distributions-api';
 import { productsApi, getProductImageUrl } from '@/shared/api/products-api';
+import { categoriesApi, CategoryForUI } from '@/shared/api/categories-api';
 import { histpricesApi } from '@/shared/api/histprices-api';
 import { ordersApi } from '@/shared/api/orders-api';
 import { storesApi } from '@/shared/api/stores-api';
@@ -21,6 +22,7 @@ export interface ProductPosition {
   productId: string;
   productName: string;
   sku: string;
+  category: string;
   idealStock: number;
   currentStock: number;
   toOrder: number;
@@ -39,6 +41,7 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
   const [loadError, setLoadError] = useState<string | null>(null);
   const [planogramId, setPlanogramId] = useState<string | null>(null);
   const [planogramName, setPlanogramName] = useState<string | null>(null);
+  const [allCategories, setAllCategories] = useState<CategoryForUI[]>([]);
 
   useEffect(() => {
     if (storeId) {
@@ -55,9 +58,10 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
       setLoading(true);
       setLoadError(null);
       try {
-        const [activePlan, products] = await Promise.all([
+        const [activePlan, products, categories] = await Promise.all([
           planogramsApi.getActive(),
           productsApi.fetchAll(),
+          categoriesApi.fetchAll(),
         ]);
 
         if (!mounted) return;
@@ -68,10 +72,17 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
           return;
         }
 
+        setAllCategories(categories);
         setPlanogramId(activePlan.id);
         setPlanogramName(activePlan.name ?? null);
         const distList = await distributionsApi.getByPlanogram(activePlan.id);
         if (!mounted) return;
+
+        const categoryById = new Map<string, string>();
+        categories.forEach((c) => {
+          categoryById.set(c.id, c.name);
+          categoryById.set(String(Number(c.id)), c.name);
+        });
 
         const productMap = new Map<string, (typeof products)[0]>();
         products.forEach((p) => {
@@ -81,6 +92,14 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
         });
         const getProduct = (productId: string) =>
           productMap.get(productId) ?? productMap.get(String(Number(productId)));
+
+        const resolveCategory = (p: (typeof products)[0] | null): string => {
+          if (!p) return '';
+          const name = (p.category || '').trim();
+          if (name) return name;
+          const id = p.categoryId != null ? String(p.categoryId) : '';
+          return id ? (categoryById.get(id) ?? categoryById.get(String(Number(id))) ?? '') : '';
+        };
 
         const uniqueProductIds = [...new Set(distList.map((d) => d.productId).filter(Boolean))];
         const priceResults = await Promise.all(
@@ -105,6 +124,7 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
               productId: productIdStr,
               productName: product?.name ?? '',
               sku: product?.sku ?? '',
+              category: resolveCategory(product ?? null),
               idealStock: 0,
               currentStock: 0,
               toOrder: 0,
@@ -171,7 +191,7 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
   const getCellStyle = (item: ProductPosition) => {
     const hasProduct = !!item.productId;
     if (!hasProduct) return 'bg-slate-400 border-slate-500'; // vacío: solo más oscuro
-    if (item.toOrder > 0) return 'bg-blue-50 border-blue-300';
+    if (item.toOrder > 0) return 'bg-indigo-50 border-indigo-300';
     return 'bg-slate-100 border-slate-200';
   };
 
@@ -190,7 +210,7 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
         <div className="flex flex-col items-center gap-3">
-          <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
+          <Loader2 className="h-8 w-8 animate-spin text-indigo-600" />
           <p className="text-sm text-slate-600">{t('loading')}...</p>
         </div>
       </div>
@@ -231,7 +251,7 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
             </div>
           </div>
           
-          <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200">
+          <Badge variant="outline" className="bg-indigo-50 text-indigo-700 border-indigo-200">
             {progressPercent}% {t('completed')}
           </Badge>
         </div>
@@ -242,9 +262,9 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
             <p className="text-xs text-slate-500 mb-0.5">{t('products')}</p>
             <p className="text-sm text-slate-900">{productsCount}</p>
           </div>
-          <div className="bg-blue-50 rounded-lg p-2 text-center">
-            <p className="text-xs text-blue-600 mb-0.5">{t('units')}</p>
-            <p className="text-sm text-blue-900">{totalToOrder}</p>
+          <div className="bg-indigo-50 rounded-lg p-2 text-center">
+            <p className="text-xs text-indigo-600 mb-0.5">{t('units')}</p>
+            <p className="text-sm text-indigo-900">{totalToOrder}</p>
           </div>
           <div className="bg-green-50 rounded-lg p-2 text-center">
             <p className="text-xs text-green-600 mb-0.5">{t('total')}</p>
@@ -292,7 +312,7 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
                       {item.productName || item.sku}
                     </span>
                     {item.toOrder > 0 && (
-                      <span className="text-xs font-semibold text-blue-700 mt-0.5">
+                      <span className="text-xs font-semibold text-indigo-700 mt-0.5">
                         {item.toOrder}
                       </span>
                     )}
@@ -310,10 +330,39 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
             {t('no_quantity')}
           </span>
           <span className="flex items-center gap-1.5">
-            <span className="w-3 h-3 rounded bg-blue-50 border border-blue-300" />
+            <span className="w-3 h-3 rounded bg-indigo-50 border border-indigo-300" />
             {t('with_quantity')}
           </span>
         </div>
+
+        {/* Resumen por categoría: todas las categorías registradas, con Pcs (0 o suma del pedido) */}
+        {allCategories.length > 0 && (
+          <div className="mt-6 border border-slate-200 rounded-lg overflow-hidden bg-slate-50/50">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-slate-200 text-slate-800">
+                  <th className="text-left py-2 px-3 font-semibold">{t('family_col') || 'Family'}</th>
+                  <th className="text-right py-2 px-3 font-semibold w-16">{t('pcs_col') || 'Pcs'}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[...allCategories]
+                  .sort((a, b) => a.name.localeCompare(b.name))
+                  .map((cat) => {
+                    const pcs = planogramData
+                      .filter((item) => (item.category || '').trim() === cat.name)
+                      .reduce((sum, item) => sum + item.toOrder, 0);
+                    return (
+                      <tr key={cat.id} className="border-t border-slate-200 bg-white">
+                        <td className="py-2 px-3 text-slate-900">{cat.name}</td>
+                        <td className="py-2 px-3 text-right font-medium text-slate-800">{pcs}</td>
+                      </tr>
+                    );
+                  })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       {/* Action Buttons */}
@@ -321,7 +370,7 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
         <div className="flex gap-3 max-w-2xl mx-auto">
           <Button
             onClick={handleSendOrder}
-            className="flex-1 bg-blue-600 hover:bg-blue-700"
+            className="flex-1 bg-indigo-600 hover:bg-indigo-700"
             disabled={totalToOrder === 0}
           >
             <Send className="h-4 w-4 mr-2" />

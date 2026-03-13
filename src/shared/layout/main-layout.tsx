@@ -1,6 +1,7 @@
 'use client';
 
 import { usePathname, useRouter } from 'next/navigation';
+import Image from 'next/image';
 import { Home, ShoppingCart, BarChart3, FileCheck, User, LogOut } from 'lucide-react';
 import { LanguageSelector } from '@/shared/i18n/language-selector';
 import { useLanguage } from '@/shared/i18n/language-provider';
@@ -47,11 +48,17 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
         <div className="px-4 py-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 bg-gradient-to-br from-blue-600 to-blue-500 rounded-lg flex items-center justify-center shadow-sm">
-                <ShoppingCart className="h-5 w-5 text-white" />
+              <div className="relative w-10 h-10 flex-shrink-0 rounded-lg flex items-center justify-center shadow-sm" style={{ background: 'linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%)' }}>
+                <Image
+                  src="/logo-eternal.png"
+                  alt="ETERNAL"
+                  width={36}
+                  height={36}
+                  className="object-contain w-full h-full p-1"
+                />
               </div>
               <div>
-                <p className="text-slate-900 text-sm font-medium">Eternal Cosmetics</p>
+                <p className="text-slate-900 text-sm font-medium">ETERNAL COSMETICS LLC</p>
                 <p className="text-xs text-slate-500 truncate max-w-[140px]">
                   {([user?.name, user?.lastName].filter(Boolean).join(' ') || user?.email) ?? t('seller_portal')}
                 </p>
@@ -108,7 +115,7 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
               }}
               aria-label={item.label}
             >
-              {/* Indicador activo - línea azul arriba */}
+              {/* Indicador activo - línea indigo arriba (mismo color sistema web) */}
               {isActive && (
                 <div 
                   style={{
@@ -118,7 +125,7 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
                     transform: 'translateX(-50%)',
                     width: '56px',
                     height: '2px',
-                    backgroundColor: '#60a5fa',
+                    backgroundColor: '#4f46e5',
                     borderRadius: '9999px'
                   }}
                 />
@@ -134,7 +141,7 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
                   style={{
                     width: '24px',
                     height: '24px',
-                    color: isActive ? '#60a5fa' : '#94a3b8'
+                    color: isActive ? '#4f46e5' : '#94a3b8'
                   }}
                 />
               </div>
@@ -144,7 +151,7 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
                 style={{
                   fontSize: '12px',
                   fontWeight: isActive ? 600 : 500,
-                  color: isActive ? '#60a5fa' : '#94a3b8',
+                  color: isActive ? '#4f46e5' : '#94a3b8',
                   transition: 'color 0.2s'
                 }}
               >

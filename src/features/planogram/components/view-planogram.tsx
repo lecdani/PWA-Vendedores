@@ -45,15 +45,27 @@ export function ViewPlanogram({ orderId }: { orderId: string }) {
       }
       setOrder(apiOrder);
 
-      const activePlan = await planogramsApi.getActive();
-      if (!mounted || !activePlan) {
+      const planogramIdFromOrder =
+        (apiOrder as any).planogramId && String((apiOrder as any).planogramId).trim()
+          ? String((apiOrder as any).planogramId).trim()
+          : '';
+
+      let planogram = null;
+      if (planogramIdFromOrder) {
+        planogram = await planogramsApi.getById(planogramIdFromOrder);
+      }
+      if (!planogram) {
+        planogram = await planogramsApi.getActive();
+      }
+
+      if (!mounted || !planogram) {
         setGrid([]);
         setLoading(false);
         return;
       }
-      setPlanogramName(activePlan.name ?? null);
+      setPlanogramName(planogram.name ?? null);
 
-      const distList = await distributionsApi.getByPlanogram(activePlan.id);
+      const distList = await distributionsApi.getByPlanogram(planogram.id);
       if (!mounted) return;
 
       const products = await productsApi.fetchAll();
@@ -112,7 +124,7 @@ export function ViewPlanogram({ orderId }: { orderId: string }) {
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
         {loading ? (
           <div className="flex flex-col items-center gap-3">
-            <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
+            <Loader2 className="h-8 w-8 animate-spin text-indigo-600" />
             <p className="text-sm text-slate-600">{t('loading')}...</p>
           </div>
         ) : (
@@ -131,7 +143,7 @@ export function ViewPlanogram({ orderId }: { orderId: string }) {
 
   const getCellStyle = (item: ProductPosition) => {
     if (!item.productId) return 'bg-slate-400 border-slate-500';
-    if (item.toOrder > 0) return 'bg-blue-50 border-blue-300';
+    if (item.toOrder > 0) return 'bg-indigo-50 border-indigo-300';
     return 'bg-slate-100 border-slate-200';
   };
 
@@ -148,16 +160,16 @@ export function ViewPlanogram({ orderId }: { orderId: string }) {
               <p className="text-xs text-slate-500">{order.storeName}</p>
             </div>
           </div>
-          <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200">{t('view_only')}</Badge>
+          <Badge variant="outline" className="bg-indigo-50 text-indigo-700 border-indigo-200">{t('view_only')}</Badge>
         </div>
         <div className="grid grid-cols-3 gap-2">
           <div className="bg-slate-50 rounded-lg p-2 text-center">
             <p className="text-xs text-slate-500 mb-0.5">{t('products')}</p>
             <p className="text-sm text-slate-900">{productsWithQty}</p>
           </div>
-          <div className="bg-blue-50 rounded-lg p-2 text-center">
-            <p className="text-xs text-blue-600 mb-0.5">{t('units')}</p>
-            <p className="text-sm text-blue-900">{totalToOrder}</p>
+          <div className="bg-indigo-50 rounded-lg p-2 text-center">
+            <p className="text-xs text-indigo-600 mb-0.5">{t('units')}</p>
+            <p className="text-sm text-indigo-900">{totalToOrder}</p>
           </div>
           <div className="bg-green-50 rounded-lg p-2 text-center">
             <p className="text-xs text-green-600 mb-0.5">{t('total')}</p>
@@ -188,7 +200,7 @@ export function ViewPlanogram({ orderId }: { orderId: string }) {
                       {item.productName || item.sku}
                     </span>
                     {item.toOrder > 0 && (
-                      <span className="text-xs font-semibold text-blue-700 mt-0.5">{item.toOrder} u</span>
+                      <span className="text-xs font-semibold text-indigo-700 mt-0.5">{item.toOrder} u</span>
                     )}
                   </>
                 ) : null}
@@ -198,7 +210,7 @@ export function ViewPlanogram({ orderId }: { orderId: string }) {
         </div>
         <div className="mt-4 flex flex-wrap gap-4 text-xs text-slate-500">
           <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-slate-400" />{t('no_quantity')}</span>
-          <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-blue-50 border border-blue-300" />{t('with_quantity')}</span>
+          <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-indigo-50 border border-indigo-300" />{t('with_quantity')}</span>
         </div>
       </div>
     </div>

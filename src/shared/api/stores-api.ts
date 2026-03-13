@@ -7,6 +7,8 @@ export interface StoreForUI {
   city: string;
   lastVisit?: string;
   status: 'active' | 'inactive';
+  /** Si la tienda usa planograma para pedidos. Si false, el pedido se hace por catálogo. */
+  hasPlanogram?: boolean;
 }
 
 function toStore(raw: any): StoreForUI {
@@ -15,6 +17,7 @@ function toStore(raw: any): StoreForUI {
   const address = String(raw?.address ?? raw?.Address ?? '');
   const city = String(raw?.city ?? raw?.City ?? raw?.cityId ?? raw?.CityId ?? '');
   const isActive = raw?.isActive ?? raw?.IsActive ?? true;
+  const hasPlanogram = raw?.hasPlanogram ?? raw?.HasPlanogram ?? true;
   return {
     id,
     name,
@@ -22,6 +25,7 @@ function toStore(raw: any): StoreForUI {
     city,
     status: isActive ? 'active' : 'inactive',
     lastVisit: raw?.lastVisit ?? raw?.LastVisit,
+    hasPlanogram: !!hasPlanogram,
   };
 }
 

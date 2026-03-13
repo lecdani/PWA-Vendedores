@@ -108,12 +108,12 @@ function ResetPasswordForm() {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-50 to-slate-100 p-4">
         <div className="w-full max-w-md text-center">
-          <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-blue-600 to-blue-500 rounded-2xl shadow-lg mb-4">
+          <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-indigo-600 to-purple-600 rounded-2xl shadow-lg mb-4">
             <ShoppingCart className="h-8 w-8 text-white" />
           </div>
           <h1 className="text-3xl font-bold text-slate-900 mb-2">Eternal Cosmetics</h1>
           <div className="flex justify-center mt-8">
-            <div className="w-10 h-10 border-4 border-blue-600 border-t-transparent rounded-full animate-spin" />
+            <div className="w-10 h-10 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin" />
           </div>
           <p className="text-slate-600 mt-4">Cargando...</p>
         </div>
@@ -150,7 +150,7 @@ function ResetPasswordForm() {
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-50 to-slate-100 p-4">
         <div className="w-full max-w-md">
           <div className="text-center mb-8">
-            <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-blue-600 to-blue-500 rounded-2xl shadow-lg mb-4">
+            <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-indigo-600 to-purple-600 rounded-2xl shadow-lg mb-4">
               <ShoppingCart className="h-8 w-8 text-white" />
             </div>
             <h1 className="text-3xl font-bold text-slate-900 mb-2">Eternal Cosmetics</h1>
@@ -198,7 +198,7 @@ function ResetPasswordForm() {
     <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4">
       <div className="w-full max-w-md">
         <div className="text-center mb-6">
-          <div className="inline-flex items-center justify-center w-12 h-12 bg-blue-600 rounded-xl mb-3">
+          <div className="inline-flex items-center justify-center w-12 h-12 bg-indigo-600 rounded-xl mb-3">
             <ShoppingCart className="h-6 w-6 text-white" />
           </div>
           <h1 className="text-xl font-semibold text-slate-800">Eternal Cosmetics</h1>
@@ -237,7 +237,7 @@ function ResetPasswordForm() {
                   className={`pl-9 pr-9 h-10 text-sm rounded-lg ${
                     fieldErrors.newPassword
                       ? 'border-red-300 focus:border-red-400 focus:ring-red-400/20'
-                      : 'border-slate-200 focus:border-blue-500 focus:ring-blue-500/20'
+                      : 'border-slate-200 focus:border-indigo-500 focus:ring-indigo-500/20'
                   }`}
                   required
                   minLength={8}
@@ -286,7 +286,7 @@ function ResetPasswordForm() {
                   className={`pl-9 pr-9 h-10 text-sm rounded-lg ${
                     fieldErrors.confirmPassword
                       ? 'border-red-300 focus:border-red-400 focus:ring-red-400/20'
-                      : 'border-slate-200 focus:border-blue-500 focus:ring-blue-500/20'
+                      : 'border-slate-200 focus:border-indigo-500 focus:ring-indigo-500/20'
                   }`}
                   required
                   minLength={8}
@@ -321,7 +321,7 @@ function ResetPasswordForm() {
 
             <Button
               type="submit"
-              className="w-full h-10 text-sm font-medium rounded-lg bg-blue-600 hover:bg-blue-700 text-white shadow-sm"
+              className="w-full h-10 text-sm font-medium rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm"
               disabled={isSubmitting}
             >
               {isSubmitting ? 'Guardando...' : 'Restablecer contraseña'}
@@ -344,7 +344,7 @@ export default function ResetPasswordPage() {
     <Suspense
       fallback={
         <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-50 to-slate-100">
-          <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin" />
+          <div className="w-12 h-12 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin" />
         </div>
       }
     >

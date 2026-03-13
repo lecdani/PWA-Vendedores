@@ -5,9 +5,10 @@ import { useRouter } from 'next/navigation';
 import { ArrowLeft, Send, Edit, ShoppingCart, DollarSign, Package, Store as StoreIcon } from 'lucide-react';
 import { useLanguage } from '@/shared/i18n/language-provider';
 import { useAuth } from '@/shared/auth/auth-provider';
-import { ordersApi } from '@/shared/api/orders-api';
+import { ordersApi, CreateOrderInput } from '@/shared/api/orders-api';
 import { storesApi, StoreForUI } from '@/shared/api/stores-api';
 import { getOrderReviewPayload, setOrderReviewPayload } from '@/shared/order-review-payload';
+import { categoriesApi, CategoryForUI } from '@/shared/api/categories-api';
 import { Button } from '@/shared/ui/button';
 import { Card, CardContent } from '@/shared/ui/card';
 import { Separator } from '@/shared/ui/separator';
@@ -28,10 +29,17 @@ export function OrderReview() {
   const [storeInfo, setStoreInfo] = useState<any>(null);
   const [planogramData, setPlanogramData] = useState<any[]>([]);
   const [editOrderId, setEditOrderId] = useState<string | null>(null);
+  const [planogramId, setPlanogramId] = useState<string | undefined>(undefined);
+  const [orderSource, setOrderSource] = useState<'planogram' | 'catalog'>('planogram');
   const [stores, setStores] = useState<StoreForUI[]>([]);
   const [po, setPo] = useState('');
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  const [allCategories, setAllCategories] = useState<CategoryForUI[]>([]);
+
+  useEffect(() => {
+    categoriesApi.fetchAll().then(setAllCategories);
+  }, []);
 
   useEffect(() => {
     const data = getOrderReviewPayload();
@@ -40,6 +48,8 @@ export function OrderReview() {
       setStoreInfo(data.storeInfo ?? null);
       setPlanogramData(data.planogramData || []);
       setEditOrderId(data.editOrderId ?? null);
+      setPlanogramId(data.planogramId);
+      setOrderSource(data.source ?? 'planogram');
     }
   }, []);
 
@@ -95,13 +105,14 @@ export function OrderReview() {
     const subtotal = totalAmount;
     const tax = 0;
     const total = totalAmount;
-    const orderPayload = {
+    const orderPayload: CreateOrderInput = {
       storeId,
       storeName: storeInfo?.name || storeId,
       storeAddress: storeInfo ? `${storeInfo.address || ''}${storeInfo.city ? `, ${storeInfo.city}` : ''}` : '',
       salespersonId: user?.id,
       vendorNumber: '2F318',
       po: poTrimmed,
+      planogramId: orderSource === 'planogram' ? planogramId : undefined,
       items: orderItems.map((item: any) => ({
         productId: item.productId,
         sku: item.sku,
@@ -200,8 +211,13 @@ export function OrderReview() {
       storeInfo,
       planogramData,
       editOrderId: editOrderId ?? undefined,
+      source: orderSource,
     });
-    router.push(`/planogram/${storeId}${editOrderId ? `?orderId=${editOrderId}` : ''}`);
+    if (orderSource === 'catalog') {
+      router.push(`/catalog-order/${storeId}${editOrderId ? `?orderId=${editOrderId}` : ''}`);
+    } else {
+      router.push(`/planogram/${storeId}${editOrderId ? `?orderId=${editOrderId}` : ''}`);
+    }
   };
 
   return (
@@ -239,7 +255,7 @@ export function OrderReview() {
                 setSendError(null);
               }}
               placeholder={t('po_code_placeholder')}
-              className="w-full h-11 rounded-lg border border-slate-200 bg-white px-3 shadow-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 text-slate-900 placeholder:text-slate-400"
+              className="w-full h-11 rounded-lg border border-slate-200 bg-white px-3 shadow-sm focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400 text-slate-900 placeholder:text-slate-400"
               maxLength={255}
             />
             <p className="text-xs text-slate-500 mt-1.5">{t('po_code_placeholder')}</p>
@@ -259,7 +275,7 @@ export function OrderReview() {
               </label>
               <div className="relative z-[1]">
                 <Select value={storeId} onValueChange={handleStoreChange}>
-                  <SelectTrigger className="h-11 w-full rounded-lg border-slate-200 bg-white shadow-sm hover:bg-slate-50 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 text-slate-900">
+                  <SelectTrigger className="h-11 w-full rounded-lg border-slate-200 bg-white shadow-sm hover:bg-slate-50 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400 text-slate-900">
                     <SelectValue placeholder={t('select_store')} />
                   </SelectTrigger>
                   <SelectContent
@@ -290,7 +306,7 @@ export function OrderReview() {
         <div className="grid grid-cols-3 gap-3 mb-4">
           <Card className="border-slate-200">
             <CardContent className="p-3 text-center">
-              <Package className="h-5 w-5 text-blue-600 mx-auto mb-1" />
+              <Package className="h-5 w-5 text-indigo-600 mx-auto mb-1" />
               <p className="text-xs text-slate-500 mb-0.5">{t('products')}</p>
               <p className="text-lg text-slate-900">{uniqueProducts}</p>
             </CardContent>
@@ -334,7 +350,7 @@ export function OrderReview() {
                     <p className="text-sm text-slate-900 mb-1">{item.productName}</p>
                     <p className="text-xs text-slate-500 mb-2">{item.sku}</p>
                     <div className="flex items-center gap-2 text-xs">
-                      <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200">
+                      <Badge variant="outline" className="bg-indigo-50 text-indigo-700 border-indigo-200">
                         {item.toOrder} {t('units')}
                       </Badge>
                       <span className="text-slate-500">× ${item.price}</span>
@@ -342,27 +358,56 @@ export function OrderReview() {
                   </div>
                   <div className="text-right">
                     <p className="text-slate-900">${(item.toOrder * item.price).toFixed(2)}</p>
-                    <p className="text-xs text-slate-500 mt-1">
-                      {t('position')}: {item.row},{item.col}
-                    </p>
+                    {item.row != null && item.col != null && (
+                      <p className="text-xs text-slate-500 mt-1">
+                        {t('position')}: {item.row},{item.col}
+                      </p>
+                    )}
                   </div>
                 </div>
               </div>
             ))}
           </div>
+
+          {/* Resumen por categoría: todas las registradas, con Pcs (0 o suma del pedido) */}
+          {allCategories.length > 0 && (
+            <div className="border-t border-slate-200 bg-slate-50/50">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-slate-200 text-slate-800">
+                    <th className="text-left py-2 px-4 font-semibold">{t('family_col') || 'Family'}</th>
+                    <th className="text-right py-2 px-4 font-semibold w-16">{t('pcs_col') || 'Pcs'}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...allCategories]
+                    .sort((a, b) => a.name.localeCompare(b.name))
+                    .map((cat) => {
+                      const pcs = orderItems.reduce(
+                        (sum: number, item: any) =>
+                          (item.category || '').trim() === cat.name ? sum + item.toOrder : sum,
+                        0
+                      );
+                      return (
+                        <tr key={cat.id} className="border-t border-slate-200 bg-white">
+                          <td className="py-2 px-4 text-slate-900">{cat.name}</td>
+                          <td className="py-2 px-4 text-right font-medium text-slate-800">{pcs}</td>
+                        </tr>
+                      );
+                    })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </Card>
 
-        {/* Total Card */}
+        {/* Total Card (sin impuestos) */}
         <Card className="border-green-200 bg-green-50 mb-20">
           <CardContent className="p-4">
             <div className="space-y-2">
               <div className="flex items-center justify-between text-sm">
                 <span className="text-slate-700">{t('subtotal')}</span>
                 <span className="text-slate-900">${totalAmount.toFixed(2)}</span>
-              </div>
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-slate-700">{t('tax')}</span>
-                <span className="text-slate-900">$0.00</span>
               </div>
               <Separator />
               <div className="flex items-center justify-between">
@@ -388,7 +433,7 @@ export function OrderReview() {
           <Button
             onClick={handleSendOrder}
             disabled={sending || orderItems.length === 0}
-            className="flex-1 bg-blue-600 hover:bg-blue-700"
+            className="flex-1 bg-indigo-600 hover:bg-indigo-700"
           >
             {sending ? (
               <span className="flex items-center gap-2">{t('loading')}...</span>

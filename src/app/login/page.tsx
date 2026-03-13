@@ -3,7 +3,8 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { ShoppingCart, Lock, Mail, Eye, EyeOff } from 'lucide-react';
+import Image from 'next/image';
+import { Lock, Mail, Eye, EyeOff } from 'lucide-react';
 import { useAuth } from '@/shared/auth/auth-provider';
 import { Button } from '@/shared/ui/button';
 import { Input } from '@/shared/ui/input';
@@ -53,7 +54,7 @@ export default function LoginPage() {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-50 to-slate-100">
         <div className="text-center">
-          <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+          <div className="w-12 h-12 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
           <p className="text-slate-600">Cargando...</p>
         </div>
       </div>
@@ -68,12 +69,18 @@ export default function LoginPage() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-50 to-slate-100 p-4">
       <div className="w-full max-w-md">
-        {/* Logo y título */}
+        {/* Logo ETERNAL (contenedor mismo color que sistema web: indigo/purple) y título */}
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-blue-600 to-blue-500 rounded-2xl shadow-lg mb-4">
-            <ShoppingCart className="h-8 w-8 text-white" />
+          <div className="inline-flex items-center justify-center mb-4 rounded-lg p-2 shadow-lg" style={{ background: 'linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%)' }}>
+            <Image
+              src="/logo-eternal.png"
+              alt="ETERNAL COSMETICS LLC"
+              width={100}
+              height={53}
+              className="h-auto w-[100px] max-w-full object-contain"
+              priority
+            />
           </div>
-          <h1 className="text-3xl font-bold text-slate-900 mb-2">Eternal Cosmetics</h1>
           <p className="text-slate-600">{t('seller_portal')}</p>
         </div>
 
@@ -99,7 +106,7 @@ export default function LoginPage() {
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="Ingresa tu email"
-                  className="pl-10 h-11 bg-slate-50 border-slate-200 focus:border-blue-500 focus:ring-blue-500"
+                  className="pl-10 h-11 bg-slate-50 border-slate-200 focus:border-indigo-500 focus:ring-indigo-500"
                   required
                   disabled={isSubmitting || isLoading}
                 />
@@ -121,7 +128,7 @@ export default function LoginPage() {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="Ingresa tu contraseña"
-                  className="pl-10 pr-10 h-11 bg-slate-50 border-slate-200 focus:border-blue-500 focus:ring-blue-500"
+                  className="pl-10 pr-10 h-11 bg-slate-50 border-slate-200 focus:border-indigo-500 focus:ring-indigo-500"
                   required
                   disabled={isSubmitting || isLoading}
                 />
@@ -151,7 +158,7 @@ export default function LoginPage() {
             <div className="flex justify-end">
               <Link
                 href="/forgot-password"
-                className="text-sm text-blue-600 hover:text-blue-700 font-medium transition-colors"
+                className="text-sm text-indigo-600 hover:text-indigo-700 font-medium transition-colors"
               >
                 ¿Olvidaste tu contraseña?
               </Link>
@@ -160,7 +167,8 @@ export default function LoginPage() {
             {/* Botón de login */}
             <Button
               type="submit"
-              className="w-full h-11 bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-700 hover:to-blue-600 text-white font-semibold rounded-lg shadow-lg transition-all"
+              className="w-full h-11 text-white font-semibold rounded-lg shadow-lg transition-all"
+              style={{ background: 'linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%)' }}
               disabled={isSubmitting || isLoading}
             >
               {isSubmitting ? 'Iniciando sesión...' : 'Iniciar Sesión'}
@@ -169,10 +177,15 @@ export default function LoginPage() {
 
         </div>
 
-        {/* Footer */}
-        <p className="text-center text-sm text-slate-500 mt-6">
-          © 2024 Eternal Cosmetics. Todos los derechos reservados.
-        </p>
+        {/* Footer y créditos (igual que sistema web) */}
+        <footer className="text-center text-sm text-slate-500 mt-6 space-y-1">
+          <p>© {new Date().getFullYear()} ETERNAL COSMETICS LLC. Desarrollado por Daniela Echezuría y Andrés Uribe.</p>
+          <p className="text-xs">
+            <a href="https://www.linkedin.com/in/daniela-echezuria-9287b3202/" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline">Daniela Echezuría</a>
+            {' · '}
+            <a href="https://www.linkedin.com/in/aeuribe24/" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline">Andrés Uribe</a>
+          </p>
+        </footer>
       </div>
     </div>
   );

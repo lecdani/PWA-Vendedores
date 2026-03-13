@@ -19,7 +19,7 @@ export default function Error({
       <div className="text-center max-w-md">
         <h2 className="text-lg font-semibold text-slate-900 mb-2">Algo salió mal</h2>
         <p className="text-sm text-slate-600 mb-4">{error.message || 'Error inesperado'}</p>
-        <Button onClick={reset} className="bg-blue-600 hover:bg-blue-700">
+        <Button onClick={reset} className="bg-indigo-600 hover:bg-indigo-700">
           Intentar de nuevo
         </Button>
       </div>

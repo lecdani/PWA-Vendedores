@@ -81,8 +81,8 @@ export function Dashboard() {
       label: t('total_orders_vendor'),
       value: loadingMetrics ? '—' : String(allOrders.length),
       icon: Package,
-      color: 'bg-blue-50 text-blue-600',
-      iconBg: 'bg-blue-500',
+      color: 'bg-indigo-50 text-indigo-600',
+      iconBg: 'bg-indigo-500',
     },
     {
       label: t('orders_today'),
@@ -122,7 +122,8 @@ export function Dashboard() {
       {/* Primary Action */}
       <button
         onClick={() => router.push('/select-store')}
-        className="w-full mb-5 bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-700 hover:to-blue-600 text-white rounded-xl p-4 shadow-lg hover:shadow-xl transition-all active:scale-98"
+        className="w-full mb-5 text-white rounded-xl p-4 shadow-lg hover:shadow-xl transition-all active:scale-98"
+        style={{ background: 'linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%)' }}
       >
         <div className="flex items-center justify-center gap-3">
           <div className="p-2 bg-white/20 rounded-lg">
@@ -130,7 +131,7 @@ export function Dashboard() {
           </div>
           <div className="text-left">
             <p className="text-lg">{t('create_new_order')}</p>
-            <p className="text-sm text-blue-100">{t('start_order_desc')}</p>
+            <p className="text-sm text-indigo-100">{t('start_order_desc')}</p>
           </div>
         </div>
       </button>

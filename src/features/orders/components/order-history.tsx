@@ -192,7 +192,7 @@ export function OrderHistory() {
             return (
               <Card
                 key={order.id}
-                className="border-slate-200 hover:border-blue-300 hover:shadow-md transition-all cursor-pointer active:scale-98"
+                className="border-slate-200 hover:border-indigo-300 hover:shadow-md transition-all cursor-pointer active:scale-98"
                 onClick={() => router.push(`/order/${order.id}`)}
               >
                 <CardContent className="p-4">
@@ -216,7 +216,7 @@ export function OrderHistory() {
                           {getStatusText(order.status)}
                         </Badge>
                         {(order.podUploaded || order.podImageUrl || order.podFileName) && (
-                          <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200">
+                          <Badge variant="outline" className="bg-indigo-50 text-indigo-700 border-indigo-200">
                             POD ✓
                           </Badge>
                         )}

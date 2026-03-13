@@ -68,8 +68,12 @@ export function SelectStore() {
     );
   });
 
-  const handleSelectStore = (storeId: string) => {
-    router.push(`/planogram/${storeId}`);
+  const handleSelectStore = (store: StoreForUI) => {
+    if (store.hasPlanogram === false) {
+      router.push(`/catalog-order/${store.id}`);
+    } else {
+      router.push(`/planogram/${store.id}`);
+    }
   };
 
   return (
@@ -120,13 +124,13 @@ export function SelectStore() {
           {filteredStores.map((store) => (
             <Card
               key={store.id}
-              className="border-slate-200 hover:border-blue-300 hover:shadow-md transition-all cursor-pointer active:scale-98"
-              onClick={() => handleSelectStore(store.id)}
+              className="border-slate-200 hover:border-indigo-300 hover:shadow-md transition-all cursor-pointer active:scale-98"
+              onClick={() => handleSelectStore(store)}
             >
               <CardContent className="p-4">
                 <div className="flex items-start gap-3">
-                  <div className="p-2.5 bg-blue-50 rounded-lg flex-shrink-0">
-                    <Store className="h-5 w-5 text-blue-600" />
+                  <div className="p-2.5 bg-indigo-50 rounded-lg flex-shrink-0">
+                    <Store className="h-5 w-5 text-indigo-600" />
                   </div>
                   
                   <div className="flex-1 min-w-0">

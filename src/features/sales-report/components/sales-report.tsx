@@ -585,8 +585,8 @@ export function SalesReport() {
           {/* 2. Pedidos Completados */}
           <Card className="border border-slate-200/80 shadow-sm bg-white overflow-visible rounded-xl">
             <CardContent className="p-4 flex flex-col gap-3">
-              <div className="p-2.5 rounded-xl bg-blue-50 w-fit">
-                <TrendingUp className="h-5 w-5 text-blue-600" />
+              <div className="p-2.5 rounded-xl bg-indigo-50 w-fit">
+                <TrendingUp className="h-5 w-5 text-indigo-600" />
               </div>
               <div className="min-w-0">
                 <p className="text-xs font-medium text-slate-500 uppercase tracking-wider break-words">{t('completed_orders')}</p>
@@ -821,7 +821,7 @@ export function SalesReport() {
                       className="flex items-center justify-between gap-4 p-4 bg-slate-50 rounded-xl border border-slate-100 hover:bg-slate-100/80 transition-colors"
                     >
                       <div className="flex items-center gap-4 min-w-0 flex-1">
-                        <span className="flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-lg bg-blue-100 text-blue-700 font-bold text-sm">
+                        <span className="flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-lg bg-indigo-100 text-indigo-700 font-bold text-sm">
                           {index + 1}
                         </span>
                         <div className="min-w-0 flex-1">
@@ -886,8 +886,8 @@ export function SalesReport() {
                     className="flex items-center justify-between p-4 bg-slate-50 rounded-lg border border-slate-100"
                   >
                     <div className="flex items-center gap-3">
-                      <div className="p-2 bg-blue-50 rounded-lg">
-                        <StoreIcon className="h-4 w-4 text-blue-600" />
+                      <div className="p-2 bg-indigo-50 rounded-lg">
+                        <StoreIcon className="h-4 w-4 text-indigo-600" />
                       </div>
                       <div>
                         <p className="text-sm font-medium text-slate-900">{store.storeName}</p>

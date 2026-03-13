@@ -19,6 +19,8 @@ export interface CreateOrderInput {
   vendorNumber?: string;
   /** Código PO (Purchase Order), requerido y único en el sistema. */
   po?: string;
+  /** ID del planograma usado al crear el pedido (orders.planogram_id). Opcional para pedidos por catálogo. */
+  planogramId?: string;
   items: OrderItemInput[];
   subtotal: number;
   tax: number;
@@ -316,6 +318,8 @@ export interface OrderForUI {
   salespersonId?: string;
   /** Código PO (Purchase Order), único. */
   po?: string;
+   /** ID del planograma asociado al pedido (tabla orders.planogram_id). */
+  planogramId?: string;
 }
 
 /** Solo hay 2 estados: pending o invoiced. La BD puede enviar "pending"/"invoiced" o true/false (isInvoiced). Acepta respuesta envuelta (data/order). */
@@ -337,6 +341,12 @@ function normalizeOrderStatus(raw: any): 'pending' | 'invoiced' {
 function mapRawOrderToUI(raw: any, details: any[] = []): OrderForUI {
   const id = String(raw?.orderId ?? raw?.OrderId ?? raw?.id ?? raw?.Id ?? '');
   const date = raw?.createdAt ?? raw?.CreatedAt ?? raw?.date ?? raw?.Date ?? new Date().toISOString();
+  const planogramIdRaw =
+    (raw?.planogramId ??
+      raw?.PlanogramId ??
+      raw?.planogram_id ??
+      raw?.PLANOGRAM_ID ??
+      '') as string;
   const items = (details || []).map((d: any) => {
     const qty = Number(d?.quantity ?? d?.Quantity ?? 0);
     const subtotalRow = Number(d?.subtotal ?? d?.Subtotal ?? d?.SubTotal ?? 0);
@@ -394,6 +404,7 @@ function mapRawOrderToUI(raw: any, details: any[] = []): OrderForUI {
       ?? raw?.invoice?.Id ?? raw?.Invoice?.id,
     salespersonId: salespersonIdRaw != null ? String(salespersonIdRaw) : undefined,
     po: raw?.po ?? raw?.Po ?? raw?.purchaseOrder ?? raw?.PurchaseOrder ?? raw?.PO ?? undefined,
+    planogramId: (planogramIdRaw || '').trim() || undefined,
   };
 }
 
@@ -430,6 +441,13 @@ export const ordersApi = {
       headerBody.po = poTrimmed;
       headerBody.Po = poTrimmed;
     }
+  if ((input.planogramId ?? '').trim()) {
+    const pid = String(input.planogramId).trim();
+    headerBody.planogramId = pid;
+    headerBody.PlanogramId = pid;
+    headerBody.planogram_id = pid;
+    headerBody.PLANOGRAM_ID = pid;
+  }
 
     let createdOrder: any;
     try {
@@ -566,6 +584,13 @@ export const ordersApi = {
     if (poTrimmed) {
       headerBody.po = poTrimmed;
       headerBody.Po = poTrimmed;
+    }
+    if ((input.planogramId ?? '').trim()) {
+      const pid = String(input.planogramId).trim();
+      headerBody.planogramId = pid;
+      headerBody.PlanogramId = pid;
+      headerBody.planogram_id = pid;
+      headerBody.PLANOGRAM_ID = pid;
     }
     try {
       await apiClient.put<any>(`/orders/order/${encodeURIComponent(id)}`, headerBody);

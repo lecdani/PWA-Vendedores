@@ -141,7 +141,7 @@ export function PendingPOD() {
             return (
               <Card
                 key={order.id}
-                className="border-slate-200 hover:border-blue-300 hover:shadow-md transition-all cursor-pointer active:scale-[0.98]"
+                className="border-slate-200 hover:border-indigo-300 hover:shadow-md transition-all cursor-pointer active:scale-[0.98]"
                 onClick={() => router.push(`/capture-pod/${order.id}`)}
               >
                 <CardContent className="p-4">
@@ -182,7 +182,7 @@ export function PendingPOD() {
                     <Button
                       onClick={(e) => { e.stopPropagation(); router.push(`/capture-pod/${order.id}`); }}
                       size="sm"
-                      className="bg-blue-600 hover:bg-blue-700 shrink-0"
+                      className="bg-indigo-600 hover:bg-indigo-700 shrink-0"
                     >
                       <Camera className="h-4 w-4 mr-2" />
                       {t('capture_pod')}

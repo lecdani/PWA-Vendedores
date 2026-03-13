@@ -8,6 +8,8 @@ let payload: {
   planogramData?: any[];
   planogramId?: string;
   editOrderId?: string | null;
+  /** Origen del pedido: planogram = grilla; catalog = catálogo de productos. */
+  source?: 'planogram' | 'catalog';
 } | null = null;
 
 export function setOrderReviewPayload(p: typeof payload) {

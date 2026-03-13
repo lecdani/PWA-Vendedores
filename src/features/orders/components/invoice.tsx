@@ -70,6 +70,7 @@ export function Invoice({
             <thead>
               <tr className="bg-slate-800 text-white">
                 <th className="text-left py-3 px-4 font-semibold w-14 text-center">{t('invoice_qty')}</th>
+                <th className="text-left py-3 px-4 font-semibold w-24">{t('invoice_sku') || 'SKU'}</th>
                 <th className="text-left py-3 px-4 font-semibold">{t('invoice_description')}</th>
                 <th className="text-right py-3 px-4 font-semibold w-24">{t('invoice_unit_price')}</th>
                 <th className="text-right py-3 px-4 font-semibold w-28">{t('invoice_amount')}</th>
@@ -79,6 +80,7 @@ export function Invoice({
               {items.map((item, index) => (
                 <tr key={index} className="border-b border-slate-100 last:border-0 hover:bg-slate-50/50">
                   <td className="py-3 px-4 text-center text-slate-700">{item.qty}</td>
+                  <td className="py-3 px-4 text-slate-700">{item.code || '—'}</td>
                   <td className="py-3 px-4 text-slate-900">{item.description || '—'}</td>
                   <td className="py-3 px-4 text-right text-slate-700">${Number(item.price).toFixed(2)}</td>
                   <td className="py-3 px-4 text-right font-medium text-slate-900">${Number(item.amount).toFixed(2)}</td>
@@ -86,7 +88,7 @@ export function Invoice({
               ))}
               {items.length === 0 && (
                 <tr>
-                  <td colSpan={4} className="py-8 px-4 text-center text-slate-400 text-sm">{t('invoice_no_items')}</td>
+                  <td colSpan={5} className="py-8 px-4 text-center text-slate-400 text-sm">{t('invoice_no_items')}</td>
                 </tr>
               )}
             </tbody>

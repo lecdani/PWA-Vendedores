@@ -6,6 +6,7 @@ export interface ProductForUI {
   sku: string;
   name: string;
   category: string;
+  categoryId?: string;
   currentPrice: number;
   isActive: boolean;
   image?: string;
@@ -19,7 +20,19 @@ function toProduct(raw: any): ProductForUI {
     id: String(raw?.id ?? raw?.Id ?? ''),
     sku: String(raw?.sku ?? raw?.Sku ?? ''),
     name: String(raw?.name ?? raw?.Name ?? ''),
-    category: String(raw?.category ?? raw?.Category ?? raw?.categoryName ?? raw?.CategoryName ?? ''),
+    // Nombre de categoría o familia (el backend puede enviar nombre y/o id)
+    category: String(
+      raw?.category ??
+        raw?.Category ??
+        raw?.categoryName ??
+        raw?.CategoryName ??
+        raw?.family ??
+        raw?.Family ??
+        raw?.familyName ??
+        raw?.FamilyName ??
+        ''
+    ).trim(),
+    categoryId: raw?.categoryId ?? raw?.CategoryId ?? undefined,
     currentPrice: Number(raw?.currentPrice ?? raw?.CurrentPrice ?? raw?.price ?? raw?.Price ?? 0),
     isActive: typeof raw?.isActive === 'boolean' ? raw.isActive : (raw?.IsActive ?? true),
     image: imageVal != null && imageVal !== '' ? String(imageVal) : undefined,

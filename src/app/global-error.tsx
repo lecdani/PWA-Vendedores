@@ -16,7 +16,7 @@ export default function GlobalError({
             <p className="text-sm text-slate-600 mb-4">{error?.message || 'Error inesperado'}</p>
             <button
               onClick={() => reset()}
-              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+              className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700"
             >
               Intentar de nuevo
             </button>

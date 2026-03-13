@@ -60,15 +60,15 @@ export function ProductModal({ open, onClose, position, onUpdate }: ProductModal
         {/* Content */}
         <div className="p-4 space-y-4">
           {/* Product Info */}
-          <div className="bg-blue-50 rounded-lg p-4 border border-blue-100">
+          <div className="bg-indigo-50 rounded-lg p-4 border border-indigo-100">
             <div className="flex items-start gap-3">
               {position.imageUrl ? (
-                <div className="w-12 h-12 rounded-lg overflow-hidden bg-white border border-blue-100 flex-shrink-0">
+                <div className="w-12 h-12 rounded-lg overflow-hidden bg-white border border-indigo-100 flex-shrink-0">
                   <img src={position.imageUrl} alt="" className="object-cover w-full h-full" />
                 </div>
               ) : (
-                <div className="p-2 bg-blue-100 rounded-lg flex-shrink-0">
-                  <Package className="h-5 w-5 text-blue-600" />
+                <div className="p-2 bg-indigo-100 rounded-lg flex-shrink-0">
+                  <Package className="h-5 w-5 text-indigo-600" />
                 </div>
               )}
               <div className="flex-1 min-w-0">
@@ -111,7 +111,7 @@ export function ProductModal({ open, onClose, position, onUpdate }: ProductModal
                       const val = parseInt(e.target.value) || 0;
                       setToOrder(Math.max(0, val));
                     }}
-                    className="text-center h-10 bg-blue-50 border-blue-200"
+                    className="text-center h-10 bg-indigo-50 border-indigo-200"
                     min="0"
                   />
                   <Button
@@ -139,7 +139,7 @@ export function ProductModal({ open, onClose, position, onUpdate }: ProductModal
               {t('cancel')}
             </Button>
             {position.productId && (
-              <Button onClick={handleSave} className="flex-1 bg-blue-600 hover:bg-blue-700">
+              <Button onClick={handleSave} className="flex-1 bg-indigo-600 hover:bg-indigo-700">
                 {t('save')}
               </Button>
             )}

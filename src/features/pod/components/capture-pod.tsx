@@ -241,15 +241,15 @@ export function CapturePOD({ orderId }: { orderId: string }) {
         )}
         {/* Instructions - ocultar si ya subió POD y no está re-subiendo */}
         {!orderLoadError && (!orderData?.podUploaded || podImage) && (
-        <Card className="mb-4 border-blue-200 bg-blue-50">
+        <Card className="mb-4 border-indigo-200 bg-indigo-50">
           <CardContent className="p-4">
             <div className="flex items-start gap-3">
-              <div className="p-2 bg-blue-100 rounded-lg">
-                <Camera className="h-5 w-5 text-blue-600" />
+              <div className="p-2 bg-indigo-100 rounded-lg">
+                <Camera className="h-5 w-5 text-indigo-600" />
               </div>
               <div>
-                <p className="text-sm text-blue-900 mb-1">{t('pod_instructions_title')}</p>
-                <p className="text-xs text-blue-700">{t('pod_instructions')}</p>
+                <p className="text-sm text-indigo-900 mb-1">{t('pod_instructions_title')}</p>
+                <p className="text-xs text-indigo-700">{t('pod_instructions')}</p>
               </div>
             </div>
           </CardContent>
@@ -272,7 +272,7 @@ export function CapturePOD({ orderId }: { orderId: string }) {
                 <div className="flex flex-col gap-2">
                   <Button
                     onClick={handleTakePhoto}
-                    className="bg-blue-600 hover:bg-blue-700"
+                    className="bg-indigo-600 hover:bg-indigo-700"
                   >
                     <Camera className="h-4 w-4 mr-2" />
                     {t('take_photo')}

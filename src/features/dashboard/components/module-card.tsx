@@ -15,7 +15,7 @@ interface ModuleCardProps {
 export function ModuleCard({ title, description, icon: Icon, color, iconBg, onClick }: ModuleCardProps) {
   return (
     <Card 
-      className="border-slate-200 hover:border-blue-200 hover:shadow-md transition-all cursor-pointer active:scale-98"
+      className="border-slate-200 hover:border-indigo-200 hover:shadow-md transition-all cursor-pointer active:scale-98"
       onClick={onClick}
     >
       <CardContent className="p-4">

@@ -41,14 +41,14 @@ export default function ForgotPasswordPage() {
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-50 to-slate-100 p-4">
         <div className="w-full max-w-md">
           <div className="text-center mb-8">
-            <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-blue-600 to-blue-500 rounded-2xl shadow-lg mb-4">
+            <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-indigo-600 to-purple-600 rounded-2xl shadow-lg mb-4">
               <ShoppingCart className="h-8 w-8 text-white" />
             </div>
             <h1 className="text-3xl font-bold text-slate-900 mb-2">Eternal Cosmetics</h1>
           </div>
           <div className="bg-white rounded-2xl shadow-xl p-8 border border-slate-200 text-center">
-            <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4">
-              <Mail className="h-8 w-8 text-blue-600" />
+            <div className="w-16 h-16 bg-indigo-100 rounded-full flex items-center justify-center mx-auto mb-4">
+              <Mail className="h-8 w-8 text-indigo-600" />
             </div>
             <h2 className="text-xl font-bold text-slate-900 mb-2">Revisa tu correo</h2>
             <p className="text-slate-600 mb-6">
@@ -74,7 +74,7 @@ export default function ForgotPasswordPage() {
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-50 to-slate-100 p-4">
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-blue-600 to-blue-500 rounded-2xl shadow-lg mb-4">
+          <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-indigo-600 to-purple-600 rounded-2xl shadow-lg mb-4">
             <ShoppingCart className="h-8 w-8 text-white" />
           </div>
           <h1 className="text-3xl font-bold text-slate-900 mb-2">Eternal Cosmetics</h1>
@@ -104,7 +104,7 @@ export default function ForgotPasswordPage() {
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="tu@correo.com"
-                  className="pl-10 h-11 bg-slate-50 border-slate-200 focus:border-blue-500 focus:ring-blue-500"
+                  className="pl-10 h-11 bg-slate-50 border-slate-200 focus:border-indigo-500 focus:ring-indigo-500"
                   required
                   disabled={isSubmitting}
                 />
@@ -119,7 +119,7 @@ export default function ForgotPasswordPage() {
 
             <Button
               type="submit"
-              className="w-full h-11 bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-700 hover:to-blue-600 text-white font-semibold rounded-lg shadow-lg"
+              className="w-full h-11 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-600 text-white font-semibold rounded-lg shadow-lg"
               disabled={isSubmitting}
             >
               {isSubmitting ? (
@@ -136,7 +136,7 @@ export default function ForgotPasswordPage() {
           <p className="text-center mt-6">
             <Link
               href="/login"
-              className="text-sm text-blue-600 hover:text-blue-700 font-medium inline-flex items-center gap-1"
+              className="text-sm text-indigo-600 hover:text-indigo-700 font-medium inline-flex items-center gap-1"
             >
               <ArrowLeft className="h-4 w-4" />
               Volver al inicio de sesión

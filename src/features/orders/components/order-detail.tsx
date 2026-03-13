@@ -23,6 +23,7 @@ import { storesApi } from '@/shared/api/stores-api';
 import { citiesApi } from '@/shared/api/cities-api';
 import { histpricesApi } from '@/shared/api/histprices-api';
 import { productsApi, getProductImageUrl } from '@/shared/api/products-api';
+import { categoriesApi, CategoryForUI } from '@/shared/api/categories-api';
 import { getBackendAssetUrl } from '@/shared/api/api-client';
 import { Button } from '@/shared/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/shared/ui/card';
@@ -52,6 +53,12 @@ export function OrderDetail({ orderId }: { orderId: string }) {
   const [loadingPod, setLoadingPod] = useState(false);
   const [orderLoadDone, setOrderLoadDone] = useState(false);
   const [podImageError, setPodImageError] = useState(false);
+  const [allCategories, setAllCategories] = useState<CategoryForUI[]>([]);
+  const [storeHasPlanogram, setStoreHasPlanogram] = useState(true);
+
+  useEffect(() => {
+    categoriesApi.fetchAll().then(setAllCategories);
+  }, []);
 
   const displayPod = (order?.podImageUrl || order?.podFileName || (invoiceFromApi?.pod || '').trim()) || '';
   const orderStatus = (order?.status || '').toLowerCase() === 'invoiced' ? 'invoiced' : 'pending';
@@ -67,25 +74,39 @@ export function OrderDetail({ orderId }: { orderId: string }) {
     const loadOrder = async () => {
       const apiOrder = await ordersApi.getOrderById(orderId);
       if (apiOrder) {
+        const categories = await categoriesApi.fetchAll();
+        const categoryById = new Map<string, string>();
+        categories.forEach((c) => {
+          categoryById.set(c.id, c.name);
+          categoryById.set(String(Number(c.id)), c.name);
+        });
+
         let orderToSet = apiOrder;
         const needsPrice = apiOrder.items.some((i: any) => i.productId && !Number(i.price));
         const needsProductName = apiOrder.items.some((i: any) => i.productId && !(i.productName || i.sku || '').trim());
         const needsImage = apiOrder.items.some((i: any) => i.productId && !i.imageUrl);
-        if (needsPrice || needsProductName || needsImage) {
+        const needsCategory = apiOrder.items.some((i: any) => i.productId && (i.category == null || i.category === ''));
+        if (needsPrice || needsProductName || needsImage || needsCategory) {
           const enrichedItems = await Promise.all(
             apiOrder.items.map(async (item: any) => {
               let productName = (item.productName || item.sku || '').trim();
               let price = Number(item.price) || 0;
               let imageUrl = item.imageUrl;
+              let category = (item.category || '').trim();
               if (item.productId) {
                 const product = await productsApi.getById(item.productId);
                 if (product) {
                   if (!productName) productName = product.name || product.sku || '';
                   if (!imageUrl) imageUrl = getProductImageUrl(product);
+                  if (!category && product.category) category = product.category.trim();
+                  if (!category && product.categoryId != null) {
+                    const id = String(product.categoryId);
+                    category = categoryById.get(id) ?? categoryById.get(String(Number(id))) ?? '';
+                  }
                 }
                 if (!price) price = await histpricesApi.getLatest(item.productId);
               }
-              return { ...item, productName: productName || item.productName, price, imageUrl: imageUrl || item.imageUrl };
+              return { ...item, productName: productName || item.productName, price, imageUrl: imageUrl || item.imageUrl, category: category || item.category };
             })
           );
           const computedSubtotal = enrichedItems.reduce((s: number, i: any) => s + (i.quantity ?? i.toOrder ?? 0) * (i.price || 0), 0);
@@ -102,6 +123,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
         if (orderToSet.storeId && looksLikeId) {
           const store = await storesApi.fetchStoreById(orderToSet.storeId);
           if (store) {
+            setStoreHasPlanogram(store.hasPlanogram !== false);
             setInvoiceStoreName(store.name);
             setInvoiceStoreAddress((store.address || '').trim());
             const cityRaw = (store.city || '').trim();
@@ -112,6 +134,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
               setInvoiceStoreCity(cityRaw);
             }
           } else {
+            setStoreHasPlanogram(true);
             setInvoiceStoreName(name || '—');
             setInvoiceStoreAddress(orderToSet.storeAddress || '');
             setInvoiceStoreCity('');
@@ -347,8 +370,8 @@ export function OrderDetail({ orderId }: { orderId: string }) {
         <Card className="border-slate-200 shadow-sm overflow-hidden">
           <CardContent className="p-4">
             <div className="flex items-start gap-3">
-              <div className="p-2 bg-blue-50 rounded-lg">
-                <StoreIcon className="h-5 w-5 text-blue-600" />
+              <div className="p-2 bg-indigo-50 rounded-lg">
+                <StoreIcon className="h-5 w-5 text-indigo-600" />
               </div>
               <div className="flex-1 min-w-0">
                 {order.po ? (
@@ -385,10 +408,10 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                 <p className="text-lg text-slate-900">{order.items.length}</p>
                 <p className="text-xs text-slate-500">{t('products')}</p>
               </div>
-              <div className="text-center p-3 bg-blue-50 rounded-lg">
-                <Grid3x3 className="h-5 w-5 text-blue-600 mx-auto mb-1" />
-                <p className="text-lg text-blue-900">{totalUnits}</p>
-                <p className="text-xs text-blue-600">{t('units')}</p>
+              <div className="text-center p-3 bg-indigo-50 rounded-lg">
+                <Grid3x3 className="h-5 w-5 text-indigo-600 mx-auto mb-1" />
+                <p className="text-lg text-indigo-900">{totalUnits}</p>
+                <p className="text-xs text-indigo-600">{t('units')}</p>
               </div>
               <div className="text-center p-3 bg-green-50 rounded-lg">
                 <DollarSign className="h-5 w-5 text-green-600 mx-auto mb-1" />
@@ -435,25 +458,27 @@ export function OrderDetail({ orderId }: { orderId: string }) {
           </CardContent>
         </Card>
 
-        {/* Planogram Section */}
-        <Card className="border-blue-200 bg-blue-50 overflow-hidden">
-          <CardContent className="p-4">
-            <div className="flex items-start gap-3 mb-3">
-              <Grid3x3 className="h-5 w-5 text-blue-600 mt-0.5" />
-              <div className="flex-1">
-                <p className="text-sm text-blue-900 mb-1">{t('planogram')}</p>
-                <p className="text-xs text-blue-700">{t('planogram_warning')}</p>
+        {/* Planogram Section: solo si la tienda usa planograma */}
+        {storeHasPlanogram && (
+          <Card className="border-indigo-200 bg-indigo-50 overflow-hidden">
+            <CardContent className="p-4">
+              <div className="flex items-start gap-3 mb-3">
+                <Grid3x3 className="h-5 w-5 text-indigo-600 mt-0.5" />
+                <div className="flex-1">
+                  <p className="text-sm text-indigo-900 mb-1">{t('planogram')}</p>
+                  <p className="text-xs text-indigo-700">{t('planogram_warning')}</p>
+                </div>
               </div>
-            </div>
-            <Button 
-              onClick={handleViewPlanogram}
-              className="w-full bg-blue-600 hover:bg-blue-700"
-            >
-              <Grid3x3 className="h-4 w-4 mr-2" />
-              {t('view_planogram')}
-            </Button>
-          </CardContent>
-        </Card>
+              <Button 
+                onClick={handleViewPlanogram}
+                className="w-full bg-indigo-600 hover:bg-indigo-700"
+              >
+                <Grid3x3 className="h-4 w-4 mr-2" />
+                {t('view_planogram')}
+              </Button>
+            </CardContent>
+          </Card>
+        )}
 
         {/* Confirmar eliminar pedido */}
         {showDeleteConfirm && (
@@ -506,7 +531,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                       <p className="text-sm text-slate-900 mb-1">{item.productName}</p>
                       <p className="text-xs text-slate-500 mb-2">{item.sku}</p>
                       <div className="flex items-center gap-2">
-                        <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200 text-xs">
+                        <Badge variant="outline" className="bg-indigo-50 text-indigo-700 border-indigo-200 text-xs">
                           {quantity} {t('units')}
                         </Badge>
                         <span className="text-xs text-slate-500">× ${price.toFixed(2)}</span>
@@ -518,6 +543,39 @@ export function OrderDetail({ orderId }: { orderId: string }) {
               );
             })}
           </div>
+
+          {/* Resumen por categoría: todas las registradas, con Pcs (0 o suma del pedido) */}
+          {allCategories.length > 0 && (
+            <div className="border-t border-slate-200 bg-slate-50/50">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-slate-200 text-slate-800">
+                    <th className="text-left py-2 px-4 font-semibold">{t('family_col') || 'Family'}</th>
+                    <th className="text-right py-2 px-4 font-semibold w-16">{t('pcs_col') || 'Pcs'}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...allCategories]
+                    .sort((a, b) => a.name.localeCompare(b.name))
+                    .map((cat) => {
+                      const pcs = (order.items || []).reduce(
+                        (sum: number, item: any) => {
+                          const qty = item.toOrder ?? item.quantity ?? 0;
+                          return (item.category || '').trim() === cat.name ? sum + qty : sum;
+                        },
+                        0
+                      );
+                      return (
+                        <tr key={cat.id} className="border-t border-slate-200 bg-white">
+                          <td className="py-2 px-4 text-slate-900">{cat.name}</td>
+                          <td className="py-2 px-4 text-right font-medium text-slate-800">{pcs}</td>
+                        </tr>
+                      );
+                    })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </Card>
 
         {/* Invoice */}
@@ -593,7 +651,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                       <div className="flex flex-col items-center justify-center py-8 px-4 text-center">
                         <p className="text-sm text-amber-700 mb-1">No se pudo cargar la imagen</p>
                         <p className="text-xs text-slate-500 mb-2">Ruta: {displayPod}</p>
-                        <a href={podImageUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 underline break-all">
+                        <a href={podImageUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-indigo-600 underline break-all">
                           Abrir enlace
                         </a>
                       </div>

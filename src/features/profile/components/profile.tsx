@@ -193,7 +193,7 @@ export function Profile() {
       <Card className="mb-4 border-slate-200">
         <CardContent className="p-4">
             <div className="flex items-center gap-4 mb-4">
-            <div className="w-16 h-16 bg-gradient-to-br from-blue-600 to-blue-500 rounded-full flex items-center justify-center text-white text-2xl font-semibold">
+            <div className="w-16 h-16 bg-indigo-600 rounded-full flex items-center justify-center text-white text-2xl font-semibold">
               {(displayName !== '—' ? displayName : 'V').charAt(0).toUpperCase()}
             </div>
             <div className="flex-1 min-w-0">
@@ -302,7 +302,7 @@ export function Profile() {
                 {t('cancel')}
               </Button>
               <Button 
-                className="flex-1 bg-blue-600 hover:bg-blue-700"
+                className="flex-1 bg-indigo-600 hover:bg-indigo-700"
                 onClick={handleSave}
                 disabled={profileSaving}
               >
@@ -423,7 +423,7 @@ export function Profile() {
               <Button variant="outline" className="flex-1" onClick={() => setShowChangePassword(false)} disabled={passwordSaving}>
                 {t('cancel')}
               </Button>
-              <Button className="flex-1 bg-blue-600 hover:bg-blue-700" onClick={handleChangePassword} disabled={passwordSaving}>
+              <Button className="flex-1 bg-indigo-600 hover:bg-indigo-700" onClick={handleChangePassword} disabled={passwordSaving}>
                 {passwordSaving ? 'Guardando...' : t('change_password')}
               </Button>
             </div>
