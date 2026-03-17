@@ -8,7 +8,6 @@ import {
   History,
   BarChart3,
   FileCheck,
-  MapPin,
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { MetricCard } from './metric-card';
@@ -27,7 +26,6 @@ export function Dashboard() {
     'Vendedor';
 
   const [orders, setOrders] = useState<OrderForUI[] | null>(null);
-  const [visitLogs, setVisitLogs] = useState<Array<{ storeId: string; visitDate: string }>>([]);
   const [loadingMetrics, setLoadingMetrics] = useState<boolean>(true);
 
   useEffect(() => {
@@ -36,19 +34,14 @@ export function Dashboard() {
       if (!user?.id) {
         if (mounted) {
           setOrders([]);
-          setVisitLogs([]);
           setLoadingMetrics(false);
         }
         return;
       }
       setLoadingMetrics(true);
-      const [ordersData, logs] = await Promise.all([
-        ordersApi.getOrdersByUser(user.id),
-        ordersApi.getVisitLogsBySalesperson(user.id),
-      ]);
+      const ordersData = await ordersApi.getOrdersByUser(user.id);
       if (!mounted) return;
       setOrders(ordersData || []);
-      setVisitLogs(Array.isArray(logs) ? logs : []);
       setLoadingMetrics(false);
     })();
     return () => {
@@ -64,17 +57,7 @@ export function Dashboard() {
     return new Date(o.date).toISOString().slice(0, 10) === todayIso;
   }).length;
 
-  const totalStoresVisited = new Set(
-    visitLogs.map((v) => v.storeId).filter(Boolean)
-  ).size;
-
   const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-  const storesVisitedThisMonth = new Set(
-    visitLogs
-      .filter((v) => (v.visitDate || '').slice(0, 7) === currentMonthKey)
-      .map((v) => v.storeId)
-      .filter(Boolean)
-  ).size;
 
   const metrics = [
     {
@@ -90,20 +73,6 @@ export function Dashboard() {
       icon: ShoppingCart,
       color: 'bg-emerald-50 text-emerald-600',
       iconBg: 'bg-emerald-500',
-    },
-    {
-      label: t('total_stores_visited'),
-      value: loadingMetrics ? '—' : String(totalStoresVisited),
-      icon: MapPin,
-      color: 'bg-green-50 text-green-600',
-      iconBg: 'bg-green-500',
-    },
-    {
-      label: t('stores_visited_this_month'),
-      value: loadingMetrics ? '—' : String(storesVisitedThisMonth),
-      icon: MapPin,
-      color: 'bg-orange-50 text-orange-600',
-      iconBg: 'bg-orange-500',
     },
   ];
 

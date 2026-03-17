@@ -59,7 +59,6 @@ export function SalesReport() {
   const { user } = useAuth();
 
   const [orders, setOrders] = useState<OrderForUI[]>([]);
-  const [visitLogs, setVisitLogs] = useState<Array<{ id: string | number; storeId: string; visitDate: string }>>([]);
   const [storeCache, setStoreCache] = useState<Record<string, string>>({});
   const [storeCityCache, setStoreCityCache] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
@@ -76,15 +75,11 @@ export function SalesReport() {
     (async () => {
       if (!user?.id) {
         setOrders([]);
-        setVisitLogs([]);
         setLoading(false);
         return;
       }
       setLoading(true);
-      const [apiOrders, logs] = await Promise.all([
-        ordersApi.getOrdersByUser(user.id),
-        ordersApi.getVisitLogsBySalesperson(user.id),
-      ]);
+      const apiOrders = await ordersApi.getOrdersByUser(user.id);
 
       if (!mounted) return;
 
@@ -147,7 +142,6 @@ export function SalesReport() {
       );
 
       setOrders(enriched);
-      setVisitLogs(logs);
       setLoading(false);
     })();
     return () => {
@@ -159,7 +153,6 @@ export function SalesReport() {
     const storeIds = [
       ...new Set([
         ...orders.map((o) => o.storeId).filter(Boolean),
-        ...visitLogs.map((v) => v.storeId).filter(Boolean),
       ]),
     ].filter((id) => id && looksLikeId(orders.find((o) => o.storeId === id)?.storeName || id));
     if (storeIds.length === 0) return;
@@ -186,7 +179,7 @@ export function SalesReport() {
     return () => {
       mounted = false;
     };
-  }, [orders, visitLogs]);
+  }, [orders]);
 
   const getStoreName = (storeId: string, fallback?: string) =>
     storeCache[storeId] || (orders.find((o) => o.storeId === storeId)?.storeName) || fallback || storeId;
@@ -210,20 +203,6 @@ export function SalesReport() {
     }
 
     return matchesStatus && matchesStore && matchesDate;
-  });
-
-  const filteredVisitLogs = visitLogs.filter((v) => {
-    const visitDay = (v.visitDate || '').toString().slice(0, 10);
-    let matchesDate = true;
-    if (fromDate) {
-      matchesDate = visitDay >= fromDate;
-    }
-    if (matchesDate && toDate) {
-      matchesDate = visitDay <= toDate;
-    }
-    const matchesStore =
-      selectedStore === 'all' || v.storeId === selectedStore;
-    return matchesDate && matchesStore;
   });
 
   const sortedFilteredOrders = [...filteredOrders].sort(
@@ -320,41 +299,8 @@ export function SalesReport() {
     .sort((a, b) => b.sales - a.sales);
   const topStore = salesByStore[0];
 
-  const visitsByStore = filteredVisitLogs
-    .reduce<{ storeId: string; storeName: string; visits: number }[]>((acc, v) => {
-      const name = getStoreName(v.storeId);
-      const existing = acc.find((s) => s.storeId === v.storeId);
-      if (existing) {
-        existing.visits += 1;
-      } else {
-        acc.push({ storeId: v.storeId, storeName: name, visits: 1 });
-      }
-      return acc;
-    }, [])
-    .sort((a, b) => b.visits - a.visits);
-
-  const visitsByDayRaw = filteredVisitLogs.reduce<{ date: string; dateSort: string; visits: number }[]>(
-    (acc, v) => {
-      const dateSort = v.visitDate || '';
-      const date = dateSort
-        ? new Date(dateSort).toLocaleDateString('es-ES', { month: 'short', day: 'numeric' })
-        : '—';
-      const existing = acc.find((item) => item.date === date);
-      if (existing) {
-        existing.visits += 1;
-      } else {
-        acc.push({ date, dateSort, visits: 1 });
-      }
-      return acc;
-    },
-    []
-  );
-  const visitsByDay = visitsByDayRaw
-    .sort((a, b) => (a.dateSort || '').localeCompare(b.dateSort || ''))
-    .map(({ date, visits }) => ({ date, visits }));
-
   const uniqueStores = Array.from(
-    new Set([...orders.map((o) => o.storeId), ...visitLogs.map((v) => v.storeId)])
+    new Set([...orders.map((o) => o.storeId)])
   )
     .filter(Boolean)
     .map((storeId) => ({
@@ -670,92 +616,7 @@ export function SalesReport() {
           )}
         </div>
 
-        <Card className="border border-slate-200/80 shadow-sm mb-6 bg-white rounded-xl">
-          <CardHeader className="px-5 pb-3">
-            <CardTitle className="text-base font-semibold text-slate-900 flex items-center gap-2">
-              <MapPin className="h-4 w-4 text-teal-600" />
-              {t('store_visits')}
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="px-5 pt-0 pb-5">
-            <div className="flex items-center gap-4 mb-5 p-4 bg-slate-50 rounded-xl">
-              <div className="p-3 rounded-xl bg-teal-50">
-                <StoreIcon className="h-6 w-6 text-teal-600" />
-              </div>
-              <div>
-                <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">{t('total_visits')}</p>
-                <p className="text-xl font-bold text-slate-900 mt-0.5">{filteredVisitLogs.length}</p>
-              </div>
-            </div>
-            {visitsByStore.length > 0 ? (
-              <>
-                <p className="text-sm font-medium text-slate-700 mb-3">{t('visits_by_store')}</p>
-                <div className="space-y-2">
-                  {visitsByStore.map((s) => (
-                    <div
-                      key={s.storeId}
-                      className="flex items-center justify-between p-4 bg-slate-50 rounded-lg border border-slate-100"
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className="p-2 bg-teal-50 rounded-lg">
-                          <StoreIcon className="h-4 w-4 text-teal-600" />
-                        </div>
-                        <p className="text-sm font-medium text-slate-900">{s.storeName}</p>
-                      </div>
-                      <Badge variant="outline" className="bg-teal-50 text-teal-700 border-teal-200 font-medium">
-                        {s.visits} {t('visits')}
-                      </Badge>
-                    </div>
-                  ))}
-                </div>
-              </>
-            ) : (
-              <p className="text-sm text-slate-500 py-4">{t('no_data_available')}</p>
-            )}
-            {visitsByDay.length > 0 && (
-              <>
-                <p className="text-sm font-medium text-slate-700 mt-5 mb-3">{t('visits_by_day')}</p>
-                <ResponsiveContainer width="100%" height={220}>
-                  <BarChart
-                    data={visitsByDay}
-                    margin={{ top: 8, right: 16, left: 0, bottom: 4 }}
-                  >
-                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-                    <XAxis
-                      dataKey="date"
-                      tick={{ fontSize: 11, fill: '#64748b' }}
-                      tickLine={false}
-                      axisLine={{ stroke: '#e2e8f0' }}
-                    />
-                    <YAxis
-                      tick={{ fontSize: 11, fill: '#64748b' }}
-                      tickLine={false}
-                      axisLine={{ stroke: '#e2e8f0' }}
-                      allowDecimals={false}
-                    />
-                    <Tooltip
-                      cursor={{ fill: 'rgba(15,23,42,0.04)' }}
-                      contentStyle={{
-                        backgroundColor: '#fff',
-                        border: '1px solid #e2e8f0',
-                        borderRadius: '8px',
-                        fontSize: '12px',
-                        boxShadow: '0 10px 30px rgba(15,23,42,0.08)',
-                      }}
-                      labelStyle={{ fontWeight: 600, color: '#0f172a' }}
-                    />
-                    <Bar
-                      dataKey="visits"
-                      fill="#0d9488"
-                      radius={[6, 6, 0, 0]}
-                      maxBarSize={32}
-                    />
-                  </BarChart>
-                </ResponsiveContainer>
-              </>
-            )}
-          </CardContent>
-        </Card>
+        {/* Visitas (VisitLogs) removidas: el sistema ahora usa Assignments. */}
 
         {salesByDay.length > 0 && (
           <Card className="border border-slate-200/80 shadow-sm mb-6 bg-white rounded-xl">

@@ -45,6 +45,7 @@ export function CatalogOrder({ storeId, orderId }: { storeId: string; orderId?: 
   const [showOnlyWithQty, setShowOnlyWithQty] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [page, setPage] = useState(0);
 
   useEffect(() => {
     if (storeId) {
@@ -135,6 +136,14 @@ export function CatalogOrder({ storeId, orderId }: { storeId: string; orderId?: 
     );
   };
 
+  const setQuantityAbsolute = (productId: string, value: number) => {
+    const raw = Number(value) || 0;
+    const next = Math.max(0, Math.floor(raw));
+    setProductsWithQty((prev) =>
+      prev.map((p) => (p.id === productId ? { ...p, toOrder: next } : p))
+    );
+  };
+
   const filteredProducts = productsWithQty.filter((p) => {
     if (selectedCategoryId !== 'all' && p.categoryId && String(p.categoryId) !== selectedCategoryId) {
       return false;
@@ -150,6 +159,28 @@ export function CatalogOrder({ storeId, orderId }: { storeId: string; orderId?: 
       (p.categoryName || '').toLowerCase().includes(q)
     );
   });
+
+  const sortedProducts = [...filteredProducts].sort((a, b) => {
+    const aSku = (a.sku || '').toString().toLowerCase();
+    const bSku = (b.sku || '').toString().toLowerCase();
+    if (aSku && bSku && aSku !== bSku) return aSku.localeCompare(bSku);
+    const aName = (a.name || '').toString().toLowerCase();
+    const bName = (b.name || '').toString().toLowerCase();
+    return aName.localeCompare(bName);
+  });
+
+  // Siempre mostrar un grid 10x10 (100 celdas) con paginación cuando haya más productos
+  const PAGE_SIZE = 100;
+  const totalPages = Math.max(1, Math.ceil(sortedProducts.length / PAGE_SIZE));
+  const currentPage = Math.min(page, totalPages - 1);
+  const pageProducts = sortedProducts.slice(
+    currentPage * PAGE_SIZE,
+    currentPage * PAGE_SIZE + PAGE_SIZE
+  );
+  const filledPageProducts: (ProductWithQty | null)[] =
+    pageProducts.length < PAGE_SIZE
+      ? [...pageProducts, ...Array(PAGE_SIZE - pageProducts.length).fill(null)]
+      : pageProducts;
 
   const totalToOrder = productsWithQty.reduce((sum, p) => sum + p.toOrder, 0);
   const totalValue = productsWithQty.reduce((sum, p) => sum + p.toOrder * p.price, 0);
@@ -285,63 +316,115 @@ export function CatalogOrder({ storeId, orderId }: { storeId: string; orderId?: 
             <p className="text-sm text-green-900">${totalValue.toFixed(2)}</p>
           </div>
         </div>
+
+        {totalPages > 1 && (
+          <div className="mt-3 flex items-center justify-between text-xs text-slate-600">
+            <span>
+              {t('page') ?? 'Página'} {currentPage + 1} / {totalPages}
+            </span>
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-7 px-2 text-xs"
+                disabled={currentPage === 0}
+                onClick={() => setPage((p) => Math.max(0, p - 1))}
+              >
+                {'<'}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-7 px-2 text-xs"
+                disabled={currentPage >= totalPages - 1}
+                onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+              >
+                {'>'}
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* Product list */}
+      {/* Product grid como matriz (similar a planograma) */}
       <div className="px-4 py-4 pb-28">
-        <div className="space-y-3">
-          {filteredProducts.map((product) => (
-            <Card key={product.id} className="border-slate-200 overflow-hidden">
-              <CardContent className="p-3">
-                <div className="flex items-center gap-3">
+        <div className="bg-white rounded-xl p-3 shadow-sm border border-slate-200 overflow-x-auto flex justify-start md:justify-center">
+          <div className="inline-grid grid-cols-10 gap-2 w-[960px] flex-none">
+            {filledPageProducts.map((product, index) =>
+              product ? (
+              <div
+                key={product.id}
+                className="aspect-square min-w-[64px] min-h-[64px] rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 transition-colors flex flex-col items-center justify-center p-1.5 text-center"
+              >
+                <div className="flex items-center justify-center gap-1 w-full mb-0.5">
                   {product.imageUrl ? (
                     <img
                       src={product.imageUrl}
                       alt=""
-                      className="w-12 h-12 rounded-lg object-cover flex-shrink-0"
+                      className="w-5 h-5 rounded object-cover flex-shrink-0"
                     />
                   ) : (
-                    <div className="w-12 h-12 rounded-lg bg-slate-200 flex items-center justify-center flex-shrink-0">
-                      <Package className="h-6 w-6 text-slate-500" />
+                    <div className="w-5 h-5 rounded bg-slate-200 flex items-center justify-center flex-shrink-0">
+                      <Package className="h-2.5 w-2.5 text-slate-500" />
                     </div>
                   )}
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-slate-900 truncate">{product.name}</p>
-                    <p className="text-xs text-slate-500">{product.sku}</p>
-                    {product.categoryName && (
-                      <p className="text-xs text-slate-400 mt-0.5">{product.categoryName}</p>
-                    )}
-                    <p className="text-xs text-indigo-600 mt-1">${product.price.toFixed(2)}</p>
-                  </div>
-                  <div className="flex items-center gap-1 flex-shrink-0">
-                    <Button
-                      variant="outline"
-                      size="icon"
-                      className="h-8 w-8 rounded-lg"
-                      onClick={() => setQuantity(product.id, -1)}
-                      disabled={product.toOrder <= 0}
-                    >
-                      <Minus className="h-4 w-4" />
-                    </Button>
-                    <span className="w-8 text-center text-sm font-medium text-slate-900">
-                      {product.toOrder}
-                    </span>
-                    <Button
-                      variant="outline"
-                      size="icon"
-                      className="h-8 w-8 rounded-lg"
-                      onClick={() => setQuantity(product.id, 1)}
-                    >
-                      <Plus className="h-4 w-4" />
-                    </Button>
-                  </div>
+                  <span
+                    className="text-[9px] leading-tight font-semibold text-slate-900 truncate max-w-[42px]"
+                    title={product.sku}
+                  >
+                    {product.sku || '—'}
+                  </span>
                 </div>
-              </CardContent>
-            </Card>
-          ))}
+                <span
+                  className="text-[8px] leading-tight font-medium text-slate-600 break-words line-clamp-2 w-full"
+                  title={product.name}
+                >
+                  {product.name || ''}
+                </span>
+                <span className="text-[8px] text-indigo-600 mt-0.5">
+                  ${product.price.toFixed(2)}
+                </span>
+                <div className="mt-1 flex items-center gap-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setQuantity(product.id, -1)}
+                    className="w-4 h-4 rounded bg-white/80 border border-slate-200 text-slate-700 text-[10px] font-semibold leading-none"
+                    aria-label="Disminuir"
+                    disabled={product.toOrder <= 0}
+                  >
+                    −
+                  </button>
+                  <input
+                    type="tel"
+                    inputMode="numeric"
+                    value={product.toOrder}
+                    onChange={(e) => setQuantityAbsolute(product.id, e.target.value)}
+                    className="w-[28px] h-4 rounded bg-white/80 border border-slate-200 text-[10px] text-slate-900 font-semibold tabular-nums text-center px-0.5"
+                    aria-label="Cantidad"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setQuantity(product.id, 1)}
+                    className="w-4 h-4 rounded bg-white/80 border border-slate-200 text-slate-700 text-[10px] font-semibold leading-none"
+                    aria-label="Aumentar"
+                  >
+                    +
+                  </button>
+                </div>
+              </div>
+              ) : (
+                <div
+                  key={`empty-${index}`}
+                  className="aspect-square min-w-[64px] min-h-[64px] rounded-lg border border-transparent bg-transparent"
+                />
+              )
+            )}
+          </div>
         </div>
 
-        {filteredProducts.length === 0 && (
+        {sortedProducts.length === 0 && (
           <div className="text-center py-8 text-slate-500 text-sm">
             {searchTerm.trim() ? t('no_stores_found') : t('no_products_in_planogram')}
           </div>

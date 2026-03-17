@@ -32,7 +32,6 @@ export function OrderReview() {
   const [planogramId, setPlanogramId] = useState<string | undefined>(undefined);
   const [orderSource, setOrderSource] = useState<'planogram' | 'catalog'>('planogram');
   const [stores, setStores] = useState<StoreForUI[]>([]);
-  const [po, setPo] = useState('');
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [allCategories, setAllCategories] = useState<CategoryForUI[]>([]);
@@ -63,7 +62,6 @@ export function OrderReview() {
       ]);
       if (mounted) {
         setStores(list);
-        if (order?.po) setPo(String(order.po).trim());
       }
     })();
     return () => { mounted = false; };
@@ -84,23 +82,8 @@ export function OrderReview() {
 
   const handleSendOrder = async () => {
     if (typeof window === 'undefined') return;
-    const poTrimmed = (po ?? '').trim();
-    if (!poTrimmed) {
-      setSendError(t('po_code_required'));
-      return;
-    }
     setSending(true);
     setSendError(null);
-
-    const poAlreadyUsed = await ordersApi.isPoAlreadyUsed(poTrimmed, {
-      userId: user?.id,
-      ...(editOrderId ? { excludeOrderId: editOrderId } : {}),
-    });
-    if (poAlreadyUsed) {
-      setSendError(t('po_duplicate'));
-      setSending(false);
-      return;
-    }
 
     const subtotal = totalAmount;
     const tax = 0;
@@ -111,7 +94,6 @@ export function OrderReview() {
       storeAddress: storeInfo ? `${storeInfo.address || ''}${storeInfo.city ? `, ${storeInfo.city}` : ''}` : '',
       salespersonId: user?.id,
       vendorNumber: '2F318',
-      po: poTrimmed,
       planogramId: orderSource === 'planogram' ? planogramId : undefined,
       items: orderItems.map((item: any) => ({
         productId: item.productId,
@@ -139,37 +121,6 @@ export function OrderReview() {
         );
         return;
       }
-      if (user?.id) {
-        let visitLogIdToUpdate: string | number | null = null;
-        if (orderBeforeUpdate) {
-          const originalStoreId = String(orderBeforeUpdate.storeId ?? '').trim().toLowerCase();
-          const orderDateStr = (orderBeforeUpdate.date || '').toString().slice(0, 10);
-          if (originalStoreId && orderDateStr) {
-            const logs = await ordersApi.getVisitLogsBySalesperson(user.id);
-            const matches = logs.filter(
-              (v) =>
-                String(v.storeId ?? '').trim().toLowerCase() === originalStoreId &&
-                (v.visitDate || '').slice(0, 10) === orderDateStr
-            );
-            if (matches.length === 1 && matches[0].id != null && matches[0].id !== '') {
-              visitLogIdToUpdate = matches[0].id;
-            }
-          }
-        }
-        if (visitLogIdToUpdate != null) {
-          const visitDateStr = orderBeforeUpdate?.date
-            ? (orderBeforeUpdate.date as string).toString().slice(0, 10)
-            : new Date().toISOString().slice(0, 10);
-          const updated = await ordersApi.updateVisitLog(visitLogIdToUpdate, {
-            storeId,
-            salespersonId: user.id,
-            visitDate: visitDateStr,
-          });
-          if (!updated) {
-            setSendError(t('error_saving_order') || 'Pedido guardado, pero no se pudo actualizar la visita en el servidor.');
-          }
-        }
-      }
       setSending(false);
       router.push(`/order/${editOrderId}?confirmed=1`);
       return;
@@ -194,13 +145,6 @@ export function OrderReview() {
     }
 
     const orderIdToUse = String(orderIdRaw);
-    if (user?.id) {
-      await ordersApi.createVisitLog({
-        storeId,
-        salespersonId: user.id,
-        visitDate: new Date().toISOString().slice(0, 10),
-      });
-    }
     setSending(false);
     router.push(`/order/${orderIdToUse}?confirmed=1`);
   };
@@ -241,29 +185,13 @@ export function OrderReview() {
       </div>
 
       <div className="px-4 py-4">
-        {/* Código PO (requerido, único) */}
-        <Card className="mb-4 border-slate-200 overflow-visible shadow-sm">
-          <CardContent className="p-4">
-            <label className="block text-sm font-medium text-slate-700 mb-2">
-              {t('po_code')} <span className="text-red-500">*</span>
-            </label>
-            <input
-              type="text"
-              value={po}
-              onChange={(e) => {
-                setPo(e.target.value);
-                setSendError(null);
-              }}
-              placeholder={t('po_code_placeholder')}
-              className="w-full h-11 rounded-lg border border-slate-200 bg-white px-3 shadow-sm focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400 text-slate-900 placeholder:text-slate-400"
-              maxLength={255}
-            />
-            <p className="text-xs text-slate-500 mt-1.5">{t('po_code_placeholder')}</p>
-            {sendError && (
-              <p className="text-sm text-red-600 mt-2">{sendError}</p>
-            )}
-          </CardContent>
-        </Card>
+        {sendError && (
+          <Card className="mb-4 border-slate-200 overflow-visible shadow-sm">
+            <CardContent className="p-4">
+              <p className="text-sm text-red-600">{sendError}</p>
+            </CardContent>
+          </Card>
+        )}
 
         {/* Selector de tienda (solo en edición) */}
         {editOrderId && stores.length > 0 && (

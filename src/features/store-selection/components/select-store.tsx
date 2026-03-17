@@ -10,10 +10,13 @@ import { Button } from '@/shared/ui/button';
 import { Badge } from '@/shared/ui/badge';
 import { storesApi, StoreForUI } from '@/shared/api/stores-api';
 import { citiesApi } from '@/shared/api/cities-api';
+import { assignmentsApi } from '@/shared/api/assignments-api';
+import { useAuth } from '@/shared/auth/auth-provider';
 
 export function SelectStore() {
   const { t } = useLanguage();
   const router = useRouter();
+  const { user } = useAuth();
   const [searchQuery, setSearchQuery] = useState('');
   const [stores, setStores] = useState<StoreForUI[]>([]);
   const [cityNames, setCityNames] = useState<Record<string, string>>({});
@@ -25,15 +28,28 @@ export function SelectStore() {
     (async () => {
       setLoading(true);
       setError(null);
-      const apiStores = await storesApi.fetchStores();
+      const [apiStores, allAssignments] = await Promise.all([
+        storesApi.fetchStores(),
+        assignmentsApi.fetchAll(),
+      ]);
       if (!mounted) return;
-      setStores(apiStores);
+      const uid = String(user?.id ?? '').trim();
+      if (uid) {
+        const allowedStoreIds = new Set(
+          allAssignments
+            .filter((a) => String(a.salespersonId) === uid)
+            .map((a) => String(a.storeId))
+        );
+        setStores(apiStores.filter((s) => allowedStoreIds.has(String(s.id))));
+      } else {
+        setStores(apiStores);
+      }
       setLoading(false);
     })();
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [user?.id]);
 
   useEffect(() => {
     const ids = stores

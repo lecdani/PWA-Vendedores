@@ -315,15 +315,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
     if (order.storeId) router.push(`/planogram/${order.storeId}?orderId=${orderId}`);
   };
 
-  const handleDeleteOrder = async () => {
-    setDeleting(true);
-    const ok = await ordersApi.deleteOrder(orderId);
-    setDeleting(false);
-    setShowDeleteConfirm(false);
-    if (ok) {
-      router.push('/history');
-    }
-  };
+  // Eliminación de pedidos solo permitida en Sistema Web Admin (no en la PWA).
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -437,21 +429,13 @@ export function OrderDetail({ orderId }: { orderId: string }) {
 
             {canEditOrder && (
               <div className="flex gap-2 mt-4">
-                <Button 
+                <Button
                   variant="outline"
                   onClick={handleEditOrder}
                   className="flex-1 border-amber-300 text-amber-800 hover:bg-amber-50"
                 >
                   <Pencil className="h-4 w-4 mr-2" />
                   {t('edit_order')}
-                </Button>
-                <Button 
-                  variant="outline"
-                  onClick={() => setShowDeleteConfirm(true)}
-                  className="flex-1 border-red-200 text-red-700 hover:bg-red-50"
-                >
-                  <Trash2 className="h-4 w-4 mr-2" />
-                  {t('delete_order')}
                 </Button>
               </div>
             )}
@@ -480,32 +464,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
           </Card>
         )}
 
-        {/* Confirmar eliminar pedido */}
-        {showDeleteConfirm && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50" aria-modal="true">
-            <Card className="w-full max-w-sm border-slate-200 bg-white shadow-lg overflow-hidden">
-              <CardHeader className="px-4 pt-4 pb-2">
-                <CardTitle className="text-base text-slate-900">{t('delete_order')}</CardTitle>
-              </CardHeader>
-              <CardContent className="px-4 pb-4 pt-0 space-y-4">
-                <p className="text-sm text-slate-600">{t('delete_order_confirm')}</p>
-                <div className="flex gap-2">
-                  <Button variant="outline" className="flex-1" onClick={() => setShowDeleteConfirm(false)} disabled={deleting}>
-                    {t('cancel')}
-                  </Button>
-                  <Button
-                    type="button"
-                    className="flex-1 bg-red-600 text-white hover:bg-red-700 focus-visible:ring-red-500"
-                    onClick={handleDeleteOrder}
-                    disabled={deleting}
-                  >
-                    {deleting ? t('loading') : t('delete_order')}
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          </div>
-        )}
+        {/* Eliminación de pedido deshabilitada en PWA: solo administradores en Sistema Web Admin. */}
 
         {/* Order Items */}
         <Card className="border-slate-200 shadow-sm overflow-hidden">

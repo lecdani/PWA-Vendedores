@@ -6,7 +6,6 @@ import { ArrowLeft, Send, Grid3x3, Loader2, Package } from 'lucide-react';
 import { useLanguage } from '@/shared/i18n/language-provider';
 import { Button } from '@/shared/ui/button';
 import { Badge } from '@/shared/ui/badge';
-import { ProductModal } from './product-modal';
 import { planogramsApi } from '@/shared/api/planograms-api';
 import { distributionsApi } from '@/shared/api/distributions-api';
 import { productsApi, getProductImageUrl } from '@/shared/api/products-api';
@@ -33,8 +32,6 @@ export interface ProductPosition {
 export function Planogram({ storeId, orderId }: { storeId: string; orderId?: string }) {
   const { t } = useLanguage();
   const router = useRouter();
-  const [selectedPosition, setSelectedPosition] = useState<ProductPosition | null>(null);
-  const [modalOpen, setModalOpen] = useState(false);
   const [storeInfo, setStoreInfo] = useState<any>(null);
   const [planogramData, setPlanogramData] = useState<ProductPosition[]>([]);
   const [loading, setLoading] = useState(true);
@@ -42,6 +39,9 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
   const [planogramId, setPlanogramId] = useState<string | null>(null);
   const [planogramName, setPlanogramName] = useState<string | null>(null);
   const [allCategories, setAllCategories] = useState<CategoryForUI[]>([]);
+  const [limitError, setLimitError] = useState<string | null>(null);
+
+  const MAX_QTY_PER_PRODUCT_PLANOGRAM = 10;
 
   useEffect(() => {
     if (storeId) {
@@ -164,22 +164,33 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
     };
   }, [storeId, orderId, t]);
 
-  const handleCellClick = (position: ProductPosition) => {
-    setSelectedPosition(position);
-    setModalOpen(true);
+  const setQtyForCell = (row: number, col: number, nextQty: number) => {
+    const raw = Number(nextQty) || 0;
+    const clamped = Math.max(0, Math.min(MAX_QTY_PER_PRODUCT_PLANOGRAM, Math.floor(raw)));
+    const qty = clamped;
+    setLimitError(null);
+    setPlanogramData((prev) => {
+      const idx = prev.findIndex((p) => p.row === row && p.col === col);
+      if (idx < 0) return prev;
+      const current = prev[idx];
+      if (!current.productId) return prev;
+
+      const next = [...prev];
+      next[idx] = { ...current, toOrder: qty };
+      return next;
+    });
   };
 
-  const handleUpdatePosition = (currentStock: number, toOrder: number) => {
-    if (selectedPosition) {
-      setPlanogramData(prev =>
-        prev.map(item =>
-          item.row === selectedPosition.row && item.col === selectedPosition.col
-            ? { ...item, currentStock, toOrder }
-            : item
-        )
-      );
-    }
-    setModalOpen(false);
+  const incQty = (row: number, col: number) => {
+    const current = planogramData.find((p) => p.row === row && p.col === col);
+    if (!current || !current.productId) return;
+    setQtyForCell(row, col, (current.toOrder || 0) + 1);
+  };
+
+  const decQty = (row: number, col: number) => {
+    const current = planogramData.find((p) => p.row === row && p.col === col);
+    if (!current || !current.productId) return;
+    setQtyForCell(row, col, (current.toOrder || 0) - 1);
   };
 
   const totalToOrder = planogramData.reduce((sum, item) => sum + item.toOrder, 0);
@@ -274,11 +285,17 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
       </div>
 
       {/* Planogram Grid */}
-      <div className="px-4 py-4">
+      <div className="px-4 py-4 pb-24">
         <div className="flex items-center gap-2 mb-3">
           <Grid3x3 className="h-4 w-4 text-slate-600" />
           <p className="text-sm text-slate-600">{t('tap_position_to_count')}</p>
         </div>
+
+        {limitError && (
+          <div className="mb-3">
+            <p className="text-xs text-red-600 font-medium text-right">{limitError}</p>
+          </div>
+        )}
 
         {productsCount === 0 && (
           <div className="mb-4 p-4 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-sm">
@@ -290,35 +307,71 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
           <p className="text-xs text-slate-500 mb-2">{t('planogram_loaded')}</p>
         )}
 
-        {/* 10x10 Grid */}
-        <div className="bg-white rounded-xl p-3 shadow-sm border border-slate-200 overflow-x-auto">
-          <div className="grid grid-cols-10 gap-1.5 min-w-[320px] max-w-2xl mx-auto">
+        {/* 10x10 Grid - ancho fijo, con scroll horizontal en pantallas pequeñas y centrado en pantallas grandes */}
+        <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-200 overflow-x-auto flex justify-start md:justify-center">
+          <div className="inline-grid grid-cols-10 gap-1.5 w-[760px] flex-none">
             {planogramData.map((item) => (
-              <button
+              <div
                 key={`${item.row}-${item.col}`}
-                onClick={() => handleCellClick(item)}
-                className={`aspect-square rounded-lg border ${getCellStyle(item)} hover:opacity-90 transition-opacity relative flex flex-col items-center justify-center p-1 text-center min-h-0`}
+                className={`aspect-square w-[70px] h-[70px] rounded-lg border ${getCellStyle(item)} hover:opacity-90 transition-opacity relative flex flex-col items-center justify-center p-1.5 text-center`}
               >
                 {item.productId ? (
                   <>
-                    {item.imageUrl ? (
-                      <img src={item.imageUrl} alt="" className="w-5 h-5 rounded object-cover flex-shrink-0 mx-auto" />
-                    ) : (
-                      <div className="w-5 h-5 rounded bg-slate-200 flex items-center justify-center flex-shrink-0 mx-auto">
-                        <Package className="h-2.5 w-2.5 text-slate-500" />
-                      </div>
-                    )}
-                    <span className="text-[9px] leading-tight font-medium text-slate-800 break-words line-clamp-2 w-full mt-0.5" title={item.productName || item.sku}>
-                      {item.productName || item.sku}
-                    </span>
-                    {item.toOrder > 0 && (
-                      <span className="text-xs font-semibold text-indigo-700 mt-0.5">
-                        {item.toOrder}
+                    <div className="flex items-center justify-center gap-1 w-full">
+                      {item.imageUrl ? (
+                        <img
+                          src={item.imageUrl}
+                          alt=""
+                          className="w-5 h-5 rounded object-cover flex-shrink-0"
+                        />
+                      ) : (
+                        <div className="w-5 h-5 rounded bg-slate-200 flex items-center justify-center flex-shrink-0">
+                          <Package className="h-2.5 w-2.5 text-slate-500" />
+                        </div>
+                      )}
+                      <span
+                        className="text-[9px] leading-tight font-semibold text-slate-900 truncate max-w-[42px]"
+                        title={item.sku}
+                      >
+                        {item.sku || '—'}
                       </span>
-                    )}
+                    </div>
+                    <span
+                      className="text-[8px] leading-tight font-medium text-slate-600 break-words line-clamp-2 w-full mt-0.5"
+                      title={item.productName}
+                    >
+                      {item.productName || ''}
+                    </span>
+
+                    <div className="mt-1 flex items-center gap-0.5">
+                      <button
+                        type="button"
+                        onClick={() => decQty(item.row, item.col)}
+                        className="w-4 h-4 rounded bg-white/80 border border-slate-200 text-slate-700 text-[10px] font-semibold leading-none"
+                        aria-label="Disminuir"
+                      >
+                        −
+                      </button>
+                      <input
+                        type="tel"
+                        inputMode="numeric"
+                        value={item.toOrder > 0 ? item.toOrder : 0}
+                        onChange={(e) => setQtyForCell(item.row, item.col, Number(e.target.value || 0))}
+                        className="w-[28px] h-4 rounded bg-white/80 border border-slate-200 text-[9px] text-slate-900 font-semibold tabular-nums text-center px-0.5"
+                        aria-label="Cantidad"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => incQty(item.row, item.col)}
+                        className="w-4 h-4 rounded bg-white/80 border border-slate-200 text-slate-700 text-[10px] font-semibold leading-none"
+                        aria-label="Aumentar"
+                      >
+                        +
+                      </button>
+                    </div>
                   </>
                 ) : null}
-              </button>
+              </div>
             ))}
           </div>
         </div>
@@ -337,11 +390,13 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
 
         {/* Resumen por categoría: todas las categorías registradas, con Pcs (0 o suma del pedido) */}
         {allCategories.length > 0 && (
-          <div className="mt-6 border border-slate-200 rounded-lg overflow-hidden bg-slate-50/50">
-            <table className="w-full text-sm">
+          <div className="mt-6 border border-slate-200 rounded-lg bg-slate-50/50 overflow-x-auto">
+            <table className="w-full text-sm min-w-[360px]">
               <thead>
                 <tr className="bg-slate-200 text-slate-800">
-                  <th className="text-left py-2 px-3 font-semibold">{t('family_col') || 'Family'}</th>
+                  <th className="text-left py-2 px-3 font-semibold whitespace-normal break-words">
+                    {t('family_col') || 'Family'}
+                  </th>
                   <th className="text-right py-2 px-3 font-semibold w-16">{t('pcs_col') || 'Pcs'}</th>
                 </tr>
               </thead>
@@ -354,7 +409,9 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
                       .reduce((sum, item) => sum + item.toOrder, 0);
                     return (
                       <tr key={cat.id} className="border-t border-slate-200 bg-white">
-                        <td className="py-2 px-3 text-slate-900">{cat.name}</td>
+                        <td className="py-2 px-3 text-slate-900 whitespace-normal break-words">
+                          {cat.name}
+                        </td>
                         <td className="py-2 px-3 text-right font-medium text-slate-800">{pcs}</td>
                       </tr>
                     );
@@ -378,16 +435,6 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
           </Button>
         </div>
       </div>
-
-      {/* Product Modal */}
-      {selectedPosition && (
-        <ProductModal
-          open={modalOpen}
-          onClose={() => setModalOpen(false)}
-          position={selectedPosition}
-          onUpdate={handleUpdatePosition}
-        />
-      )}
     </div>
   );
 }
