@@ -92,7 +92,7 @@ export function SalesReport() {
         if (cached) return cached;
         const product = await productsApi.getById(String(productId));
         if (product) {
-          cached = { name: product.name || '', sku: product.sku || '' };
+          cached = { name: product.name || '', sku: product.code || product.sku || '' };
           productNameCache.set(productId, cached);
         } else {
           cached = { name: currentName, sku: currentSku };
@@ -687,8 +687,9 @@ export function SalesReport() {
                         </span>
                         <div className="min-w-0 flex-1">
                           <p className="text-sm font-semibold text-slate-900 break-words">{product.name}</p>
-                          {product.sku && product.sku !== product.name && (
-                            <p className="text-xs text-slate-500 mt-0.5">{product.sku}</p>
+                          {(product.code || product.sku) &&
+                            (product.code || product.sku) !== product.name && (
+                            <p className="text-xs text-slate-500 mt-0.5">{product.code || product.sku}</p>
                           )}
                         </div>
                       </div>

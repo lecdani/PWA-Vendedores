@@ -3,9 +3,12 @@ import { apiClient, ApiError, getBackendAssetUrl } from './api-client';
 /** Producto para la PWA (solo lectura desde API) */
 export interface ProductForUI {
   id: string;
+  /** Código del producto (prioridad para mostrar en UI). */
+  code: string;
   sku: string;
   name: string;
   category: string;
+  familyId?: string;
   categoryId?: string;
   currentPrice: number;
   isActive: boolean;
@@ -16,9 +19,12 @@ export interface ProductForUI {
 function toProduct(raw: any): ProductForUI {
   const imageVal = raw?.image ?? raw?.Image ?? raw?.imageUrl ?? raw?.ImageUrl ?? raw?.imagePath ?? raw?.ImagePath;
   const imageFileNameVal = raw?.imageFileName ?? raw?.ImageFileName;
+  const codeVal = String(raw?.code ?? raw?.Code ?? '').trim();
+  const skuVal = String(raw?.sku ?? raw?.Sku ?? '').trim();
   return {
     id: String(raw?.id ?? raw?.Id ?? ''),
-    sku: String(raw?.sku ?? raw?.Sku ?? ''),
+    code: codeVal || skuVal,
+    sku: skuVal || codeVal,
     name: String(raw?.name ?? raw?.Name ?? ''),
     // Nombre de categoría o familia (el backend puede enviar nombre y/o id)
     category: String(
@@ -32,7 +38,8 @@ function toProduct(raw: any): ProductForUI {
         raw?.FamilyName ??
         ''
     ).trim(),
-    categoryId: raw?.categoryId ?? raw?.CategoryId ?? undefined,
+    familyId: raw?.familyId ?? raw?.FamilyId ?? raw?.categoryId ?? raw?.CategoryId ?? undefined,
+    categoryId: raw?.categoryId ?? raw?.CategoryId ?? raw?.familyId ?? raw?.FamilyId ?? undefined,
     currentPrice: Number(raw?.currentPrice ?? raw?.CurrentPrice ?? raw?.price ?? raw?.Price ?? 0),
     isActive: typeof raw?.isActive === 'boolean' ? raw.isActive : (raw?.IsActive ?? true),
     image: imageVal != null && imageVal !== '' ? String(imageVal) : undefined,

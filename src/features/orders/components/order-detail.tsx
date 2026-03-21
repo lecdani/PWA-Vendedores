@@ -24,6 +24,8 @@ import { citiesApi } from '@/shared/api/cities-api';
 import { histpricesApi } from '@/shared/api/histprices-api';
 import { productsApi, getProductImageUrl } from '@/shared/api/products-api';
 import { categoriesApi, CategoryForUI } from '@/shared/api/categories-api';
+import { orderItemMatchesFamily } from '@/shared/utils/order-item-matches-family';
+import { FamilySummaryCell } from '@/shared/components/family-summary-cell';
 import { getBackendAssetUrl } from '@/shared/api/api-client';
 import { Button } from '@/shared/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/shared/ui/card';
@@ -86,27 +88,44 @@ export function OrderDetail({ orderId }: { orderId: string }) {
         const needsProductName = apiOrder.items.some((i: any) => i.productId && !(i.productName || i.sku || '').trim());
         const needsImage = apiOrder.items.some((i: any) => i.productId && !i.imageUrl);
         const needsCategory = apiOrder.items.some((i: any) => i.productId && (i.category == null || i.category === ''));
-        if (needsPrice || needsProductName || needsImage || needsCategory) {
+        const needsFamilyId = apiOrder.items.some(
+          (i: any) => i.productId && !(i.familyId ?? i.categoryId ?? i.FamilyId ?? i.CategoryId)
+        );
+        if (needsPrice || needsProductName || needsImage || needsCategory || needsFamilyId) {
           const enrichedItems = await Promise.all(
             apiOrder.items.map(async (item: any) => {
               let productName = (item.productName || item.sku || '').trim();
               let price = Number(item.price) || 0;
               let imageUrl = item.imageUrl;
               let category = (item.category || '').trim();
+              let familyId = String(item.familyId ?? item.FamilyId ?? item.categoryId ?? item.CategoryId ?? '').trim();
               if (item.productId) {
                 const product = await productsApi.getById(item.productId);
                 if (product) {
-                  if (!productName) productName = product.name || product.sku || '';
+                  if (!productName) productName = product.name || product.code || product.sku || '';
                   if (!imageUrl) imageUrl = getProductImageUrl(product);
+                  if (!familyId) familyId = String(product.familyId ?? product.categoryId ?? '').trim();
+                  if (familyId) {
+                    const resolved = categoryById.get(familyId) ?? categoryById.get(String(Number(familyId)));
+                    if (resolved) category = resolved;
+                  }
                   if (!category && product.category) category = product.category.trim();
                   if (!category && product.categoryId != null) {
                     const id = String(product.categoryId);
                     category = categoryById.get(id) ?? categoryById.get(String(Number(id))) ?? '';
                   }
                 }
-                if (!price) price = await histpricesApi.getLatest(item.productId);
+                if (!price && familyId) price = await histpricesApi.getLatest(familyId);
               }
-              return { ...item, productName: productName || item.productName, price, imageUrl: imageUrl || item.imageUrl, category: category || item.category };
+              return {
+                ...item,
+                productName: productName || item.productName,
+                price,
+                imageUrl: imageUrl || item.imageUrl,
+                category: category || item.category,
+                familyId: familyId || item.familyId,
+                categoryId: familyId || item.categoryId,
+              };
             })
           );
           const computedSubtotal = enrichedItems.reduce((s: number, i: any) => s + (i.quantity ?? i.toOrder ?? 0) * (i.price || 0), 0);
@@ -505,29 +524,37 @@ export function OrderDetail({ orderId }: { orderId: string }) {
 
           {/* Resumen por categoría: todas las registradas, con Pcs (0 o suma del pedido) */}
           {allCategories.length > 0 && (
-            <div className="border-t border-slate-200 bg-slate-50/50">
-              <table className="w-full text-sm">
+            <div className="border-t border-slate-100 pt-3">
+              <table className="w-full min-w-[280px] overflow-hidden rounded-lg border border-slate-200 text-sm shadow-sm">
                 <thead>
-                  <tr className="bg-slate-200 text-slate-800">
-                    <th className="text-left py-2 px-4 font-semibold">{t('family_col') || 'Family'}</th>
-                    <th className="text-right py-2 px-4 font-semibold w-16">{t('pcs_col') || 'Pcs'}</th>
+                  <tr className="bg-slate-100">
+                    <th className="border-b border-slate-200 px-3 py-2 text-left text-xs font-medium text-slate-600">
+                      {t('family_col') || 'Family'}
+                    </th>
+                    <th className="w-14 border-b border-slate-200 px-3 py-2 text-left text-xs font-medium text-slate-600">
+                      {t('pcs_col') || 'Pcs'}
+                    </th>
                   </tr>
                 </thead>
-                <tbody>
+                <tbody className="divide-y divide-slate-100 bg-white">
                   {[...allCategories]
                     .sort((a, b) => a.name.localeCompare(b.name))
                     .map((cat) => {
                       const pcs = (order.items || []).reduce(
                         (sum: number, item: any) => {
                           const qty = item.toOrder ?? item.quantity ?? 0;
-                          return (item.category || '').trim() === cat.name ? sum + qty : sum;
+                          return orderItemMatchesFamily(item, cat, allCategories) ? sum + qty : sum;
                         },
                         0
                       );
                       return (
-                        <tr key={cat.id} className="border-t border-slate-200 bg-white">
-                          <td className="py-2 px-4 text-slate-900">{cat.name}</td>
-                          <td className="py-2 px-4 text-right font-medium text-slate-800">{pcs}</td>
+                        <tr key={cat.id} className="bg-slate-50/80">
+                          <td className="px-3 py-2.5 align-top">
+                            <FamilySummaryCell cat={cat} />
+                          </td>
+                          <td className="px-3 py-2.5 text-left align-middle bg-white">
+                            <span className="tabular-nums text-slate-900">{pcs}</span>
+                          </td>
                         </tr>
                       );
                     })}

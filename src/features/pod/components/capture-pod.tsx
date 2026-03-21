@@ -55,7 +55,7 @@ export function CapturePOD({ orderId }: { orderId: string }) {
               if (!price) price = await histpricesApi.getLatest(item.productId); // último del historial
               if (!productName) {
                 const product = await productsApi.getById(item.productId);
-                if (product) productName = product.name || product.sku || '';
+                if (product) productName = product.name || product.code || product.sku || '';
               }
             }
             return { ...item, productName: productName || item.productName, price };

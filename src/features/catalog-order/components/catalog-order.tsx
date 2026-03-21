@@ -20,6 +20,8 @@ export interface CatalogOrderItem {
   productName: string;
   sku: string;
   category: string;
+  /** Id de familia para resumen por categoría (evita mezclar por nombre duplicado en API). */
+  familyId?: string;
   toOrder: number;
   price: number;
   imageUrl?: string;
@@ -77,20 +79,24 @@ export function CatalogOrder({ storeId, orderId }: { storeId: string; orderId?: 
         });
 
         const getCategoryName = (p: ProductForUI): string => {
+          const id = String(p.familyId ?? p.categoryId ?? '').trim();
+          if (id) {
+            const fromList = categoryById.get(id) ?? categoryById.get(String(Number(id)));
+            if (fromList) return fromList;
+          }
           const name = (p.category || '').trim();
-          if (name) return name;
-          const id = p.categoryId != null ? String(p.categoryId) : '';
-          return id ? (categoryById.get(id) ?? categoryById.get(String(Number(id))) ?? '') : '';
+          return name;
         };
 
-        const uniqueIds = [...new Set(activeProducts.map((p) => p.id))];
+        const uniqueFamilyIds = [...new Set(activeProducts.map((p) => String(p.familyId ?? p.categoryId ?? '').trim()).filter(Boolean))];
         const priceResults = await Promise.all(
-          uniqueIds.map(async (id) => ({ id, price: await histpricesApi.getLatest(id) }))
+          uniqueFamilyIds.map(async (id) => ({ id, price: await histpricesApi.getLatest(id) }))
         );
         const priceMap = new Map(priceResults.map((r) => [r.id, r.price]));
 
         let withQty: ProductWithQty[] = activeProducts.map((p) => {
-          const price = priceMap.get(p.id) ?? p.currentPrice ?? 0;
+          const familyId = String(p.familyId ?? p.categoryId ?? '').trim();
+          const price = (familyId ? priceMap.get(familyId) : undefined) ?? p.currentPrice ?? 0;
           return {
             ...p,
             toOrder: 0,
@@ -155,14 +161,15 @@ export function CatalogOrder({ storeId, orderId }: { storeId: string; orderId?: 
     const q = searchTerm.toLowerCase();
     return (
       (p.name || '').toLowerCase().includes(q) ||
+      (p.code || '').toLowerCase().includes(q) ||
       (p.sku || '').toLowerCase().includes(q) ||
       (p.categoryName || '').toLowerCase().includes(q)
     );
   });
 
   const sortedProducts = [...filteredProducts].sort((a, b) => {
-    const aSku = (a.sku || '').toString().toLowerCase();
-    const bSku = (b.sku || '').toString().toLowerCase();
+    const aSku = (a.code || a.sku || '').toString().toLowerCase();
+    const bSku = (b.code || b.sku || '').toString().toLowerCase();
     if (aSku && bSku && aSku !== bSku) return aSku.localeCompare(bSku);
     const aName = (a.name || '').toString().toLowerCase();
     const bName = (b.name || '').toString().toLowerCase();
@@ -191,8 +198,9 @@ export function CatalogOrder({ storeId, orderId }: { storeId: string; orderId?: 
       .map((p) => ({
         productId: p.id,
         productName: p.name || '',
-        sku: p.sku || '',
+        sku: p.code || p.sku || '',
         category: p.categoryName || '',
+        familyId: String(p.familyId ?? p.categoryId ?? '').trim() || undefined,
         toOrder: p.toOrder,
         price: p.price,
         imageUrl: p.imageUrl,
@@ -372,9 +380,9 @@ export function CatalogOrder({ storeId, orderId }: { storeId: string; orderId?: 
                   )}
                   <span
                     className="text-[9px] leading-tight font-semibold text-slate-900 truncate max-w-[42px]"
-                    title={product.sku}
+                    title={product.code || product.sku}
                   >
-                    {product.sku || '—'}
+                    {product.code || product.sku || '—'}
                   </span>
                 </div>
                 <span

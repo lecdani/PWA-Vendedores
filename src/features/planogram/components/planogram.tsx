@@ -14,6 +14,8 @@ import { histpricesApi } from '@/shared/api/histprices-api';
 import { ordersApi } from '@/shared/api/orders-api';
 import { storesApi } from '@/shared/api/stores-api';
 import { setOrderReviewPayload } from '@/shared/order-review-payload';
+import { orderItemMatchesFamily } from '@/shared/utils/order-item-matches-family';
+import { FamilySummaryCell } from '@/shared/components/family-summary-cell';
 
 export interface ProductPosition {
   row: number;
@@ -21,7 +23,10 @@ export interface ProductPosition {
   productId: string;
   productName: string;
   sku: string;
+  /** Nombre de familia para mostrar (resuelto desde API de familias cuando hay id). */
   category: string;
+  /** Id de familia para agrupar en resumen sin depender solo del nombre. */
+  familyId?: string;
   idealStock: number;
   currentStock: number;
   toOrder: number;
@@ -95,15 +100,27 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
 
         const resolveCategory = (p: (typeof products)[0] | null): string => {
           if (!p) return '';
+          const id = String(p.familyId ?? p.categoryId ?? '').trim();
+          if (id) {
+            const fromList = categoryById.get(id) ?? categoryById.get(String(Number(id)));
+            if (fromList) return fromList;
+          }
           const name = (p.category || '').trim();
-          if (name) return name;
-          const id = p.categoryId != null ? String(p.categoryId) : '';
-          return id ? (categoryById.get(id) ?? categoryById.get(String(Number(id))) ?? '') : '';
+          return name;
         };
 
-        const uniqueProductIds = [...new Set(distList.map((d) => d.productId).filter(Boolean))];
+        const uniqueFamilyIds = [
+          ...new Set(
+            distList
+              .map((d) => {
+                const p = getProduct(d.productId);
+                return String(p?.familyId ?? p?.categoryId ?? '').trim();
+              })
+              .filter(Boolean)
+          )
+        ];
         const priceResults = await Promise.all(
-          uniqueProductIds.map(async (id) => ({ id, price: await histpricesApi.getLatest(id) }))
+          uniqueFamilyIds.map(async (id) => ({ id, price: await histpricesApi.getLatest(id) }))
         );
         const priceMap = new Map(priceResults.map((r) => [r.id, r.price]));
 
@@ -114,17 +131,19 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
             const dist = distList.find((d) => d.xPosition === row && d.yPosition === col);
             const product = dist ? getProduct(dist.productId) : null;
             const productIdStr = product?.id ?? '';
+            const familyId = String(product?.familyId ?? product?.categoryId ?? '').trim();
             const price =
-              productIdStr && priceMap.has(productIdStr)
-                ? priceMap.get(productIdStr)!
+              familyId && priceMap.has(familyId)
+                ? priceMap.get(familyId)!
                 : product?.currentPrice ?? 0;
             grid.push({
               row,
               col,
               productId: productIdStr,
               productName: product?.name ?? '',
-              sku: product?.sku ?? '',
+              sku: product?.code ?? product?.sku ?? '',
               category: resolveCategory(product ?? null),
+              familyId: familyId || undefined,
               idealStock: 0,
               currentStock: 0,
               toOrder: 0,
@@ -330,7 +349,7 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
                         </div>
                       )}
                       <span
-                        className="text-[9px] leading-tight font-semibold text-slate-900 truncate max-w-[42px]"
+                        className="text-[11px] leading-snug font-semibold text-slate-900 truncate max-w-[52px] tabular-nums"
                         title={item.sku}
                       >
                         {item.sku || '—'}
@@ -390,29 +409,33 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
 
         {/* Resumen por categoría: todas las categorías registradas, con Pcs (0 o suma del pedido) */}
         {allCategories.length > 0 && (
-          <div className="mt-6 border border-slate-200 rounded-lg bg-slate-50/50 overflow-x-auto">
-            <table className="w-full text-sm min-w-[360px]">
+          <div className="mt-6 overflow-x-auto">
+            <table className="w-full min-w-[300px] overflow-hidden rounded-lg border border-slate-200 text-sm shadow-sm">
               <thead>
-                <tr className="bg-slate-200 text-slate-800">
-                  <th className="text-left py-2 px-3 font-semibold whitespace-normal break-words">
+                <tr className="bg-slate-100">
+                  <th className="border-b border-slate-200 px-3 py-2 text-left text-xs font-medium text-slate-600">
                     {t('family_col') || 'Family'}
                   </th>
-                  <th className="text-right py-2 px-3 font-semibold w-16">{t('pcs_col') || 'Pcs'}</th>
+                  <th className="w-14 border-b border-slate-200 px-3 py-2 text-left text-xs font-medium text-slate-600">
+                    {t('pcs_col') || 'Pcs'}
+                  </th>
                 </tr>
               </thead>
-              <tbody>
+              <tbody className="divide-y divide-slate-100 bg-white">
                 {[...allCategories]
                   .sort((a, b) => a.name.localeCompare(b.name))
                   .map((cat) => {
                     const pcs = planogramData
-                      .filter((item) => (item.category || '').trim() === cat.name)
+                      .filter((item) => orderItemMatchesFamily(item, cat, allCategories))
                       .reduce((sum, item) => sum + item.toOrder, 0);
                     return (
-                      <tr key={cat.id} className="border-t border-slate-200 bg-white">
-                        <td className="py-2 px-3 text-slate-900 whitespace-normal break-words">
-                          {cat.name}
+                      <tr key={cat.id} className="bg-slate-50/80">
+                        <td className="px-3 py-2.5 align-top">
+                          <FamilySummaryCell cat={cat} />
                         </td>
-                        <td className="py-2 px-3 text-right font-medium text-slate-800">{pcs}</td>
+                        <td className="px-3 py-2.5 text-left align-middle bg-white">
+                          <span className="tabular-nums text-slate-900">{pcs}</span>
+                        </td>
                       </tr>
                     );
                   })}

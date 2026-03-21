@@ -50,13 +50,13 @@ const latestPriceCache = new Map<string, Promise<number>>();
 
 export const histpricesApi = {
   /**
-   * Obtiene el último precio del historial de un producto.
-   * GET /histprices/histprices/latest/{productId}
+ * Obtiene el último precio del historial de una familia.
+ * GET /histprices/histprices/latest/{familyId}
    * Si la API devuelve lista, se usa el último registro (el más reciente).
-   * Las peticiones se cachean por productId en memoria para acelerar vistas como historial, pendientes, etc.
+ * Las peticiones se cachean por familyId en memoria para acelerar vistas como historial, pendientes, etc.
    */
-  async getLatest(productId: string): Promise<number> {
-    const key = String(productId ?? '').trim();
+  async getLatest(familyId: string): Promise<number> {
+    const key = String(familyId ?? '').trim();
     if (!key) return 0;
 
     let cached = latestPriceCache.get(key);

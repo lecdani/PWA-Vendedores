@@ -268,7 +268,7 @@ async function enrichOrderItemsWithProductNames(
     if (!cached) {
       const product = await productsApi.getById(pid);
       cached = product
-        ? { name: product.name || '', sku: product.sku || '' }
+        ? { name: product.name || '', sku: product.code || product.sku || '' }
         : { name: currentName, sku: currentSku };
       productNameCache.set(pid, cached);
     }
@@ -974,7 +974,12 @@ export const ordersApi = {
         description = description || '—';
         const code = (orderItem?.sku || (d?.sku ?? d?.Sku ?? d?.product?.sku ?? d?.Product?.Sku ?? pid)) || '—';
         if ((price === 0 || amount === 0) && pid) {
-          const latestPrice = orderItem?.price > 0 ? orderItem.price : await histpricesApi.getLatest(pid);
+          let latestPrice = orderItem?.price ?? 0;
+          if (!(latestPrice > 0)) {
+            const product = await productsApi.getById(pid);
+            const familyId = String(product?.familyId ?? product?.categoryId ?? '').trim();
+            latestPrice = familyId ? await histpricesApi.getLatest(familyId) : 0;
+          }
           price = latestPrice;
           amount = qty * price;
         }

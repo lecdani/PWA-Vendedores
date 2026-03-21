@@ -9,6 +9,8 @@ import { ordersApi, CreateOrderInput } from '@/shared/api/orders-api';
 import { storesApi, StoreForUI } from '@/shared/api/stores-api';
 import { getOrderReviewPayload, setOrderReviewPayload } from '@/shared/order-review-payload';
 import { categoriesApi, CategoryForUI } from '@/shared/api/categories-api';
+import { orderItemMatchesFamily } from '@/shared/utils/order-item-matches-family';
+import { FamilySummaryCell } from '@/shared/components/family-summary-cell';
 import { Button } from '@/shared/ui/button';
 import { Card, CardContent } from '@/shared/ui/card';
 import { Separator } from '@/shared/ui/separator';
@@ -265,7 +267,7 @@ export function OrderReview() {
           
           <div className="divide-y divide-slate-100">
             {orderItems.map((item: any, index: number) => (
-              <div key={index} className="p-4">
+              <div key={item.productId ? `${item.productId}-${index}` : index} className="p-4">
                 <div className="flex items-start justify-between gap-3">
                   {item.imageUrl ? (
                     <img src={item.imageUrl} alt="" className="w-10 h-10 rounded object-cover flex-shrink-0" />
@@ -299,27 +301,35 @@ export function OrderReview() {
 
           {/* Resumen por categoría: todas las registradas, con Pcs (0 o suma del pedido) */}
           {allCategories.length > 0 && (
-            <div className="border-t border-slate-200 bg-slate-50/50">
-              <table className="w-full text-sm">
+            <div className="border-t border-slate-100 pt-3">
+              <table className="w-full min-w-[280px] overflow-hidden rounded-lg border border-slate-200 text-sm shadow-sm">
                 <thead>
-                  <tr className="bg-slate-200 text-slate-800">
-                    <th className="text-left py-2 px-4 font-semibold">{t('family_col') || 'Family'}</th>
-                    <th className="text-right py-2 px-4 font-semibold w-16">{t('pcs_col') || 'Pcs'}</th>
+                  <tr className="bg-slate-100">
+                    <th className="border-b border-slate-200 px-3 py-2 text-left text-xs font-medium text-slate-600">
+                      {t('family_col') || 'Family'}
+                    </th>
+                    <th className="w-14 border-b border-slate-200 px-3 py-2 text-left text-xs font-medium text-slate-600">
+                      {t('pcs_col') || 'Pcs'}
+                    </th>
                   </tr>
                 </thead>
-                <tbody>
+                <tbody className="divide-y divide-slate-100 bg-white">
                   {[...allCategories]
                     .sort((a, b) => a.name.localeCompare(b.name))
                     .map((cat) => {
                       const pcs = orderItems.reduce(
                         (sum: number, item: any) =>
-                          (item.category || '').trim() === cat.name ? sum + item.toOrder : sum,
+                          orderItemMatchesFamily(item, cat, allCategories) ? sum + item.toOrder : sum,
                         0
                       );
                       return (
-                        <tr key={cat.id} className="border-t border-slate-200 bg-white">
-                          <td className="py-2 px-4 text-slate-900">{cat.name}</td>
-                          <td className="py-2 px-4 text-right font-medium text-slate-800">{pcs}</td>
+                        <tr key={cat.id} className="bg-slate-50/80">
+                          <td className="px-3 py-2.5 align-top">
+                            <FamilySummaryCell cat={cat} />
+                          </td>
+                          <td className="px-3 py-2.5 text-left align-middle bg-white">
+                            <span className="tabular-nums text-slate-900">{pcs}</span>
+                          </td>
                         </tr>
                       );
                     })}
