@@ -7,7 +7,6 @@ import {
   Plus,
   History,
   BarChart3,
-  FileCheck,
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { MetricCard } from './metric-card';
@@ -133,15 +132,6 @@ export function Dashboard() {
             color="bg-slate-50 text-slate-600"
             iconBg="bg-slate-500"
             onClick={() => router.push('/history')}
-          />
-          
-          <ModuleCard
-            title={t('pending_deliveries')}
-            description={t('pod_required')}
-            icon={FileCheck}
-            color="bg-amber-50 text-amber-600"
-            iconBg="bg-amber-500"
-            onClick={() => router.push('/pending-pod')}
           />
 
           <ModuleCard

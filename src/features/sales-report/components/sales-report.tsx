@@ -1,15 +1,26 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
-import { ArrowLeft, Download, FileText, TrendingUp, Package, DollarSign, Store as StoreIcon, MapPin } from 'lucide-react';
+import {
+  ArrowLeft,
+  Download,
+  FileText,
+  TrendingUp,
+  Package,
+  DollarSign,
+  Store as StoreIcon,
+  MapPin,
+  MapPinned,
+} from 'lucide-react';
 import { useLanguage } from '@/shared/i18n/language-provider';
 import { histpricesApi } from '@/shared/api/histprices-api';
 import { productsApi } from '@/shared/api/products-api';
 import { useAuth } from '@/shared/auth/auth-provider';
-import { ordersApi, OrderForUI } from '@/shared/api/orders-api';
+import { ordersApi, OrderForUI, InvoiceReportRow } from '@/shared/api/orders-api';
 import { storesApi } from '@/shared/api/stores-api';
 import { citiesApi } from '@/shared/api/cities-api';
+import { assignmentsApi } from '@/shared/api/assignments-api';
 import { Button } from '@/shared/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/shared/ui/card';
 import { Badge } from '@/shared/ui/badge';
@@ -35,17 +46,6 @@ function formatCurrency(n: number): string {
   return new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 }).format(n);
 }
 
-function getItemDisplayName(item: any): string {
-  if (!item) return '—';
-  const name = String(item?.productName ?? item?.ProductName ?? item?.description ?? item?.Description ?? item?.name ?? item?.Name ?? '').trim();
-  if (name && !looksLikeId(name)) return name;
-  const sku = String(item?.sku ?? item?.Sku ?? item?.code ?? item?.Code ?? '').trim();
-  if (sku && !looksLikeId(sku)) return sku;
-  const pid = String(item?.productId ?? item?.ProductId ?? '').trim();
-  if (pid && !looksLikeId(pid)) return pid;
-  return sku || pid || '—';
-}
-
 function productDisplayName(pname: string, sku: string, pid: string): string {
   if (pname && !looksLikeId(pname)) return pname;
   if (sku && !looksLikeId(sku)) return sku;
@@ -59,6 +59,7 @@ export function SalesReport() {
   const { user } = useAuth();
 
   const [orders, setOrders] = useState<OrderForUI[]>([]);
+  const [invoiceRows, setInvoiceRows] = useState<InvoiceReportRow[]>([]);
   const [storeCache, setStoreCache] = useState<Record<string, string>>({});
   const [storeCityCache, setStoreCityCache] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
@@ -66,15 +67,32 @@ export function SalesReport() {
   const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
   const [fromDate, setFromDate] = useState(startOfMonth.toISOString().slice(0, 10));
   const [toDate, setToDate] = useState(now.toISOString().slice(0, 10));
-  const [selectedStatus, setSelectedStatus] = useState('all');
   const [selectedStore, setSelectedStore] = useState('all');
+  const [assignedStoresCount, setAssignedStoresCount] = useState(0);
   const reportRef = useRef<HTMLDivElement>(null);
+
+  /** Tiendas distintas con pedido del vendedor en el mes calendario actual. */
+  const storesVisitedThisMonthCount = useMemo(() => {
+    const n = new Date();
+    const y = n.getFullYear();
+    const m = n.getMonth();
+    const start = `${y}-${String(m + 1).padStart(2, '0')}-01`;
+    const lastD = new Date(y, m + 1, 0).getDate();
+    const end = `${y}-${String(m + 1).padStart(2, '0')}-${String(lastD).padStart(2, '0')}`;
+    const set = new Set<string>();
+    for (const o of orders) {
+      const d = (o.date || '').toString().slice(0, 10);
+      if (d >= start && d <= end && o.storeId) set.add(String(o.storeId));
+    }
+    return set.size;
+  }, [orders]);
 
   useEffect(() => {
     let mounted = true;
     (async () => {
       if (!user?.id) {
         setOrders([]);
+        setInvoiceRows([]);
         setLoading(false);
         return;
       }
@@ -85,6 +103,7 @@ export function SalesReport() {
 
       // Enriquecer pedidos con precios e información de producto cuando falten
       const productNameCache = new Map<string, { name: string; sku: string }>();
+      const productFamilyCache = new Map<string, string>();
       const resolveProductName = async (productId: string, currentName: string, currentSku: string) => {
         if (!productId) return { name: currentName, sku: currentSku };
         if (currentName && !looksLikeId(currentName)) return { name: currentName, sku: currentSku };
@@ -107,8 +126,21 @@ export function SalesReport() {
             const items = await Promise.all(
               order.items.map(async (item: any) => {
                 let price = Number(item.price) || 0;
-                if (item.productId && !price) {
-                  price = await histpricesApi.getLatest(String(item.productId));
+                if (!price) {
+                  const inlineFamilyId = String(
+                    item?.familyId ?? item?.FamilyId ?? item?.categoryId ?? item?.CategoryId ?? ''
+                  ).trim();
+                  let familyId = inlineFamilyId;
+                  const productId = String(item?.productId ?? item?.ProductId ?? '').trim();
+                  if (!familyId && productId) {
+                    familyId = productFamilyCache.get(productId) || '';
+                    if (!familyId) {
+                      const product = await productsApi.getById(productId);
+                      familyId = String(product?.familyId ?? product?.categoryId ?? '').trim();
+                      if (familyId) productFamilyCache.set(productId, familyId);
+                    }
+                  }
+                  if (familyId) price = await histpricesApi.getLatest(familyId);
                 }
                 const resolved = await resolveProductName(
                   String(item?.productId ?? item?.ProductId ?? ''),
@@ -141,7 +173,10 @@ export function SalesReport() {
         })
       );
 
+      const invReport = await ordersApi.buildInvoiceReportRows(enriched);
+      if (!mounted) return;
       setOrders(enriched);
+      setInvoiceRows(invReport);
       setLoading(false);
     })();
     return () => {
@@ -181,61 +216,75 @@ export function SalesReport() {
     };
   }, [orders]);
 
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      const uid = String(user?.id ?? '').trim();
+      if (!uid) {
+        if (mounted) setAssignedStoresCount(0);
+        return;
+      }
+      const all = await assignmentsApi.fetchAll();
+      if (!mounted) return;
+      const ids = new Set(
+        all.filter((a) => String(a.salespersonId) === uid).map((a) => String(a.storeId))
+      );
+      setAssignedStoresCount(ids.size);
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [user?.id]);
+
   const getStoreName = (storeId: string, fallback?: string) =>
     storeCache[storeId] || (orders.find((o) => o.storeId === storeId)?.storeName) || fallback || storeId;
   const getStoreCity = (storeId: string) => storeCityCache[storeId] || '';
 
-  const filteredOrders = orders.filter((order) => {
-    const statusNorm = (order.status || '').toLowerCase();
-    const matchesStatus =
-      selectedStatus === 'all' || statusNorm === selectedStatus.toLowerCase();
-    const matchesStore =
-      selectedStore === 'all' || order.storeId === selectedStore;
-
-    // Comparar solo la parte de fecha YYYY-MM-DD para evitar problemas de zona horaria
-    const orderDay = (order.date || '').toString().slice(0, 10);
+  /** Reporte por factura: filtros solo fecha + tienda (sin estados de pedido). */
+  const filteredInvoices = invoiceRows.filter((inv) => {
+    const matchesStore = selectedStore === 'all' || inv.storeId === selectedStore;
+    const invDay = (inv.invoiceDate || '').toString().slice(0, 10);
     let matchesDate = true;
-    if (fromDate) {
-      matchesDate = orderDay >= fromDate;
-    }
-    if (matchesDate && toDate) {
-      matchesDate = orderDay <= toDate;
-    }
-
-    return matchesStatus && matchesStore && matchesDate;
+    if (fromDate) matchesDate = invDay >= fromDate;
+    if (matchesDate && toDate) matchesDate = invDay <= toDate;
+    return matchesStore && matchesDate;
   });
 
-  const sortedFilteredOrders = [...filteredOrders].sort(
-    (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
+  const sortedFilteredInvoices = [...filteredInvoices].sort(
+    (a, b) =>
+      new Date(b.invoiceDate || b.orderDate).getTime() -
+      new Date(a.invoiceDate || a.orderDate).getTime()
   );
 
-  const isCompleted = (status: string) => {
-    const s = (status || '').toLowerCase();
-    return s === 'completed' || s === 'invoiced' || s === 'delivered';
-  };
-
-  const completedOrders = filteredOrders.filter((o) => isCompleted(o.status));
-  const pendingOrders = filteredOrders.filter((o) => (o.status || '').toLowerCase() === 'pending');
-  const totalRevenue = completedOrders.reduce((sum, order) => sum + (Number(order.total) || 0), 0);
-  const totalProductsSold = completedOrders.reduce((sum, order) => {
-    return sum + (order.items || []).reduce((itemSum, item) => itemSum + (item.toOrder ?? item.quantity ?? 0), 0);
+  const totalRevenue = filteredInvoices.reduce((sum, inv) => sum + (Number(inv.total) || 0), 0);
+  const totalProductsSold = filteredInvoices.reduce((sum, inv) => {
+    return (
+      sum +
+      (inv.items || []).reduce((itemSum, line) => itemSum + (Number(line.qty) || 0), 0)
+    );
   }, 0);
-  const averageOrder = completedOrders.length > 0 ? totalRevenue / completedOrders.length : 0;
+  const averageInvoice =
+    filteredInvoices.length > 0 ? totalRevenue / filteredInvoices.length : 0;
   const activeDaysCount = new Set(
-    filteredOrders.map((o) => (o.date || '').split('T')[0]).filter(Boolean)
+    filteredInvoices.map((inv) => (inv.invoiceDate || '').split('T')[0]).filter(Boolean)
   ).size;
 
-  const salesByDayRaw = filteredOrders.reduce(
-    (acc: { date: string; dateSort: string; sales: number; orders: number }[], order) => {
-      const dateSort = order.date || '';
-      const date = dateSort ? new Date(order.date).toLocaleDateString('es-ES', { month: 'short', day: 'numeric' }) : '—';
+  const salesByDayRaw = filteredInvoices.reduce(
+    (acc: { date: string; dateSort: string; sales: number; count: number }[], inv) => {
+      const dateSort = (inv.invoiceDate || inv.orderDate || '').toString();
+      const date = dateSort
+        ? new Date(inv.invoiceDate || inv.orderDate).toLocaleDateString('es-ES', {
+            month: 'short',
+            day: 'numeric',
+          })
+        : '—';
       const existing = acc.find((item) => item.date === date);
-      const amt = isCompleted(order.status) ? Number(order.total) || 0 : 0;
+      const amt = Number(inv.total) || 0;
       if (existing) {
         existing.sales += amt;
-        existing.orders += 1;
+        existing.count += 1;
       } else {
-        acc.push({ date, dateSort, sales: amt, orders: 1 });
+        acc.push({ date, dateSort, sales: amt, count: 1 });
       }
       return acc;
     },
@@ -243,24 +292,21 @@ export function SalesReport() {
   );
   const salesByDay = salesByDayRaw
     .sort((a, b) => (a.dateSort || '').localeCompare(b.dateSort || ''))
-    .map(({ date, sales, orders }) => ({ date, sales, orders }));
+    .map(({ date, sales, count }) => ({ date, sales, orders: count }));
 
   const topProducts = (() => {
-    const ordersWithItems = filteredOrders.filter((o) => (o.items || []).length > 0);
-    const completedFirst = ordersWithItems.filter((o) => isCompleted(o.status));
-    const ordersToUse = completedFirst.length > 0 ? completedFirst : ordersWithItems;
     const map = new Map<string, { id: string; name: string; sku: string; quantity: number; revenue: number }>();
-    ordersToUse.forEach((order) => {
-      (order.items || []).forEach((item: any) => {
-        const qty = Number(item?.toOrder ?? item?.quantity ?? item?.qty ?? item?.Qty ?? item?.amount ?? item?.Amount ?? 0);
+    filteredInvoices.forEach((inv) => {
+      (inv.items || []).forEach((line) => {
+        const qty = Number(line.qty) || 0;
         if (qty <= 0) return;
-        const price = Number(item?.price ?? item?.Price ?? item?.unitPrice ?? 0) || 0;
-        const pid = String(item?.productId ?? item?.ProductId ?? '').trim();
-        const sku = String(item?.sku ?? item?.Sku ?? item?.code ?? item?.Code ?? '').trim();
-        const pname = String(item?.productName ?? item?.ProductName ?? item?.description ?? item?.Description ?? item?.name ?? item?.Name ?? '').trim();
-        const key = pid || sku || pname || `item-${order.id}-${map.size}`;
-        const name = productDisplayName(pname, sku, pid);
-        const existing = map.get(key) ?? map.get(pid) ?? (sku ? [...map.values()].find((p) => p.sku === sku) : undefined);
+        const price = Number(line.price) || 0;
+        const sku = String(line.code || '').trim();
+        const pname = String(line.description || '').trim();
+        const key = sku || pname || `line-${inv.invoiceId}-${map.size}`;
+        const name = productDisplayName(pname, sku, key);
+        const existing =
+          map.get(key) ?? (sku ? [...map.values()].find((p) => p.sku === sku) : undefined);
         if (existing) {
           existing.quantity += qty;
           existing.revenue += qty * price;
@@ -268,7 +314,7 @@ export function SalesReport() {
           map.set(key, {
             id: key,
             name,
-            sku: sku || pid || name.slice(0, 20),
+            sku: sku || name.slice(0, 20),
             quantity: qty,
             revenue: qty * price,
           });
@@ -277,21 +323,21 @@ export function SalesReport() {
     });
     return [...map.values()].sort((a, b) => b.quantity - a.quantity).slice(0, 10);
   })();
-  const salesByStore = filteredOrders
-    .filter((o) => isCompleted(o.status))
-    .reduce((acc: { storeId: string; storeName: string; sales: number; orders: number }[], order) => {
-      const name = getStoreName(order.storeId, order.storeName);
-      const amt = Number(order.total) || 0;
-      const existing = acc.find((s) => s.storeId === order.storeId);
+
+  const salesByStore = filteredInvoices
+    .reduce((acc: { storeId: string; storeName: string; sales: number; invoices: number }[], inv) => {
+      const name = getStoreName(inv.storeId, undefined);
+      const amt = Number(inv.total) || 0;
+      const existing = acc.find((s) => s.storeId === inv.storeId);
       if (existing) {
         existing.sales += amt;
-        existing.orders += 1;
+        existing.invoices += 1;
       } else {
         acc.push({
-          storeId: order.storeId,
+          storeId: inv.storeId,
           storeName: name,
           sales: amt,
-          orders: 1,
+          invoices: 1,
         });
       }
       return acc;
@@ -300,29 +346,26 @@ export function SalesReport() {
   const topStore = salesByStore[0];
 
   const uniqueStores = Array.from(
-    new Set([...orders.map((o) => o.storeId)])
+    new Set([
+      ...orders.map((o) => o.storeId),
+      ...invoiceRows.map((r) => r.storeId),
+    ])
   )
     .filter(Boolean)
     .map((storeId) => ({
       id: storeId as string,
-      name: getStoreName(storeId as string, storeId as string),
+      name: getStoreName(
+        storeId as string,
+        orders.find((o) => o.storeId === storeId)?.storeName
+      ),
     }));
 
-  const getStatusText = (status: string) => {
-    const s = (status || '').toLowerCase();
-    if (s === 'completed') return t('completed');
-    if (s === 'invoiced') return t('invoiced') || 'Facturado';
-    if (s === 'delivered') return t('delivered') || 'Entregado';
-    if (s === 'pending') return t('pending');
-    return status;
-  };
-
   const handleClearFilters = () => {
-    setFromDate('');
-    setToDate('');
-    setSelectedStatus('all');
+    const n = new Date();
+    const som = new Date(n.getFullYear(), n.getMonth(), 1);
+    setFromDate(som.toISOString().slice(0, 10));
+    setToDate(n.toISOString().slice(0, 10));
     setSelectedStore('all');
-
   };
 
   const escapeCsvCell = (val: string): string => {
@@ -334,18 +377,28 @@ export function SalesReport() {
   };
 
   const handleExportReport = () => {
-    const headers = ['PO', 'Fecha', 'Tienda', 'Ciudad', 'Estado', 'Total', 'Productos'];
-    const rows = filteredOrders.map((order) => {
-      const products = (order.items || [])
-        .map((item: any) => `${getItemDisplayName(item)} (${item.toOrder ?? item.quantity ?? 0})`)
-        .join('; ') || '—';
+    const headers = [
+      'PO',
+      t('sales_invoice_date_col'),
+      t('store') || 'Tienda',
+      t('city') || 'Ciudad',
+      'Total',
+      t('products') || 'Productos',
+    ];
+    const rows = sortedFilteredInvoices.map((inv) => {
+      const products =
+        (inv.items || [])
+          .map((line) => `${line.description || line.code} (${line.qty})`)
+          .join('; ') || '—';
+      const ord = orders.find((o) => o.id === inv.orderId);
       return [
-        order.po ? `PO - ${order.po}` : '—',
-        new Date(order.date).toLocaleDateString('es-MX', { dateStyle: 'short' }),
-        getStoreName(order.storeId, order.storeName),
-        getStoreCity(order.storeId) || '—',
-        getStatusText(order.status),
-        formatCurrency(Number(order.total) || 0),
+        inv.po ? `${inv.po}` : '—',
+        new Date(inv.invoiceDate || inv.orderDate).toLocaleDateString('es-MX', {
+          dateStyle: 'short',
+        }),
+        getStoreName(inv.storeId, ord?.storeName),
+        getStoreCity(inv.storeId) || '—',
+        formatCurrency(Number(inv.total) || 0),
         products,
       ];
     });
@@ -410,6 +463,15 @@ export function SalesReport() {
             <Button
               variant="outline"
               size="sm"
+              onClick={handleExportReport}
+              className="border-slate-300 text-slate-700 hover:bg-slate-50"
+            >
+              <Download className="h-4 w-4 mr-2" />
+              {t('export_csv') || 'CSV'}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
               onClick={handleExportPdf}
               className="border-slate-300 text-slate-700 hover:bg-slate-50"
             >
@@ -426,40 +488,41 @@ export function SalesReport() {
           <p className="text-sm text-slate-500 mb-4">{t('sales_report_subtitle')}</p>
           <table className="w-full mb-4">
             <tbody>
-              <tr><td className="font-semibold pr-4">{t('total_orders')}</td><td>{filteredOrders.length}</td></tr>
-              <tr><td className="font-semibold pr-4">{t('completed_orders')}</td><td>{completedOrders.length}</td></tr>
-              <tr><td className="font-semibold pr-4">{t('pending')}</td><td>{pendingOrders.length}</td></tr>
+              <tr><td className="font-semibold pr-4">{t('total_invoices') || 'Facturas'}</td><td>{filteredInvoices.length}</td></tr>
               <tr><td className="font-semibold pr-4">{t('products_sold')}</td><td>{totalProductsSold}</td></tr>
               <tr><td className="font-semibold pr-4">{t('total_revenue')}</td><td>{formatCurrency(totalRevenue)}</td></tr>
-              <tr><td className="font-semibold pr-4">{t('average_order')}</td><td>{formatCurrency(averageOrder)}</td></tr>
+              <tr><td className="font-semibold pr-4">{t('average_invoice') || 'Promedio / factura'}</td><td>{formatCurrency(averageInvoice)}</td></tr>
               <tr><td className="font-semibold pr-4">{t('active_days')}</td><td>{activeDaysCount}</td></tr>
+              <tr><td className="font-semibold pr-4">{t('metric_assigned_stores')}</td><td>{assignedStoresCount}</td></tr>
+              <tr><td className="font-semibold pr-4">{t('stores_visited_this_month')}</td><td>{storesVisitedThisMonthCount}</td></tr>
             </tbody>
           </table>
-          <h2 className="text-base font-bold text-slate-900 mt-4 mb-2">{t('detailed_orders')}</h2>
+          <h2 className="text-base font-bold text-slate-900 mt-4 mb-2">{t('detailed_invoices') || 'Facturas detalladas'}</h2>
           <table>
             <thead>
               <tr>
                 <th>PO</th>
-                <th>Fecha</th>
+                <th>{t('sales_invoice_date_col')}</th>
                 <th>Tienda</th>
                 <th>Ciudad</th>
-                <th>Estado</th>
                 <th>Total</th>
                 <th>Productos</th>
               </tr>
             </thead>
             <tbody>
-              {sortedFilteredOrders.map((order) => (
-                <tr key={order.id}>
-                  <td><strong>{order.po ? `PO - ${order.po}` : '—'}</strong></td>
-                  <td>{new Date(order.date).toLocaleDateString('es-MX', { dateStyle: 'short' })}</td>
-                  <td>{getStoreName(order.storeId, order.storeName)}</td>
-                  <td>{getStoreCity(order.storeId) || '—'}</td>
-                  <td>{getStatusText(order.status)}</td>
-                  <td>{formatCurrency(Number(order.total) || 0)}</td>
-                  <td>{(order.items || []).map((item: any) => `${getItemDisplayName(item)} (${item.toOrder ?? item.quantity ?? 0})`).join('; ') || '—'}</td>
-                </tr>
-              ))}
+              {sortedFilteredInvoices.map((inv) => {
+                const ord = orders.find((o) => o.id === inv.orderId);
+                return (
+                  <tr key={inv.invoiceId}>
+                    <td>{inv.po ? `${inv.po}` : '—'}</td>
+                    <td>{new Date(inv.invoiceDate || inv.orderDate).toLocaleDateString('es-MX', { dateStyle: 'short' })}</td>
+                    <td>{getStoreName(inv.storeId, ord?.storeName)}</td>
+                    <td>{getStoreCity(inv.storeId) || '—'}</td>
+                    <td>{formatCurrency(Number(inv.total) || 0)}</td>
+                    <td>{(inv.items || []).map((line) => `${line.description || line.code} (${line.qty})`).join('; ') || '—'}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -479,20 +542,7 @@ export function SalesReport() {
                 <Input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} className="text-sm h-10 w-full min-w-0 max-w-full" />
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-3 sm:gap-4 mb-4 max-w-full min-w-0">
-              <div className="min-w-0">
-                <label className="text-sm font-medium text-slate-700 mb-1.5 block">{t('status')}</label>
-                <select
-                  value={selectedStatus}
-                  onChange={(e) => setSelectedStatus(e.target.value)}
-                  className="w-full min-w-0 max-w-full h-10 px-3 text-sm border border-slate-200 rounded-lg bg-white focus:ring-2 focus:ring-slate-200 focus:border-slate-300"
-                >
-                  <option value="all">{t('all_status')}</option>
-                  <option value="delivered">{t('delivered') || 'Entregado'}</option>
-                  <option value="invoiced">{t('invoiced') || 'Facturado'}</option>
-                  <option value="pending">{t('pending')}</option>
-                </select>
-              </div>
+            <div className="grid grid-cols-1 gap-3 sm:gap-4 mb-4 max-w-full min-w-0">
               <div className="min-w-0">
                 <label className="text-sm font-medium text-slate-700 mb-1.5 block">{t('store')}</label>
                 <select
@@ -516,47 +566,23 @@ export function SalesReport() {
         </Card>
 
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4 mb-6">
-          {/* 1. Total pedidos */}
+          {/* 1. Facturas (ventas facturadas) */}
           <Card className="border border-slate-200/80 shadow-sm bg-white overflow-visible rounded-xl">
             <CardContent className="p-4 flex flex-col gap-3">
               <div className="p-2.5 rounded-xl bg-slate-100 w-fit">
                 <Package className="h-5 w-5 text-slate-600" />
               </div>
               <div className="min-w-0">
-                <p className="text-xs font-medium text-slate-500 uppercase tracking-wider break-words">{t('total_orders')}</p>
-                <p className="text-lg font-bold text-slate-900 mt-1">{filteredOrders.length}</p>
+                <p className="text-xs font-medium text-slate-500 uppercase tracking-wider break-words">{t('total_invoices') || 'Facturas'}</p>
+                <p className="text-lg font-bold text-slate-900 mt-1">{filteredInvoices.length}</p>
               </div>
             </CardContent>
           </Card>
-          {/* 2. Pedidos Completados */}
+          {/* 2. Unidades facturadas */}
           <Card className="border border-slate-200/80 shadow-sm bg-white overflow-visible rounded-xl">
             <CardContent className="p-4 flex flex-col gap-3">
               <div className="p-2.5 rounded-xl bg-indigo-50 w-fit">
                 <TrendingUp className="h-5 w-5 text-indigo-600" />
-              </div>
-              <div className="min-w-0">
-                <p className="text-xs font-medium text-slate-500 uppercase tracking-wider break-words">{t('completed_orders')}</p>
-                <p className="text-lg font-bold text-slate-900 mt-1">{completedOrders.length}</p>
-              </div>
-            </CardContent>
-          </Card>
-          {/* 3. Pendiente */}
-          <Card className="border border-slate-200/80 shadow-sm bg-white overflow-visible rounded-xl">
-            <CardContent className="p-4 flex flex-col gap-3">
-              <div className="p-2.5 rounded-xl bg-amber-50 w-fit">
-                <Package className="h-5 w-5 text-amber-600" />
-              </div>
-              <div className="min-w-0">
-                <p className="text-xs font-medium text-slate-500 uppercase tracking-wider break-words">{t('pending')}</p>
-                <p className="text-lg font-bold text-slate-900 mt-1">{pendingOrders.length}</p>
-              </div>
-            </CardContent>
-          </Card>
-          {/* 4. Productos Vendidos */}
-          <Card className="border border-slate-200/80 shadow-sm bg-white overflow-visible rounded-xl">
-            <CardContent className="p-4 flex flex-col gap-3">
-              <div className="p-2.5 rounded-xl bg-violet-50 w-fit">
-                <Package className="h-5 w-5 text-violet-600" />
               </div>
               <div className="min-w-0">
                 <p className="text-xs font-medium text-slate-500 uppercase tracking-wider break-words">{t('products_sold')}</p>
@@ -564,7 +590,19 @@ export function SalesReport() {
               </div>
             </CardContent>
           </Card>
-          {/* 5. Ingresos Totales */}
+          {/* 3. (reservado / coherencia visual) */}
+          <Card className="border border-slate-200/80 shadow-sm bg-white overflow-visible rounded-xl">
+            <CardContent className="p-4 flex flex-col gap-3">
+              <div className="p-2.5 rounded-xl bg-violet-50 w-fit">
+                <TrendingUp className="h-5 w-5 text-violet-600" />
+              </div>
+              <div className="min-w-0">
+                <p className="text-xs font-medium text-slate-500 uppercase tracking-wider break-words">{t('average_invoice') || 'Promedio / factura'}</p>
+                <p className="text-lg font-bold text-slate-900 mt-1 break-all">{formatCurrency(averageInvoice)}</p>
+              </div>
+            </CardContent>
+          </Card>
+          {/* 4. Ingresos Totales */}
           <Card className="border border-slate-200/80 shadow-sm bg-white overflow-visible rounded-xl">
             <CardContent className="p-4 flex flex-col gap-3">
               <div className="p-2.5 rounded-xl bg-emerald-50 w-fit">
@@ -576,19 +614,7 @@ export function SalesReport() {
               </div>
             </CardContent>
           </Card>
-          {/* 6. Pedido Promedio */}
-          <Card className="border border-slate-200/80 shadow-sm bg-white overflow-visible rounded-xl">
-            <CardContent className="p-4 flex flex-col gap-3">
-              <div className="p-2.5 rounded-xl bg-sky-50 w-fit">
-                <DollarSign className="h-5 w-5 text-sky-600" />
-              </div>
-              <div className="min-w-0">
-                <p className="text-xs font-medium text-slate-500 uppercase tracking-wider break-words">{t('average_order')}</p>
-                <p className="text-lg font-bold text-slate-900 mt-1 break-all">{formatCurrency(averageOrder)}</p>
-              </div>
-            </CardContent>
-          </Card>
-          {/* 7. Días con actividad */}
+          {/* 5. Días con actividad */}
           <Card className="border border-slate-200/80 shadow-sm bg-white overflow-visible rounded-xl">
             <CardContent className="p-4 flex flex-col gap-3">
               <div className="p-2.5 rounded-xl bg-orange-50 w-fit">
@@ -600,7 +626,7 @@ export function SalesReport() {
               </div>
             </CardContent>
           </Card>
-          {/* 8. Mejor tienda */}
+          {/* 6. Mejor tienda */}
           {topStore && (
             <Card className="border border-slate-200/80 shadow-sm bg-white overflow-visible rounded-xl">
               <CardContent className="p-4 flex flex-col gap-3">
@@ -614,9 +640,29 @@ export function SalesReport() {
               </CardContent>
             </Card>
           )}
+          <Card className="border border-slate-200/80 shadow-sm bg-white overflow-visible rounded-xl">
+            <CardContent className="p-4 flex flex-col gap-3">
+              <div className="p-2.5 rounded-xl bg-cyan-50 w-fit">
+                <MapPinned className="h-5 w-5 text-cyan-700" />
+              </div>
+              <div className="min-w-0">
+                <p className="text-xs font-medium text-slate-500 uppercase tracking-wider break-words">{t('metric_assigned_stores')}</p>
+                <p className="text-lg font-bold text-slate-900 mt-1">{assignedStoresCount}</p>
+              </div>
+            </CardContent>
+          </Card>
+          <Card className="border border-slate-200/80 shadow-sm bg-white overflow-visible rounded-xl">
+            <CardContent className="p-4 flex flex-col gap-3">
+              <div className="p-2.5 rounded-xl bg-teal-50 w-fit">
+                <MapPin className="h-5 w-5 text-teal-700" />
+              </div>
+              <div className="min-w-0">
+                <p className="text-xs font-medium text-slate-500 uppercase tracking-wider break-words">{t('stores_visited_this_month')}</p>
+                <p className="text-lg font-bold text-slate-900 mt-1">{storesVisitedThisMonthCount}</p>
+              </div>
+            </CardContent>
+          </Card>
         </div>
-
-        {/* Visitas (VisitLogs) removidas: el sistema ahora usa Assignments. */}
 
         {salesByDay.length > 0 && (
           <Card className="border border-slate-200/80 shadow-sm mb-6 bg-white rounded-xl">
@@ -687,9 +733,8 @@ export function SalesReport() {
                         </span>
                         <div className="min-w-0 flex-1">
                           <p className="text-sm font-semibold text-slate-900 break-words">{product.name}</p>
-                          {(product.code || product.sku) &&
-                            (product.code || product.sku) !== product.name && (
-                            <p className="text-xs text-slate-500 mt-0.5">{product.code || product.sku}</p>
+                          {product.sku && product.sku !== product.name && (
+                            <p className="text-xs text-slate-500 mt-0.5">{product.sku}</p>
                           )}
                         </div>
                       </div>
@@ -754,7 +799,7 @@ export function SalesReport() {
                       <div>
                         <p className="text-sm font-medium text-slate-900">{store.storeName}</p>
                         <p className="text-xs text-slate-500 mt-0.5">
-                          {store.orders} {t('orders')}
+                          {store.invoices} {t('total_invoices') || 'facturas'}
                         </p>
                       </div>
                     </div>
@@ -768,59 +813,57 @@ export function SalesReport() {
 
         <Card className="border border-slate-200/80 shadow-sm mb-6 bg-white rounded-xl">
           <CardHeader className="px-5 pb-3">
-            <CardTitle className="text-base font-semibold text-slate-900">{t('detailed_orders')}</CardTitle>
+            <CardTitle className="text-base font-semibold text-slate-900">{t('detailed_invoices') || 'Facturas detalladas'}</CardTitle>
           </CardHeader>
           <div className="px-5 pb-5 space-y-4">
-            {sortedFilteredOrders.length === 0 ? (
+            {sortedFilteredInvoices.length === 0 ? (
               <div className="p-12 text-center rounded-xl border border-slate-100 bg-slate-50/50">
                 <p className="text-slate-500 text-sm">{t('no_data_available')}</p>
               </div>
             ) : (
-              sortedFilteredOrders.map((order) => (
-                <div
-                  key={order.id}
-                  className="p-5 rounded-xl border border-slate-200 bg-slate-50/30 hover:bg-slate-50/60 transition-colors shadow-sm"
-                >
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="flex-1 min-w-0">
-                      <p className="text-base font-semibold text-slate-900 mb-1">
-                        {order.po ? `PO - ${order.po}` : order.id}
-                      </p>
-                      <p className="text-sm text-slate-700">
-                        {getStoreName(order.storeId, order.storeName)}
-                        {getStoreCity(order.storeId) ? ` · ${getStoreCity(order.storeId)}` : ''}
-                      </p>
-                      <p className="text-xs text-slate-500 mt-0.5">{new Date(order.date).toLocaleDateString('es-ES', { dateStyle: 'medium' })}</p>
+              sortedFilteredInvoices.map((inv) => {
+                const ord = orders.find((o) => o.id === inv.orderId);
+                return (
+                  <div
+                    key={inv.invoiceId}
+                    className="p-5 rounded-xl border border-slate-200 bg-slate-50/30 hover:bg-slate-50/60 transition-colors shadow-sm"
+                  >
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-base font-semibold text-slate-900 mb-1">
+                          {inv.po ? `${inv.po}` : ord?.id ?? inv.orderId}
+                        </p>
+                        <p className="text-sm text-slate-700">
+                          {getStoreName(inv.storeId, ord?.storeName)}
+                          {getStoreCity(inv.storeId) ? ` · ${getStoreCity(inv.storeId)}` : ''}
+                        </p>
+                        <p className="text-xs text-slate-500 mt-0.5">
+                          {new Date(inv.invoiceDate || inv.orderDate).toLocaleDateString('es-ES', { dateStyle: 'medium' })}
+                        </p>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <Badge variant="outline" className="bg-emerald-50 text-emerald-700 border-emerald-200 mb-2">
+                          {t('invoiced') || 'Facturado'}
+                        </Badge>
+                        <p className="text-base font-bold text-slate-900">{formatCurrency(Number(inv.total) || 0)}</p>
+                      </div>
                     </div>
-                    <div className="text-right shrink-0">
-                      <Badge
-                        variant="outline"
-                        className={
-                          isCompleted(order.status)
-                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200 mb-2'
-                            : 'bg-amber-50 text-amber-700 border-amber-200 mb-2'
-                        }
-                      >
-                        {getStatusText(order.status)}
-                      </Badge>
-                      <p className="text-base font-bold text-slate-900">{formatCurrency(Number(order.total) || 0)}</p>
-                    </div>
-                  </div>
-                  <div className="mt-3 pt-3 border-t border-slate-200">
-                    <p className="text-xs font-medium text-slate-500 mb-2">{t('products')}</p>
-                    <div className="space-y-1.5">
-                      {(order.items || []).map((item, idx) => (
-                        <div key={idx} className="flex justify-between text-xs">
-                          <span className="text-slate-700">{getItemDisplayName(item)}</span>
-                          <span className="text-slate-500 tabular-nums">
-                            {item.toOrder ?? item.quantity} × {formatCurrency(item.price ?? 0)}
-                          </span>
-                        </div>
-                      ))}
+                    <div className="mt-3 pt-3 border-t border-slate-200">
+                      <p className="text-xs font-medium text-slate-500 mb-2">{t('products')}</p>
+                      <div className="space-y-1.5">
+                        {(inv.items || []).map((line, idx) => (
+                          <div key={idx} className="flex justify-between text-xs">
+                            <span className="text-slate-700">{line.description || line.code}</span>
+                            <span className="text-slate-500 tabular-nums">
+                              {line.qty} × {formatCurrency(line.price ?? 0)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))
+                );
+              })
             )}
           </div>
         </Card>

@@ -10,7 +10,12 @@ async function safeGet<T>(endpoint: string): Promise<T | null> {
     return await apiClient.get<T>(endpoint);
   } catch (error) {
     const err = error as ApiError;
-    console.error(`[histprices-api] GET ${endpoint} failed:`, err.message || err);
+    const msg = String(err?.message || '');
+    const isNotFound = err?.status === 404 || /not found|no encontrado/i.test(msg);
+    // Cuando no existe histórico de precio devolvemos 0 sin ruido en consola.
+    if (!isNotFound) {
+      console.error(`[histprices-api] GET ${endpoint} failed:`, err.message || err);
+    }
     return null;
   }
 }

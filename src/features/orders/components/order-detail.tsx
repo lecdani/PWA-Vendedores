@@ -1,8 +1,7 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import Image from 'next/image';
 import { 
   ArrowLeft, 
   Store as StoreIcon, 
@@ -13,8 +12,9 @@ import {
   Printer,
   CheckCircle2,
   Camera,
-  Pencil,
-  Trash2
+  ChevronDown,
+  ChevronUp,
+  Ban,
 } from 'lucide-react';
 import { useLanguage } from '@/shared/i18n/language-provider';
 import { useAuth } from '@/shared/auth/auth-provider';
@@ -33,24 +33,76 @@ import { Badge } from '@/shared/ui/badge';
 import { Separator } from '@/shared/ui/separator';
 import { Invoice } from './invoice';
 
+/** Estados de API heterogéneos → facturado */
+function matchesInvoicedStatus(status: string | undefined) {
+  const s = (status || '').toLowerCase().trim();
+  return ['invoiced', 'facturado', 'invoice', 'billed', 'facturada'].includes(s);
+}
+
+export type InvoiceDisplayState = {
+  invoiceNumber: string;
+  date: string;
+  total: number;
+  items: Array<{ qty: number; code: string; description: string; price: number; amount: number }>;
+  pod?: string;
+  storeId?: string;
+  /** PO devuelto por la API de factura (prioridad sobre el del pedido). */
+  po?: string;
+};
+
+/**
+ * Evita que un segundo GET (p. ej. solo para POD) pise ítems ya cargados, o que prev vacío + merge solo pod deje líneas vacías.
+ */
+function mergeInvoiceDisplay(prev: InvoiceDisplayState | null, next: InvoiceDisplayState | null): InvoiceDisplayState | null {
+  if (!next) return prev;
+  if (!prev) return next;
+  const pLen = prev.items?.length ?? 0;
+  const nLen = next.items?.length ?? 0;
+  const items = nLen >= pLen ? (next.items ?? []) : (prev.items ?? []);
+  return {
+    ...prev,
+    ...next,
+    items,
+    invoiceNumber: String(next.invoiceNumber || prev.invoiceNumber || '—'),
+    date: next.date || prev.date,
+    total: Number(next.total) > 0 ? Number(next.total) : Number(prev.total) || 0,
+    pod: (next.pod || prev.pod || '').trim() || undefined,
+    storeId: next.storeId ?? prev.storeId,
+    po: (next.po || prev.po || '').trim() || undefined,
+  };
+}
+
 export function OrderDetail({ orderId }: { orderId: string }) {
   const { t } = useLanguage();
   const router = useRouter();
   const searchParams = useSearchParams();
   const { user } = useAuth();
   const [showConfirmation, setShowConfirmation] = useState(false);
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  const [deleting, setDeleting] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [order, setOrder] = useState<OrderForUI | null>(null);
   const [invoiceStoreName, setInvoiceStoreName] = useState('');
   const [invoiceStoreAddress, setInvoiceStoreAddress] = useState('');
   const [invoiceStoreCity, setInvoiceStoreCity] = useState('');
-  const [invoiceFromApi, setInvoiceFromApi] = useState<{
-    invoiceNumber: string;
-    date: string;
-    total: number;
-    items: Array<{ qty: number; code: string; description: string; price: number; amount: number }>;
-  } | null>(null);
+  const [invoiceFromApi, setInvoiceFromApi] = useState<InvoiceDisplayState | null>(null);
+  const [savedDeliveryItems, setSavedDeliveryItems] = useState<
+    Array<{ productId: string; quantity: number; unitPrice?: number }>
+  >([]);
+  const [showInitialOrder, setShowInitialOrder] = useState(false);
+
+  const readDeliveryFromStorage = useCallback(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const raw = window.localStorage.getItem(`order_delivery_confirmation_${orderId}`);
+      if (!raw) {
+        setSavedDeliveryItems([]);
+        return;
+      }
+      const p = JSON.parse(raw);
+      setSavedDeliveryItems(Array.isArray(p?.items) ? p.items : []);
+    } catch {
+      setSavedDeliveryItems([]);
+    }
+  }, [orderId]);
   const [loadingInvoice, setLoadingInvoice] = useState(false);
   const [loadingPod, setLoadingPod] = useState(false);
   const [orderLoadDone, setOrderLoadDone] = useState(false);
@@ -62,8 +114,18 @@ export function OrderDetail({ orderId }: { orderId: string }) {
     categoriesApi.fetchAll().then(setAllCategories);
   }, []);
 
+  useEffect(() => {
+    readDeliveryFromStorage();
+  }, [readDeliveryFromStorage, orderLoadDone]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onFocus = () => readDeliveryFromStorage();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [readDeliveryFromStorage]);
+
   const displayPod = (order?.podImageUrl || order?.podFileName || (invoiceFromApi?.pod || '').trim()) || '';
-  const orderStatus = (order?.status || '').toLowerCase() === 'invoiced' ? 'invoiced' : 'pending';
 
   useEffect(() => {
     if (searchParams.get('confirmed') === '1') {
@@ -73,8 +135,10 @@ export function OrderDetail({ orderId }: { orderId: string }) {
   }, [searchParams]);
 
   useEffect(() => {
+    let cancelled = false;
     const loadOrder = async () => {
       const apiOrder = await ordersApi.getOrderById(orderId);
+      if (cancelled) return;
       if (apiOrder) {
         const categories = await categoriesApi.fetchAll();
         const categoryById = new Map<string, string>();
@@ -136,6 +200,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
             total: apiOrder.total || computedSubtotal + (apiOrder.tax || 0),
           };
         }
+        if (cancelled) return;
         setOrder(orderToSet);
         const name = (orderToSet.storeName || '').trim();
         const looksLikeId = !name || name === orderToSet.storeId || /^[0-9a-f-]{36}$/i.test(name) || /^\d+$/.test(name);
@@ -165,7 +230,18 @@ export function OrderDetail({ orderId }: { orderId: string }) {
         }
         const invoiceIdHint = orderToSet.invoiceId ?? await ordersApi.getInvoiceIdForOrder(orderId)
           ?? (orderToSet.backendOrderId != null ? await ordersApi.getInvoiceIdForOrder(String(orderToSet.backendOrderId)) : null);
-        const invoiceDisplay = await ordersApi.getInvoiceDisplayForOrder(orderId, invoiceIdHint ?? undefined);
+        let invoiceDisplay = await ordersApi.getInvoiceDisplayForOrder(orderId, invoiceIdHint ?? undefined, orderToSet);
+        /** Si los ítems vinieron vacíos pero el pedido podría tener factura, segunda pasada sin hint */
+        const st = (orderToSet.status || '').toLowerCase().trim();
+        const mightHaveInvoice =
+          (invoiceIdHint != null && String(invoiceIdHint).trim() !== '') ||
+          matchesInvoicedStatus(orderToSet.status) ||
+          ['confirmed', 'completed', 'complete', 'confirmado', 'cerrado', 'closed'].includes(st);
+        if (!invoiceDisplay?.items?.length && mightHaveInvoice) {
+          const alt = await ordersApi.getInvoiceDisplayForOrder(orderId, undefined, orderToSet);
+          if (alt?.items?.length) invoiceDisplay = alt;
+        }
+        if (cancelled) return;
         setInvoiceFromApi(invoiceDisplay ?? null);
         if (invoiceDisplay?.pod) {
           setOrder((prev) =>
@@ -175,6 +251,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
         setOrderLoadDone(true);
         return;
       }
+      if (cancelled) return;
       setInvoiceFromApi(null);
       setInvoiceStoreName('');
       setInvoiceStoreAddress('');
@@ -184,6 +261,9 @@ export function OrderDetail({ orderId }: { orderId: string }) {
     };
     setOrderLoadDone(false);
     loadOrder();
+    return () => {
+      cancelled = true;
+    };
   }, [orderId]);
 
   // Sincronizar POD de la factura al pedido (la factura devuelve orderId y pod)
@@ -199,11 +279,11 @@ export function OrderDetail({ orderId }: { orderId: string }) {
     if (!order || order.podImageUrl || order.podFileName || invoiceFromApi?.pod) return;
     let cancelled = false;
     setLoadingPod(true);
-    ordersApi.getInvoiceDisplayForOrder(orderId, order.invoiceId ?? undefined).then((display) => {
+    ordersApi.getInvoiceDisplayForOrder(orderId, order.invoiceId ?? undefined, order).then((display) => {
       if (cancelled) return;
       setLoadingPod(false);
       if (!display) return;
-      setInvoiceFromApi(display);
+      setInvoiceFromApi((prev) => mergeInvoiceDisplay(prev, display));
       if (display.pod) setOrder((prev) => (prev ? { ...prev, podImageUrl: display.pod, podFileName: display.pod, podUploaded: true } : prev));
     });
     return () => { cancelled = true; };
@@ -215,16 +295,20 @@ export function OrderDetail({ orderId }: { orderId: string }) {
 
   // Pedido facturado sin POD en estado: forzar carga de factura por API para obtener POD
   useEffect(() => {
-    const isInvoiced = (order?.status || '').toLowerCase() === 'invoiced';
+    const isInvoiced = matchesInvoicedStatus(order?.status);
     if (!order || !isInvoiced || order.podImageUrl || order.podFileName || invoiceFromApi?.pod) return;
     let cancelled = false;
     setLoadingPod(true);
-    ordersApi.getInvoiceDisplayForOrder(orderId, order.invoiceId ?? undefined).then((display) => {
+    ordersApi.getInvoiceDisplayForOrder(orderId, order.invoiceId ?? undefined, order).then((display) => {
       if (cancelled) return;
       setLoadingPod(false);
-      if (!display?.pod) return;
-      setInvoiceFromApi((prev) => (prev ? { ...prev, pod: display.pod } : { invoiceNumber: '', date: '', total: 0, items: [], pod: display.pod }));
-      setOrder((prev) => (prev ? { ...prev, podImageUrl: display.pod, podFileName: display.pod, podUploaded: true } : prev));
+      if (!display) return;
+      /** Antes solo se fusionaba `pod` y se perdían `items` si el primer estado tenía líneas vacías y este GET traía la factura completa */
+      if (!display.pod && !(display.items?.length)) return;
+      setInvoiceFromApi((prev) => mergeInvoiceDisplay(prev, display));
+      if (display.pod) {
+        setOrder((prev) => (prev ? { ...prev, podImageUrl: display.pod, podFileName: display.pod, podUploaded: true } : prev));
+      }
     });
     return () => { cancelled = true; };
   }, [order?.id, order?.status, order?.invoiceId, order?.podImageUrl, order?.podFileName, invoiceFromApi?.pod, orderId]);
@@ -244,20 +328,144 @@ export function OrderDetail({ orderId }: { orderId: string }) {
     );
   }
 
-  const totalUnits = order.totalUnits;
-  const displayTotal = order.total > 0 ? order.total : order.items.reduce((s, i) => s + (i.toOrder ?? i.quantity ?? 0) * (i.price ?? 0), 0);
+  const initialLineUnits = order.items.reduce((s, i) => s + (i.toOrder ?? i.quantity ?? 0), 0);
+  const totalUnits = order.totalUnits ?? initialLineUnits;
+  const displayTotal =
+    order.total > 0 ? order.total : order.items.reduce((s, i) => s + (i.toOrder ?? i.quantity ?? 0) * (i.price ?? 0), 0);
 
-  /** Solo 2 estados: pending e invoiced. */
+  /** Líneas tal como en la factura: primero GET factura; si aún no hay, mismo shape desde localStorage. */
+  const invoiceLinesFromApi =
+    invoiceFromApi?.items && invoiceFromApi.items.length > 0 ? invoiceFromApi.items : [];
+
+  const linesFromStorageAsInvoice: Array<{
+    qty: number;
+    code: string;
+    description: string;
+    price: number;
+    amount: number;
+  }> = savedDeliveryItems.map((row) => {
+    const pid = String(row.productId || '').trim();
+    const oi = order.items.find((x: any) => String(x.productId) === pid);
+    const qty = Number(row.quantity) || 0;
+    const price = Number(row.unitPrice) > 0 ? Number(row.unitPrice) : Number(oi?.price) || 0;
+    return {
+      qty,
+      code: String(oi?.sku || pid || '—').trim() || '—',
+      description: String(oi?.productName || oi?.sku || '—').trim() || '—',
+      price,
+      amount: qty * price,
+    };
+  });
+
+  const effectiveInvoiceLines =
+    invoiceLinesFromApi.length > 0 ? invoiceLinesFromApi : linesFromStorageAsInvoice;
+
+  const invoiceItems = effectiveInvoiceLines;
+
+  const toInvoiceRows = effectiveInvoiceLines.map((line, idx) => {
+    const code = String(line.code || '').trim();
+    const normCode = code.replace(/-/g, '').toLowerCase();
+    const oi =
+      order.items.find((x: any) => String(x.sku || '').trim() === code) ||
+      order.items.find((x: any) => String(x.productId) === code) ||
+      (code.length >= 8
+        ? order.items.find((x: any) => {
+            const pid = String(x.productId || '').replace(/-/g, '').toLowerCase();
+            return pid && (pid === normCode || String(x.productId) === code);
+          })
+        : undefined);
+    return {
+      key: `line-${idx}`,
+      productId: String(oi?.productId || ''),
+      productName: line.description,
+      sku: line.code,
+      imageUrl: (oi as any)?.imageUrl as string | undefined,
+      qty: line.qty,
+      price: line.price,
+      lineTotal: line.amount,
+    };
+  });
+
+  const invoiceRowMatchesOrderItem = (row: (typeof toInvoiceRows)[0], item: any) => {
+    const code = String(row.sku || '').trim();
+    const norm = code.replace(/-/g, '').toLowerCase();
+    const pid = String(item.productId || '').replace(/-/g, '').toLowerCase();
+    if (String(item.sku || '').trim() === code) return true;
+    if (String(item.productId) === code) return true;
+    if (row.productId && String(item.productId) === row.productId) return true;
+    if (code.length >= 8 && pid && pid === norm) return true;
+    return false;
+  };
+
+  const toInvoiceUnits = toInvoiceRows.reduce((s, r) => s + r.qty, 0);
+  const toInvoiceTotal = toInvoiceRows.reduce((s, r) => s + r.lineTotal, 0);
+
+  const isCancelled = (order?.status || '').toLowerCase().trim() === 'cancelled';
+
+  /** Fase UI: prioriza líneas de la API como «facturado» aunque el status del pedido venga mal */
+  const orderPhase = (() => {
+    if (isCancelled) return 'cancelled';
+    if (matchesInvoicedStatus(order?.status)) return 'invoiced';
+    if (effectiveInvoiceLines.length > 0) {
+      if (invoiceLinesFromApi.length > 0) return 'invoiced';
+      return 'confirmed';
+    }
+    const s = (order?.status || '').toLowerCase().trim();
+    if (['confirmed', 'completed', 'complete', 'confirmado', 'cerrado', 'closed'].includes(s)) return 'confirmed';
+    if (order.invoiceId != null && String(order.invoiceId).trim() !== '') return 'confirmed';
+    return 'initial';
+  })();
+
+  const showBilledOrderBlock = orderPhase !== 'initial' && orderPhase !== 'cancelled';
+  const showInvoiceSection = orderPhase !== 'initial' && orderPhase !== 'cancelled';
+  /** Sin planograma: misma data en API, pero no se muestra documento ni textos de factura al vendedor. */
+  const showInvoiceDocumentUi = showInvoiceSection && storeHasPlanogram;
+  const showInvoiceRetry =
+    storeHasPlanogram &&
+    showInvoiceSection &&
+    effectiveInvoiceLines.length === 0 &&
+    ((order.invoiceId != null && String(order.invoiceId).trim() !== '') ||
+      matchesInvoicedStatus(order.status) ||
+      orderPhase === 'invoiced');
+
+  /** Flujo: initial -> confirmed -> invoiced. */
   const getStatusColor = (status: string) => {
     const s = (status || '').toLowerCase();
-    if (s === 'invoiced') return 'bg-green-50 text-green-700 border-green-200';
+    if (s === 'cancelled') return 'bg-slate-100 text-slate-600 border-slate-200';
+    if (matchesInvoicedStatus(status)) return 'bg-green-50 text-green-700 border-green-200';
+    if (s === 'confirmed' || ['completed', 'complete', 'confirmado'].includes(s)) return 'bg-blue-50 text-blue-700 border-blue-200';
     return 'bg-amber-50 text-amber-700 border-amber-200';
   };
 
   const getStatusText = (status: string) => {
     const s = (status || '').toLowerCase();
-    if (s === 'invoiced') return t('invoiced') || 'Facturado';
-    return t('pending');
+    if (s === 'cancelled') return t('cancelled') || 'Cancelado';
+    if (matchesInvoicedStatus(status))
+      return storeHasPlanogram ? t('invoiced') || 'Facturado' : t('status_delivered');
+    if (s === 'confirmed' || ['completed', 'complete', 'confirmado'].includes(s)) return t('confirmed');
+    return t('initial');
+  };
+
+  const canSellerCancelInitial =
+    orderPhase === 'initial' && invoiceLinesFromApi.length === 0 && !isCancelled;
+
+  const handleCancelOrder = async () => {
+    if (!canSellerCancelInitial || cancelling) return;
+    if (typeof window !== 'undefined' && !window.confirm(t('cancel_order_confirm'))) return;
+    setCancelling(true);
+    try {
+      const ok = await ordersApi.cancelOrderBySeller(orderId);
+      if (ok) {
+        const refreshed = await ordersApi.getOrderById(orderId);
+        if (refreshed) setOrder(refreshed);
+        else setOrder((prev) => (prev ? { ...prev, status: 'cancelled' } : prev));
+        router.push('/history');
+      } else {
+        alert(t('cancel_order_failed'));
+      }
+    } finally {
+      setCancelling(false);
+    }
   };
 
   const handleDownloadInvoice = () => {
@@ -283,23 +491,12 @@ export function OrderDetail({ orderId }: { orderId: string }) {
   const invoiceStoreDisplayName = invoiceStoreName || order.storeName || '';
   const cleanAddress = (addr: string) => (addr || '').replace(/,?\s*[0-9a-f-]{36}\s*$/i, '').replace(/,?\s*\d+\s*$/, '').trim();
   const invoiceStoreDisplayAddress = cleanAddress(invoiceStoreAddress || order.storeAddress || '');
-  const invoiceItems =
-    invoiceFromApi?.items?.length
-      ? invoiceFromApi.items
-      : (order.items || []).map((i: any) => {
-          const qty = i.toOrder ?? i.quantity ?? 0;
-          const price = Number(i.price) ?? 0;
-          return {
-            qty,
-            code: (i.sku || i.productId || '').trim() || '—',
-            description: (i.productName || i.sku || '').trim() || '—',
-            price,
-            amount: qty * price,
-          };
-        });
-  const invoiceNumberDisplay = order.po
-    ? `PO - ${order.po}`
-    : (invoiceFromApi?.invoiceNumber ?? order.invoiceId ?? order.id ?? '—');
+  const displayPo = (invoiceFromApi?.po || order.po || '').trim();
+  /** PO / nº factura: solo visible en UI cuando la tienda usa planograma (flujo con factura explícita). */
+  const displayPoInUi = storeHasPlanogram ? displayPo : '';
+  const invoiceNumberDisplay = displayPo
+    ? displayPo
+    : String(invoiceFromApi?.invoiceNumber ?? order.invoiceId ?? order.id ?? '—');
   const invoiceDate = invoiceFromApi?.date
     ? (invoiceFromApi.date.includes(',') ? invoiceFromApi.date : new Date(invoiceFromApi.date).toLocaleDateString('en-US'))
     : (order.date ? new Date(order.date).toLocaleDateString('en-US') : '—');
@@ -309,7 +506,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
     try {
       const hint = order.invoiceId ?? await ordersApi.getInvoiceIdForOrder(orderId)
         ?? (order.backendOrderId != null ? await ordersApi.getInvoiceIdForOrder(String(order.backendOrderId)) : null);
-      const display = await ordersApi.getInvoiceDisplayForOrder(orderId, hint ?? undefined);
+      const display = await ordersApi.getInvoiceDisplayForOrder(orderId, hint ?? undefined, order);
       setInvoiceFromApi(display ?? null);
       if (display?.pod) {
         setOrder((prev) =>
@@ -325,16 +522,23 @@ export function OrderDetail({ orderId }: { orderId: string }) {
     router.push(`/capture-pod/${orderId}`);
   };
 
+  /** Pedido inicial → planograma bloqueado: solo cantidades de líneas del pedido; cantidades van a factura + POD. */
+  const handleStartInvoiceFromPlanogram = () => {
+    const sid = String(order.storeId || '').trim();
+    if (!sid) return;
+    router.push(`/planogram/${encodeURIComponent(sid)}?orderId=${encodeURIComponent(orderId)}&mode=invoice`);
+  };
+
+  /** Pedido inicial (catálogo / sin planograma): confirmar con catálogo bloqueado + POD obligatorio (sin UI de factura). */
+  const handleStartConfirmFromCatalog = () => {
+    const sid = String(order.storeId || '').trim();
+    if (!sid) return;
+    router.push(`/catalog-order/${encodeURIComponent(sid)}?orderId=${encodeURIComponent(orderId)}&mode=confirm`);
+  };
+
   const handleViewPlanogram = () => {
     router.push(`/view-planogram/${orderId}`);
   };
-
-  const canEditOrder = orderStatus === 'pending' && !order.podUploaded;
-  const handleEditOrder = () => {
-    if (order.storeId) router.push(`/planogram/${order.storeId}?orderId=${orderId}`);
-  };
-
-  // Eliminación de pedidos solo permitida en Sistema Web Admin (no en la PWA).
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -345,7 +549,9 @@ export function OrderDetail({ orderId }: { orderId: string }) {
             <CheckCircle2 className="h-5 w-5" />
             <div className="flex-1">
               <p className="text-sm">
-                {(order.status || '').toLowerCase() === 'invoiced' ? t('delivery_completed_success') : t('order_sent_success')}
+                {matchesInvoicedStatus(order.status) || orderPhase === 'invoiced'
+                  ? t('delivery_completed_success')
+                  : t('order_sent_success')}
               </p>
               <p className="text-xs opacity-90">{invoiceStoreDisplayName || order.storeName} · {new Date(order.date).toLocaleDateString()}</p>
             </div>
@@ -366,17 +572,41 @@ export function OrderDetail({ orderId }: { orderId: string }) {
               <ArrowLeft className="h-5 w-5" />
             </Button>
             <div className="flex-1 min-w-0">
-              <h2 className="text-sm text-slate-900 font-medium">{order.po ? `PO - ${order.po}` : t('order_detail')}</h2>
+              <h2 className="text-sm text-slate-900 font-medium">
+                {displayPoInUi ? `${displayPoInUi}` : t('order_detail')}
+              </h2>
               <p className="text-xs text-slate-500 truncate">{invoiceStoreDisplayName || order.storeName} · {new Date(order.date).toLocaleDateString()}</p>
             </div>
           </div>
-          <Badge variant="outline" className={`${getStatusColor(order.status)} flex-shrink-0`}>
-            {getStatusText(order.status)}
-          </Badge>
+          <div className="flex items-center gap-2 shrink-0">
+            {canSellerCancelInitial && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 text-xs border-amber-200 text-amber-800"
+                onClick={handleCancelOrder}
+                disabled={cancelling}
+              >
+                <Ban className="h-3.5 w-3.5 mr-1" />
+                {cancelling ? t('loading') : t('cancel_order')}
+              </Button>
+            )}
+            <Badge variant="outline" className={`${getStatusColor(order.status)} flex-shrink-0`}>
+              {getStatusText(order.status)}
+            </Badge>
+          </div>
         </div>
       </div>
 
       <div className="px-4 pb-24 space-y-4">
+        {orderPhase === 'cancelled' && (
+          <Card className="border-slate-300 bg-slate-100 shadow-sm">
+            <CardContent className="p-4">
+              <p className="text-sm text-slate-800 font-medium">{t('order_cancelled')}</p>
+              <p className="text-xs text-slate-600 mt-1">{t('order_cancelled_admin_only_delete')}</p>
+            </CardContent>
+          </Card>
+        )}
         {/* Pedido / Tienda: resaltar PO, tienda como secundario */}
         <Card className="border-slate-200 shadow-sm overflow-hidden">
           <CardContent className="p-4">
@@ -385,9 +615,9 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                 <StoreIcon className="h-5 w-5 text-indigo-600" />
               </div>
               <div className="flex-1 min-w-0">
-                {order.po ? (
+                {displayPoInUi ? (
                   <>
-                    <p className="text-base font-semibold text-slate-900 mb-1.5">PO - {order.po}</p>
+                    <p className="text-base font-semibold text-slate-900 mb-1.5">{displayPoInUi}</p>
                     <p className="text-xs text-slate-500 mb-0.5">{t('store')}: {invoiceStoreDisplayName || order.storeName || '—'}</p>
                   </>
                 ) : (
@@ -407,170 +637,199 @@ export function OrderDetail({ orderId }: { orderId: string }) {
           </CardContent>
         </Card>
 
-        {/* Order Summary */}
-        <Card className="border-slate-200 shadow-sm overflow-hidden">
-          <CardHeader className="px-4 pt-4 pb-2">
-            <CardTitle className="text-sm">{t('order_summary')}</CardTitle>
-          </CardHeader>
-          <CardContent className="px-4 pb-4 pt-0">
-            <div className="grid grid-cols-3 gap-3">
-              <div className="text-center p-3 bg-slate-50 rounded-lg">
-                <Package className="h-5 w-5 text-slate-600 mx-auto mb-1" />
-                <p className="text-lg text-slate-900">{order.items.length}</p>
-                <p className="text-xs text-slate-500">{t('products')}</p>
-              </div>
-              <div className="text-center p-3 bg-indigo-50 rounded-lg">
-                <Grid3x3 className="h-5 w-5 text-indigo-600 mx-auto mb-1" />
-                <p className="text-lg text-indigo-900">{totalUnits}</p>
-                <p className="text-xs text-indigo-600">{t('units')}</p>
-              </div>
-              <div className="text-center p-3 bg-green-50 rounded-lg">
-                <DollarSign className="h-5 w-5 text-green-600 mx-auto mb-1" />
-                <p className="text-lg text-green-900">${displayTotal.toFixed(2)}</p>
-                <p className="text-xs text-green-600">{t('total')}</p>
-              </div>
-            </div>
-
-            <Separator className="my-4" />
-
-            <div className="space-y-2 text-sm">
-              <div className="flex justify-between">
-                <span className="text-slate-500">{t('order_date')}:</span>
-                <span className="text-slate-900">{new Date(order.date).toLocaleDateString()}</span>
-              </div>
-              {order.deliveryDate && (
-                <div className="flex justify-between">
-                  <span className="text-slate-500">{t('delivery_date')}:</span>
-                  <span className="text-slate-900">{new Date(order.deliveryDate).toLocaleDateString()}</span>
+        {/* Pedido confirmado / facturado: mismo layout que pedido inicial (resumen + fechas + líneas + familias) */}
+        {showBilledOrderBlock ? (
+          <Card
+            className={`shadow-sm overflow-hidden ${
+              orderPhase === 'invoiced'
+                ? 'border-green-200 bg-green-50/40'
+                : 'border-blue-200 bg-blue-50/30'
+            }`}
+          >
+            <CardHeader className="px-4 pt-4 pb-2">
+              <CardTitle
+                className={`text-sm ${orderPhase === 'invoiced' ? 'text-green-950' : 'text-blue-950'}`}
+              >
+                {storeHasPlanogram
+                  ? orderPhase === 'invoiced'
+                    ? t('order_invoiced_title')
+                    : t('order_confirmed_title')
+                  : orderPhase === 'invoiced'
+                    ? t('order_delivered_title')
+                    : t('order_confirmed_title')}
+              </CardTitle>
+              {storeHasPlanogram ? (
+                <>
+                  <p className="text-xs text-slate-600 mt-1">
+                    <span className="font-medium text-slate-700">{t('invoice')}</span>:{' '}
+                    <span className="font-semibold text-slate-900">{invoiceNumberDisplay}</span>
+                    {' · '}
+                    {invoiceFromApi?.date
+                      ? invoiceFromApi.date.includes(',')
+                        ? invoiceFromApi.date
+                        : new Date(invoiceFromApi.date).toLocaleDateString()
+                      : new Date(order.date).toLocaleDateString()}
+                  </p>
+                  <p className="text-[11px] text-slate-500 mt-1">{t('invoice_doc_hint')}</p>
+                </>
+              ) : (
+                <p className="text-xs text-slate-600 mt-1">
+                  {new Date(order.date).toLocaleDateString()}
+                </p>
+              )}
+            </CardHeader>
+            <CardContent className="px-4 pb-4 pt-0 space-y-4">
+              {showInvoiceRetry && (
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleRetryInvoice}
+                    disabled={loadingInvoice}
+                  >
+                    {loadingInvoice ? `${t('loading')}...` : (t('retry') || 'Reintentar factura')}
+                  </Button>
                 </div>
               )}
-            </div>
-
-            {canEditOrder && (
-              <div className="flex gap-2 mt-4">
-                <Button
-                  variant="outline"
-                  onClick={handleEditOrder}
-                  className="flex-1 border-amber-300 text-amber-800 hover:bg-amber-50"
-                >
-                  <Pencil className="h-4 w-4 mr-2" />
-                  {t('edit_order')}
-                </Button>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Planogram Section: solo si la tienda usa planograma */}
-        {storeHasPlanogram && (
-          <Card className="border-indigo-200 bg-indigo-50 overflow-hidden">
-            <CardContent className="p-4">
-              <div className="flex items-start gap-3 mb-3">
-                <Grid3x3 className="h-5 w-5 text-indigo-600 mt-0.5" />
-                <div className="flex-1">
-                  <p className="text-sm text-indigo-900 mb-1">{t('planogram')}</p>
-                  <p className="text-xs text-indigo-700">{t('planogram_warning')}</p>
+              {storeHasPlanogram && (
+                <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3">
+                  <Button
+                    type="button"
+                    onClick={handleViewPlanogram}
+                    className="w-full bg-indigo-600 hover:bg-indigo-700"
+                  >
+                    <Grid3x3 className="h-4 w-4 mr-2" />
+                    {t('view_planogram')}
+                  </Button>
                 </div>
-              </div>
-              <Button 
-                onClick={handleViewPlanogram}
-                className="w-full bg-indigo-600 hover:bg-indigo-700"
-              >
-                <Grid3x3 className="h-4 w-4 mr-2" />
-                {t('view_planogram')}
-              </Button>
-            </CardContent>
-          </Card>
-        )}
-
-        {/* Eliminación de pedido deshabilitada en PWA: solo administradores en Sistema Web Admin. */}
-
-        {/* Order Items */}
-        <Card className="border-slate-200 shadow-sm overflow-hidden">
-          <CardHeader className="px-4 pt-4 pb-2">
-            <CardTitle className="text-sm">{t('order_items')}</CardTitle>
-          </CardHeader>
-          <div className="divide-y divide-slate-100 px-4 pb-4">
-            {order.items.map((item: any, index: number) => {
-              const quantity = item.toOrder || item.quantity || 0;
-              const price = item.price ?? 0;
-              const imgUrl = item.imageUrl;
-              return (
-                <div key={index} className="p-4">
-                  <div className="flex items-start justify-between gap-3">
-                    {imgUrl ? (
-                      <img src={imgUrl} alt="" className="w-10 h-10 rounded object-cover flex-shrink-0" />
-                    ) : (
-                      <div className="w-10 h-10 rounded bg-slate-200 flex items-center justify-center flex-shrink-0">
-                        <Package className="h-5 w-5 text-slate-500" />
+              )}
+              {toInvoiceRows.length > 0 ? (
+                <>
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="text-center p-3 bg-white rounded-lg border border-slate-100">
+                      <Package className="h-5 w-5 text-slate-600 mx-auto mb-1" />
+                      <p className="text-lg text-slate-900">{toInvoiceRows.length}</p>
+                      <p className="text-xs text-slate-500">{t('products')}</p>
+                    </div>
+                    <div className="text-center p-3 bg-white rounded-lg border border-indigo-100">
+                      <Grid3x3 className="h-5 w-5 text-indigo-600 mx-auto mb-1" />
+                      <p className="text-lg text-indigo-900">{toInvoiceUnits}</p>
+                      <p className="text-xs text-indigo-600">{t('units')}</p>
+                    </div>
+                    <div className="text-center p-3 bg-white rounded-lg border border-green-100">
+                      <DollarSign className="h-5 w-5 text-green-600 mx-auto mb-1" />
+                      <p className="text-lg text-green-900">${toInvoiceTotal.toFixed(2)}</p>
+                      <p className="text-xs text-green-600">{t('total')}</p>
+                    </div>
+                  </div>
+                  <Separator />
+                  <div className="space-y-2 text-sm">
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">{t('order_date')}:</span>
+                      <span className="text-slate-900">{new Date(order.date).toLocaleDateString()}</span>
+                    </div>
+                    {order.deliveryDate && (
+                      <div className="flex justify-between">
+                        <span className="text-slate-500">{t('delivery_date')}:</span>
+                        <span className="text-slate-900">{new Date(order.deliveryDate).toLocaleDateString()}</span>
                       </div>
                     )}
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm text-slate-900 mb-1">{item.productName}</p>
-                      <p className="text-xs text-slate-500 mb-2">{item.sku}</p>
-                      <div className="flex items-center gap-2">
-                        <Badge variant="outline" className="bg-indigo-50 text-indigo-700 border-indigo-200 text-xs">
-                          {quantity} {t('units')}
-                        </Badge>
-                        <span className="text-xs text-slate-500">× ${price.toFixed(2)}</span>
+                    {storeHasPlanogram && orderPhase === 'invoiced' && invoiceFromApi?.date && (
+                      <div className="flex justify-between">
+                        <span className="text-slate-500">{t('invoice_date_row')}</span>
+                        <span className="text-slate-900">
+                          {invoiceFromApi.date.includes(',')
+                            ? invoiceFromApi.date
+                            : new Date(invoiceFromApi.date).toLocaleDateString()}
+                        </span>
                       </div>
-                    </div>
-                    <p className="text-sm text-slate-900">${(quantity * price).toFixed(2)}</p>
+                    )}
                   </div>
-                </div>
-              );
-            })}
-          </div>
+                  <div>
+                    <p className="text-xs font-medium text-slate-700 mb-2">
+                      {storeHasPlanogram ? t('order_billed_items') : t('order_items_summary')}
+                    </p>
+                    <div className="divide-y divide-slate-100 rounded-lg border border-slate-200 bg-white overflow-hidden">
+                      {toInvoiceRows.map((row) => (
+                        <div key={row.key} className="p-3">
+                          <div className="flex items-start justify-between gap-3">
+                            {row.imageUrl ? (
+                              <img src={row.imageUrl} alt="" className="w-10 h-10 rounded object-cover flex-shrink-0" />
+                            ) : (
+                              <div className="w-10 h-10 rounded bg-slate-200 flex items-center justify-center flex-shrink-0">
+                                <Package className="h-5 w-5 text-slate-500" />
+                              </div>
+                            )}
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm text-slate-900 mb-1">{row.productName}</p>
+                              <p className="text-xs text-slate-500 mb-2">{row.sku}</p>
+                              <div className="flex items-center gap-2">
+                                <Badge variant="outline" className="bg-indigo-50 text-indigo-700 border-indigo-200 text-xs">
+                                  {row.qty} {t('units')}
+                                </Badge>
+                                <span className="text-xs text-slate-500">× ${row.price.toFixed(2)}</span>
+                              </div>
+                            </div>
+                            <p className="text-sm text-slate-900">${row.lineTotal.toFixed(2)}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  {allCategories.length > 0 && (
+                    <div>
+                      <p className="text-xs font-medium text-slate-700 mb-2">{t('family_col') || 'Family'}</p>
+                      <table className="w-full min-w-[280px] overflow-hidden rounded-lg border border-slate-200 text-sm shadow-sm bg-white">
+                        <thead>
+                          <tr className="bg-slate-100">
+                            <th className="border-b border-slate-200 px-3 py-2 text-left text-xs font-medium text-slate-600">
+                              {t('family_col') || 'Family'}
+                            </th>
+                            <th className="w-14 border-b border-slate-200 px-3 py-2 text-left text-xs font-medium text-slate-600">
+                              {t('pcs_col') || 'Pcs'}
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {[...allCategories]
+                            .sort((a, b) => a.name.localeCompare(b.name))
+                            .map((cat) => {
+                              const pcs = toInvoiceRows.reduce((sum, row) => {
+                                const oi = order.items.find((item: any) => invoiceRowMatchesOrderItem(row, item));
+                                if (!oi) return sum;
+                                return orderItemMatchesFamily(oi as any, cat, allCategories) ? sum + row.qty : sum;
+                              }, 0);
+                              return (
+                                <tr key={cat.id} className="bg-slate-50/80">
+                                  <td className="px-3 py-2.5 align-top">
+                                    <FamilySummaryCell cat={cat} />
+                                  </td>
+                                  <td className="px-3 py-2.5 text-left align-middle bg-white">
+                                    <span className="tabular-nums text-slate-900">{pcs}</span>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <p className="text-sm text-slate-600 py-2">{t('invoice_no_items')}</p>
+              )}
+            </CardContent>
+          </Card>
+        ) : null}
 
-          {/* Resumen por categoría: todas las registradas, con Pcs (0 o suma del pedido) */}
-          {allCategories.length > 0 && (
-            <div className="border-t border-slate-100 pt-3">
-              <table className="w-full min-w-[280px] overflow-hidden rounded-lg border border-slate-200 text-sm shadow-sm">
-                <thead>
-                  <tr className="bg-slate-100">
-                    <th className="border-b border-slate-200 px-3 py-2 text-left text-xs font-medium text-slate-600">
-                      {t('family_col') || 'Family'}
-                    </th>
-                    <th className="w-14 border-b border-slate-200 px-3 py-2 text-left text-xs font-medium text-slate-600">
-                      {t('pcs_col') || 'Pcs'}
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 bg-white">
-                  {[...allCategories]
-                    .sort((a, b) => a.name.localeCompare(b.name))
-                    .map((cat) => {
-                      const pcs = (order.items || []).reduce(
-                        (sum: number, item: any) => {
-                          const qty = item.toOrder ?? item.quantity ?? 0;
-                          return orderItemMatchesFamily(item, cat, allCategories) ? sum + qty : sum;
-                        },
-                        0
-                      );
-                      return (
-                        <tr key={cat.id} className="bg-slate-50/80">
-                          <td className="px-3 py-2.5 align-top">
-                            <FamilySummaryCell cat={cat} />
-                          </td>
-                          <td className="px-3 py-2.5 text-left align-middle bg-white">
-                            <span className="tabular-nums text-slate-900">{pcs}</span>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </Card>
-
-        {/* Invoice */}
+        {/* Factura imprimible: solo tiendas con planograma (catálogo crea factura en backend sin mostrarla). */}
+        {showInvoiceDocumentUi ? (
         <Card className="border-slate-200 shadow-sm overflow-hidden">
           <CardHeader className="px-4 pt-4 pb-2">
             <div className="flex items-center justify-between">
               <CardTitle className="text-sm">{t('invoice')}</CardTitle>
               <div className="flex gap-2 flex-wrap">
-                {!invoiceFromApi && (
+                {showInvoiceRetry && (
                   <Button
                     variant="outline"
                     size="sm"
@@ -601,7 +860,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
           </CardHeader>
           <CardContent className="px-4 pb-4 pt-0">
             <Invoice
-              invoiceNumber={invoiceNumberDisplay}
+              invoiceNumber={String(invoiceNumberDisplay ?? '—')}
               date={typeof invoiceDate === 'string' && invoiceDate.includes(',') ? invoiceDate : new Date(invoiceDate).toLocaleDateString('en-US')}
               vendorName={vendorName}
               storeName={invoiceStoreDisplayName}
@@ -611,6 +870,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
             />
           </CardContent>
         </Card>
+        ) : null}
 
         {/* Sección POD: mostrar si hay POD en pedido o en la factura cargada (pedidos viejos) */}
         <Card className="border-slate-200 overflow-hidden">
@@ -657,29 +917,184 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                   </div>
                 )}
               </div>
-            ) : orderStatus === 'pending' ? (
+            ) : orderPhase === 'confirmed' ? (
+              <Button
+                onClick={handleCapturePOD}
+                className="w-full bg-amber-600 hover:bg-amber-700"
+              >
+                <Camera className="h-4 w-4 mr-2" />
+                {t('capture_pod')}
+              </Button>
+            ) : orderPhase === 'initial' ? (
               <>
-                <p className="text-sm text-slate-600 mb-3">
-                  {t('pod_not_uploaded') || 'No has cargado el comprobante de entrega'}
-                </p>
-                <p className="text-xs text-slate-500 mb-3">
-                  {t('pod_warning') || 'Carga el comprobante para completar la entrega.'}
-                </p>
-                <Button
-                  onClick={handleCapturePOD}
-                  className="w-full bg-amber-600 hover:bg-amber-700"
-                >
-                  <Camera className="h-4 w-4 mr-2" />
-                  {t('capture_pod')}
-                </Button>
+                {order.storeId ? (
+                  storeHasPlanogram ? (
+                    <Button
+                      onClick={handleStartInvoiceFromPlanogram}
+                      className="w-full bg-blue-600 hover:bg-blue-700"
+                    >
+                      Facturar pedido (planograma + POD)
+                    </Button>
+                  ) : (
+                    <Button
+                      onClick={handleStartConfirmFromCatalog}
+                      className="w-full bg-blue-600 hover:bg-blue-700"
+                    >
+                      Confirmar pedido (catálogo + POD)
+                    </Button>
+                  )
+                ) : (
+                  <p className="text-xs text-amber-700">Falta tienda en el pedido; no se puede continuar.</p>
+                )}
               </>
             ) : loadingPod ? (
               <p className="text-sm text-slate-600">Cargando comprobante...</p>
             ) : (
               <p className="text-xs text-slate-500">
-                {t('pod_already_invoiced') || 'Este pedido ya está facturado y no requiere cargar POD aquí.'}
+                {storeHasPlanogram
+                  ? t('pod_already_invoiced') || 'Este pedido ya está facturado y no requiere cargar POD aquí.'
+                  : t('pod_complete_catalog') ||
+                    'El comprobante y el pedido ya están registrados.'}
               </p>
             )}
+          </CardContent>
+        </Card>
+
+        {/* Pedido inicial: colapsado por defecto */}
+        <Card className="border-amber-200 bg-amber-50/40 shadow-sm overflow-hidden">
+          <CardHeader className="px-4 pt-4 pb-2">
+            <CardTitle className="text-sm text-amber-950">{t('order_initial_title')}</CardTitle>
+          </CardHeader>
+          <CardContent className="px-4 pb-4 pt-0">
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full justify-between border-amber-300 bg-white hover:bg-amber-50"
+              onClick={() => setShowInitialOrder((v) => !v)}
+            >
+              <span>{showInitialOrder ? t('hide_initial_order') : t('view_initial_order')}</span>
+              {showInitialOrder ? <ChevronUp className="h-4 w-4 shrink-0" /> : <ChevronDown className="h-4 w-4 shrink-0" />}
+            </Button>
+            {showInitialOrder ? (
+              <div className="mt-4 space-y-4">
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="text-center p-3 bg-white rounded-lg border border-slate-100">
+                    <Package className="h-5 w-5 text-slate-600 mx-auto mb-1" />
+                    <p className="text-lg text-slate-900">{order.items.length}</p>
+                    <p className="text-xs text-slate-500">{t('products')}</p>
+                  </div>
+                  <div className="text-center p-3 bg-white rounded-lg border border-indigo-100">
+                    <Grid3x3 className="h-5 w-5 text-indigo-600 mx-auto mb-1" />
+                    <p className="text-lg text-indigo-900">{totalUnits}</p>
+                    <p className="text-xs text-indigo-600">{t('units')}</p>
+                  </div>
+                  <div className="text-center p-3 bg-white rounded-lg border border-green-100">
+                    <DollarSign className="h-5 w-5 text-green-600 mx-auto mb-1" />
+                    <p className="text-lg text-green-900">${displayTotal.toFixed(2)}</p>
+                    <p className="text-xs text-green-600">{t('total')}</p>
+                  </div>
+                </div>
+                <Separator />
+                <div className="space-y-2 text-sm">
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">{t('order_date')}:</span>
+                    <span className="text-slate-900">{new Date(order.date).toLocaleDateString()}</span>
+                  </div>
+                  {order.deliveryDate && (
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">{t('delivery_date')}:</span>
+                      <span className="text-slate-900">{new Date(order.deliveryDate).toLocaleDateString()}</span>
+                    </div>
+                  )}
+                </div>
+                {storeHasPlanogram && (
+                  <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3">
+                    <Button
+                      type="button"
+                      onClick={handleViewPlanogram}
+                      className="w-full bg-indigo-600 hover:bg-indigo-700"
+                    >
+                      <Grid3x3 className="h-4 w-4 mr-2" />
+                      {t('view_planogram')}
+                    </Button>
+                  </div>
+                )}
+                <div>
+                  <p className="text-xs font-medium text-slate-700 mb-2">{t('order_initial_items')}</p>
+                  <div className="divide-y divide-slate-100 rounded-lg border border-slate-200 bg-white overflow-hidden">
+                    {order.items.map((item: any, index: number) => {
+                      const quantity = item.toOrder || item.quantity || 0;
+                      const price = item.price ?? 0;
+                      const imgUrl = item.imageUrl;
+                      return (
+                        <div key={index} className="p-3">
+                          <div className="flex items-start justify-between gap-3">
+                            {imgUrl ? (
+                              <img src={imgUrl} alt="" className="w-10 h-10 rounded object-cover flex-shrink-0" />
+                            ) : (
+                              <div className="w-10 h-10 rounded bg-slate-200 flex items-center justify-center flex-shrink-0">
+                                <Package className="h-5 w-5 text-slate-500" />
+                              </div>
+                            )}
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm text-slate-900 mb-1">{item.productName}</p>
+                              <p className="text-xs text-slate-500 mb-2">{item.sku}</p>
+                              <div className="flex items-center gap-2">
+                                <Badge variant="outline" className="bg-indigo-50 text-indigo-700 border-indigo-200 text-xs">
+                                  {quantity} {t('units')}
+                                </Badge>
+                                <span className="text-xs text-slate-500">× ${price.toFixed(2)}</span>
+                              </div>
+                            </div>
+                            <p className="text-sm text-slate-900">${(quantity * price).toFixed(2)}</p>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+                {allCategories.length > 0 && (
+                  <div>
+                    <p className="text-xs font-medium text-slate-700 mb-2">{t('family_col') || 'Family'}</p>
+                    <table className="w-full min-w-[280px] overflow-hidden rounded-lg border border-slate-200 text-sm shadow-sm bg-white">
+                      <thead>
+                        <tr className="bg-slate-100">
+                          <th className="border-b border-slate-200 px-3 py-2 text-left text-xs font-medium text-slate-600">
+                            {t('family_col') || 'Family'}
+                          </th>
+                          <th className="w-14 border-b border-slate-200 px-3 py-2 text-left text-xs font-medium text-slate-600">
+                            {t('pcs_col') || 'Pcs'}
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {[...allCategories]
+                          .sort((a, b) => a.name.localeCompare(b.name))
+                          .map((cat) => {
+                            const pcs = (order.items || []).reduce(
+                              (sum: number, item: any) => {
+                                const qty = item.toOrder ?? item.quantity ?? 0;
+                                return orderItemMatchesFamily(item, cat, allCategories) ? sum + qty : sum;
+                              },
+                              0
+                            );
+                            return (
+                              <tr key={cat.id} className="bg-slate-50/80">
+                                <td className="px-3 py-2.5 align-top">
+                                  <FamilySummaryCell cat={cat} />
+                                </td>
+                                <td className="px-3 py-2.5 text-left align-middle bg-white">
+                                  <span className="tabular-nums text-slate-900">{pcs}</span>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            ) : null}
           </CardContent>
         </Card>
       </div>

@@ -8,6 +8,7 @@ import { useAuth } from '@/shared/auth/auth-provider';
 import { ordersApi, OrderForUI } from '@/shared/api/orders-api';
 import { storesApi } from '@/shared/api/stores-api';
 import { citiesApi } from '@/shared/api/cities-api';
+import { productsApi } from '@/shared/api/products-api';
 import { histpricesApi } from '@/shared/api/histprices-api';
 import { Card, CardContent } from '@/shared/ui/card';
 import { Input } from '@/shared/ui/input';
@@ -25,6 +26,13 @@ function looksLikeId(name: string): boolean {
   return /^[0-9a-f-]{36}$/i.test(name.trim()) || /^\d+$/.test(name.trim());
 }
 
+/** Pedidos para los que intentamos cargar factura en el historial (totales/unidades/PO desde factura). */
+function shouldFetchInvoiceForHistory(order: OrderForUI): boolean {
+  if (order.invoiceId != null && String(order.invoiceId).trim() !== '') return true;
+  const s = (order.status || '').toLowerCase().trim();
+  return ['invoiced', 'facturado', 'invoice', 'billed', 'facturada', 'delivered'].includes(s);
+}
+
 export function OrderHistory() {
   const { t } = useLanguage();
   const router = useRouter();
@@ -40,7 +48,7 @@ export function OrderHistory() {
       setLoading(true);
       if (user?.id) {
         const apiOrders = await ordersApi.getOrdersByUser(user.id);
-        // Mismo criterio que en detalle: si no hay total, rellenar precios con histprices y calcular total
+        const productFamilyCache = new Map<string, string>();
         const enriched = await Promise.all(
           apiOrders.map(async (order): Promise<OrderForUI> => {
             let o: OrderForUI = order;
@@ -48,8 +56,21 @@ export function OrderHistory() {
               const items = await Promise.all(
                 order.items.map(async (item: any) => {
                   let price = Number(item.price) || 0;
-                  if (item.productId && !price) {
-                    price = await histpricesApi.getLatest(String(item.productId));
+                  if (!price) {
+                    const inlineFamilyId = String(
+                      item?.familyId ?? item?.FamilyId ?? item?.categoryId ?? item?.CategoryId ?? ''
+                    ).trim();
+                    let familyId = inlineFamilyId;
+                    if (!familyId && item?.productId) {
+                      const productId = String(item.productId).trim();
+                      familyId = productFamilyCache.get(productId) || '';
+                      if (!familyId) {
+                        const product = await productsApi.getById(productId);
+                        familyId = String(product?.familyId ?? product?.categoryId ?? '').trim();
+                        if (familyId) productFamilyCache.set(productId, familyId);
+                      }
+                    }
+                    if (familyId) price = await histpricesApi.getLatest(familyId);
                   }
                   return { ...item, price };
                 })
@@ -64,7 +85,38 @@ export function OrderHistory() {
         const sorted = [...enriched].sort(
           (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
         );
-        setOrders(sorted);
+        const withInvoice = await Promise.all(
+          sorted.map(async (order) => {
+            if (!shouldFetchInvoiceForHistory(order)) return order;
+            try {
+              const inv = await ordersApi.getInvoiceDisplayForOrder(
+                order.id,
+                order.invoiceId ?? undefined,
+                order
+              );
+              if (!inv) return order;
+              const lines = inv.items || [];
+              const hasNumericTotal = Number(inv.total) > 0;
+              if (lines.length === 0 && !hasNumericTotal) return order;
+              const units = lines.reduce((s, it) => s + (Number(it.qty) || 0), 0);
+              let total = Number(inv.total) || 0;
+              if (total <= 0 && lines.length) {
+                total = lines.reduce((s, it) => s + (Number(it.amount) || 0), 0);
+              }
+              const poInv = String(inv.po || '').trim();
+              return {
+                ...order,
+                ...(poInv ? { po: poInv } : {}),
+                ...(total > 0 ? { total, subtotal: total } : {}),
+                ...(units > 0 ? { totalUnits: units } : {}),
+                ...(lines.length > 0 ? { invoiceLineCount: lines.length } : {}),
+              };
+            } catch {
+              return order;
+            }
+          })
+        );
+        setOrders(withInvoice);
       } else {
         setOrders([]);
       }
@@ -101,6 +153,12 @@ export function OrderHistory() {
     return () => { mounted = false; };
   }, [orders]);
 
+  /** Lista: solo «inicial» (todo lo no facturado) vs «facturado». */
+  const isListInvoiced = (status: string | undefined) => {
+    const s = (status || '').toLowerCase().trim();
+    return ['invoiced', 'facturado', 'invoice', 'billed', 'facturada'].includes(s);
+  };
+
   const filteredOrders = orders.filter((order) => {
     const cached = order.storeId ? storeCache[order.storeId] : null;
     const name = cached?.name || (order.storeName && !looksLikeId(order.storeName) ? order.storeName : '');
@@ -109,23 +167,21 @@ export function OrderHistory() {
     const po = (order.po || '').trim();
     const searchStr = (po + ' ' + name + ' ' + addr + ' ' + city + ' ' + (order.storeId || '')).toLowerCase();
     const matchesSearch = !searchQuery.trim() || searchStr.includes(searchQuery.toLowerCase());
-    const statusNorm = (order.status || '').toLowerCase();
-    const matchesStatus = statusFilter === 'all' || statusNorm === statusFilter.toLowerCase();
+    const invoiced = isListInvoiced(order.status);
+    const matchesStatus =
+      statusFilter === 'all' ||
+      (statusFilter === 'invoiced' && invoiced) ||
+      (statusFilter === 'initial' && !invoiced);
     return matchesSearch && matchesStatus;
   });
 
-  /** Solo 2 estados: pending e invoiced. */
-  const getStatusColor = (status: string) => {
-    const s = (status || '').toLowerCase();
-    if (s === 'invoiced') return 'bg-green-50 text-green-700 border-green-200';
-    return 'bg-amber-50 text-amber-700 border-amber-200';
-  };
+  const getStatusColor = (status: string) =>
+    isListInvoiced(status)
+      ? 'bg-green-50 text-green-700 border-green-200'
+      : 'bg-amber-50 text-amber-700 border-amber-200';
 
-  const getStatusText = (status: string) => {
-    const s = (status || '').toLowerCase();
-    if (s === 'invoiced') return t('invoiced') || 'Facturado';
-    return t('pending');
-  };
+  const getStatusText = (status: string) =>
+    isListInvoiced(status) ? (t('invoiced') || 'Facturado') : t('initial');
 
   return (
     <div className="px-4 py-4">
@@ -154,8 +210,8 @@ export function OrderHistory() {
           </SelectTrigger>
             <SelectContent className="z-[100] min-w-[var(--radix-select-trigger-width)] bg-white border border-slate-200 shadow-lg">
             <SelectItem value="all" className="text-slate-800 cursor-pointer">{t('filter_all')}</SelectItem>
+            <SelectItem value="initial" className="text-slate-800 cursor-pointer">{t('initial')}</SelectItem>
             <SelectItem value="invoiced" className="text-slate-800 cursor-pointer">{t('invoiced') || 'Facturado'}</SelectItem>
-            <SelectItem value="pending" className="text-slate-800 cursor-pointer">{t('pending')}</SelectItem>
           </SelectContent>
         </Select>
       </div>
@@ -174,20 +230,27 @@ export function OrderHistory() {
             const displayAddress = (cached?.address || order.storeAddress || '').trim();
             const displayCity = (cached?.city || '').trim();
             const displayPo = (order.po || '').trim();
-            const titleMain = displayPo ? `PO - ${displayPo}` : displayStoreName;
+            const titleMain = displayPo ? `${displayPo}` : displayStoreName;
             const subtitleStore = displayPo ? displayStoreName : null;
-            const computedTotal = order.items?.length
+            const computedTotalFromOrderItems = order.items?.length
               ? order.items.reduce((s: number, i: any) => s + (i.quantity ?? i.toOrder ?? 0) * (Number(i.price) || 0), 0)
               : 0;
             const totalDisplay =
               Number(order.total) > 0
                 ? Number(order.total)
-                : computedTotal > 0
-                  ? computedTotal
+                : computedTotalFromOrderItems > 0
+                  ? computedTotalFromOrderItems
                   : Number(order.subtotal) > 0
                     ? Number(order.subtotal)
                     : 0;
-            const articlesCount = order.items?.length ?? 0;
+            const articlesCount =
+              order.invoiceLineCount != null && order.invoiceLineCount > 0
+                ? order.invoiceLineCount
+                : order.items?.length ?? 0;
+            const unitsDisplay =
+              order.totalUnits != null && order.totalUnits > 0
+                ? order.totalUnits
+                : order.items?.reduce((s: number, i: any) => s + (i.quantity ?? i.toOrder ?? 0), 0) ?? 0;
             const hasTotal = totalDisplay > 0;
             return (
               <Card
@@ -215,11 +278,6 @@ export function OrderHistory() {
                         <Badge variant="outline" className={getStatusColor(order.status)}>
                           {getStatusText(order.status)}
                         </Badge>
-                        {(order.podUploaded || order.podImageUrl || order.podFileName) && (
-                          <Badge variant="outline" className="bg-indigo-50 text-indigo-700 border-indigo-200">
-                            POD ✓
-                          </Badge>
-                        )}
                         <span className="text-xs text-slate-500">{articlesCount} {t('articles')}</span>
                       </div>
                     </div>
@@ -228,7 +286,7 @@ export function OrderHistory() {
                       <p className="text-base font-semibold text-slate-900">
                         {hasTotal ? `$${Number(totalDisplay).toFixed(2)}` : t('total_not_available')}
                       </p>
-                      <p className="text-xs text-slate-500">{order.totalUnits || articlesCount} {t('units')}</p>
+                      <p className="text-xs text-slate-500">{unitsDisplay} {t('units')}</p>
                     </div>
                   </div>
                   <div className="flex items-center justify-end mt-2">

@@ -22,6 +22,56 @@ interface ProductPosition {
   imageUrl?: string;
 }
 
+type LineItem = { qty: number; code: string; description: string; price: number; amount: number };
+
+/** Cantidades en celdas del planograma según líneas de factura (mismo criterio que detalle pedido). */
+function buildQuantitiesMapFromInvoiceLines(
+  invoiceItems: LineItem[],
+  orderItems: Array<{ productId?: string; ProductId?: string; productName?: string; sku?: string; price?: number }>,
+  getProduct: (id: string) => { id: string; name?: string; sku?: string; familyId?: string; categoryId?: string; currentPrice?: number } | undefined,
+  allProducts: Array<{ id: string; name?: string; sku?: string }>
+): Map<string, { productName: string; sku: string; quantity: number; price: number }> {
+  const map = new Map<string, { productName: string; sku: string; quantity: number; price: number }>();
+  for (const line of invoiceItems) {
+    const code = String(line.code || '').trim();
+    const normCode = code.replace(/-/g, '').toLowerCase();
+    const oi =
+      orderItems.find((x: any) => String(x.sku || '').trim() === code) ||
+      orderItems.find((x: any) => String(x.productId ?? x.ProductId ?? '') === code) ||
+      (code.length >= 8
+        ? orderItems.find((x: any) => {
+            const pid = String(x.productId ?? x.ProductId ?? '').replace(/-/g, '').toLowerCase();
+            return pid && (pid === normCode || String(x.productId ?? x.ProductId) === code);
+          })
+        : undefined);
+
+    let productId = oi ? String(oi.productId ?? oi.ProductId ?? '') : '';
+    if (!productId && code) {
+      const bySku = allProducts.find((p) => String(p.sku || '').trim() === code);
+      if (bySku) productId = bySku.id;
+    }
+    if (!productId) continue;
+
+    const prod = getProduct(productId);
+    const qty = Number(line.qty) || 0;
+    const price = Number(line.price) || 0;
+    const name = (line.description || oi?.productName || prod?.name || code).trim();
+    const sku = String(oi?.sku || prod?.sku || code).trim();
+    const prev = map.get(productId);
+    if (prev) {
+      map.set(productId, {
+        productName: name || prev.productName,
+        sku: sku || prev.sku,
+        quantity: prev.quantity + qty,
+        price: price > 0 ? price : prev.price,
+      });
+    } else {
+      map.set(productId, { productName: name, sku, quantity: qty, price });
+    }
+  }
+  return map;
+}
+
 export function ViewPlanogram({ orderId }: { orderId: string }) {
   const { t } = useLanguage();
   const router = useRouter();
@@ -29,12 +79,14 @@ export function ViewPlanogram({ orderId }: { orderId: string }) {
   const [grid, setGrid] = useState<ProductPosition[]>([]);
   const [planogramName, setPlanogramName] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [quantitiesFromInvoice, setQuantitiesFromInvoice] = useState(false);
 
   useEffect(() => {
     let mounted = true;
 
     (async () => {
       setLoading(true);
+      setQuantitiesFromInvoice(false);
       const apiOrder = await ordersApi.getOrderById(orderId);
       if (!mounted || !apiOrder) {
         if (mounted) {
@@ -76,23 +128,65 @@ export function ViewPlanogram({ orderId }: { orderId: string }) {
       });
       const getProduct = (id: string) => productMap.get(id) ?? productMap.get(String(Number(id)));
 
+      const invoiceHint = apiOrder.invoiceId ?? undefined;
+      const invoiceDisplay = await ordersApi.getInvoiceDisplayForOrder(orderId, invoiceHint, apiOrder);
+
       const orderItemsByProductId = new Map<string, { productName: string; sku: string; quantity: number; price: number }>();
-      for (const item of apiOrder.items) {
-        const id = String(item.productId ?? item.ProductId ?? '');
-        if (id) {
-          let price = Number(item.price) || 0;
-          if (!price) {
-            const { histpricesApi } = await import('@/shared/api/histprices-api');
-            price = await histpricesApi.getLatest(id);
-          }
-          orderItemsByProductId.set(id, {
-            productName: (item.productName || item.sku || getProduct(id)?.name || '').trim(),
-            sku: item.sku || getProduct(id)?.sku || '',
-            quantity: item.toOrder ?? item.quantity ?? 0,
-            price,
-          });
+      let usedInvoiceQuantities = false;
+
+      if (invoiceDisplay?.items?.length) {
+        const fromInv = buildQuantitiesMapFromInvoiceLines(
+          invoiceDisplay.items,
+          apiOrder.items as any[],
+          getProduct,
+          products
+        );
+        if (fromInv.size > 0) {
+          fromInv.forEach((v, k) => orderItemsByProductId.set(k, { ...v }));
+          usedInvoiceQuantities = true;
         }
       }
+
+      if (!usedInvoiceQuantities) {
+        for (const item of apiOrder.items) {
+          const id = String(item.productId ?? item.ProductId ?? '');
+          if (id) {
+            let price = Number(item.price) || 0;
+            if (!price) {
+              const { histpricesApi } = await import('@/shared/api/histprices-api');
+              const productForPrice = getProduct(id);
+              const familyId = String(
+                productForPrice?.familyId ?? productForPrice?.categoryId ?? ''
+              ).trim();
+              price = familyId ? await histpricesApi.getLatest(familyId) : 0;
+            }
+            orderItemsByProductId.set(id, {
+              productName: (item.productName || item.sku || getProduct(id)?.name || '').trim(),
+              sku: item.sku || getProduct(id)?.sku || '',
+              quantity: item.toOrder ?? item.quantity ?? 0,
+              price,
+            });
+          }
+        }
+      } else {
+        /** Completar precios de líneas de factura si vienen en 0 */
+        const { histpricesApi } = await import('@/shared/api/histprices-api');
+        for (const [id, row] of orderItemsByProductId.entries()) {
+          if (row.price > 0) continue;
+          const oi = apiOrder.items.find((x: any) => String(x.productId ?? x.ProductId) === id);
+          let price = Number(oi?.price) || 0;
+          if (!price) {
+            const productForPrice = getProduct(id);
+            const familyId = String(
+              productForPrice?.familyId ?? productForPrice?.categoryId ?? ''
+            ).trim();
+            price = familyId ? await histpricesApi.getLatest(familyId) : 0;
+          }
+          orderItemsByProductId.set(id, { ...row, price });
+        }
+      }
+
+      if (mounted) setQuantitiesFromInvoice(usedInvoiceQuantities);
 
       const planogramGrid: ProductPosition[] = [];
       for (let row = 0; row < 10; row++) {
@@ -160,7 +254,14 @@ export function ViewPlanogram({ orderId }: { orderId: string }) {
               <p className="text-xs text-slate-500">{order.storeName}</p>
             </div>
           </div>
-          <Badge variant="outline" className="bg-indigo-50 text-indigo-700 border-indigo-200">{t('view_only')}</Badge>
+          <div className="flex flex-col items-end gap-1">
+            <Badge variant="outline" className="bg-indigo-50 text-indigo-700 border-indigo-200">{t('view_only')}</Badge>
+            {quantitiesFromInvoice && (
+              <span className="text-[10px] text-green-700 font-medium text-right max-w-[140px] leading-tight">
+                {t('planogram_quantities_invoice')}
+              </span>
+            )}
+          </div>
         </div>
         <div className="grid grid-cols-3 gap-2">
           <div className="bg-slate-50 rounded-lg p-2 text-center">
@@ -179,7 +280,9 @@ export function ViewPlanogram({ orderId }: { orderId: string }) {
       </div>
 
       <div className="px-4 py-4">
-        <p className="text-sm text-slate-600 mb-3">{t('planogram_view_only')}</p>
+        <p className="text-sm text-slate-600 mb-3">
+          {quantitiesFromInvoice ? t('planogram_view_invoice_hint') : t('planogram_view_only')}
+        </p>
         <div className="bg-white rounded-xl p-3 shadow-sm border border-slate-200 overflow-x-auto">
           <div className="grid grid-cols-10 gap-1.5 min-w-[320px] max-w-2xl mx-auto">
             {grid.map((item) => (

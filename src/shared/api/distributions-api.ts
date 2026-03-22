@@ -32,18 +32,52 @@ function toDistribution(raw: any): DistributionForUI {
   };
 }
 
+function normalizeDistributionList(res: any): any[] {
+  const list = Array.isArray(res)
+    ? res
+    : res?.data ??
+      res?.Data ??
+      res?.items ??
+      res?.Items ??
+      res?.value ??
+      res?.Value ??
+      res?.distributions ??
+      res?.Distributions ??
+      [];
+  return Array.isArray(list) ? list : [];
+}
+
 export const distributionsApi = {
   /** Lista distribuciones de un planograma. GET /distributions/distributions/planogram/{id} */
   async getByPlanogram(planogramId: string): Promise<DistributionForUI[]> {
     try {
       const res = await apiClient.get<any>(`/distributions/distributions/planogram/${encodeURIComponent(planogramId)}`);
-      const list = Array.isArray(res) ? res : res?.data ?? res?.items ?? res?.value ?? res?.distributions ?? (res && typeof res === 'object' ? [res] : []);
-      const items = Array.isArray(list) ? list : [];
+      const items = normalizeDistributionList(res);
       return items.map((item: any) => toDistribution(item));
     } catch (error) {
       const err = error as ApiError;
-      console.error('[distributions-api] GET by planogram failed:', err.message || err);
-      return [];
+      const message = String(err?.message || err || '');
+      // Fallback real para backend con error EF ("ProductId1"):
+      // listamos todas las distribuciones y filtramos por planograma en frontend.
+      if (message.includes('ProductId1') || message.includes('42703')) {
+        try {
+          const allRes = await apiClient.get<any>('/distributions/distributions');
+          const allItems = normalizeDistributionList(allRes).map((item: any) =>
+            toDistribution(item)
+          );
+          return allItems.filter(
+            (d) => String(d.planogramId).trim() === String(planogramId).trim()
+          );
+        } catch (fallbackError) {
+          const fbErr = fallbackError as ApiError;
+          console.error(
+            '[distributions-api] Fallback list/filter failed:',
+            fbErr.message || fbErr
+          );
+        }
+      }
+      console.error('[distributions-api] GET by planogram failed:', message);
+      throw err;
     }
   },
 };

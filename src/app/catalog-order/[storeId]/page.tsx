@@ -7,14 +7,15 @@ export default async function CatalogOrderPage({
   searchParams,
 }: {
   params: Promise<{ storeId: string }>;
-  searchParams: Promise<{ orderId?: string }>;
+  searchParams: Promise<{ orderId?: string; mode?: string }>;
 }) {
   const { storeId } = await params;
-  const { orderId } = await searchParams;
+  const { orderId, mode } = await searchParams;
+  const flowMode = mode === 'confirm' ? 'confirm' : 'create';
   return (
     <ProtectedRoute>
       <MainLayout>
-        <CatalogOrder storeId={storeId} orderId={orderId ?? undefined} />
+        <CatalogOrder storeId={storeId} orderId={orderId ?? undefined} mode={flowMode} />
       </MainLayout>
     </ProtectedRoute>
   );

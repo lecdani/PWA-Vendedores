@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { ArrowLeft, Send, Loader2, Package, Search, Minus, Plus } from 'lucide-react';
 import { useLanguage } from '@/shared/i18n/language-provider';
@@ -36,7 +36,15 @@ interface ProductWithQty extends ProductForUI {
   categoryName: string;
 }
 
-export function CatalogOrder({ storeId, orderId }: { storeId: string; orderId?: string }) {
+export function CatalogOrder({
+  storeId,
+  orderId,
+  mode = 'create',
+}: {
+  storeId: string;
+  orderId?: string;
+  mode?: 'create' | 'confirm';
+}) {
   const { t } = useLanguage();
   const router = useRouter();
   const [storeInfo, setStoreInfo] = useState<{ id: string; name: string; address?: string } | null>(null);
@@ -48,6 +56,19 @@ export function CatalogOrder({ storeId, orderId }: { storeId: string; orderId?: 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [page, setPage] = useState(0);
+  const [flowError, setFlowError] = useState<string | null>(null);
+  const [continuing, setContinuing] = useState(false);
+  const allowedProductIdsRef = useRef<Set<string>>(new Set());
+
+  const isConfirmFlow = mode === 'confirm' && !!orderId;
+
+  const productIdAllowed = (productId: string): boolean => {
+    if (!isConfirmFlow) return true;
+    const pid = String(productId).trim();
+    const allowed = allowedProductIdsRef.current;
+    if (allowed.size === 0) return false;
+    return allowed.has(pid) || allowed.has(String(Number(pid)));
+  };
 
   useEffect(() => {
     if (storeId) {
@@ -109,15 +130,26 @@ export function CatalogOrder({ storeId, orderId }: { storeId: string; orderId?: 
         if (orderId && mounted) {
           const details = await ordersApi.getOrderDetailsByOrderIdRaw(orderId);
           const qtyByProduct = new Map<string, number>();
+          const allowed = new Set<string>();
           details.forEach((d: any) => {
             const pid = String(d?.productId ?? d?.ProductId ?? '').trim();
             const qty = Number(d?.quantity ?? d?.Quantity ?? 0);
-            if (pid) qtyByProduct.set(pid, (qtyByProduct.get(pid) ?? 0) + qty);
+            if (pid) {
+              qtyByProduct.set(pid, (qtyByProduct.get(pid) ?? 0) + qty);
+              allowed.add(pid);
+            }
           });
+          if (isConfirmFlow) {
+            allowedProductIdsRef.current = allowed;
+          } else {
+            allowedProductIdsRef.current = new Set();
+          }
           withQty = withQty.map((p) => {
             const qty = qtyByProduct.get(p.id) ?? qtyByProduct.get(String(Number(p.id))) ?? 0;
             return { ...p, toOrder: qty };
           });
+        } else if (mounted) {
+          allowedProductIdsRef.current = new Set();
         }
 
         if (mounted) setProductsWithQty(withQty);
@@ -130,9 +162,10 @@ export function CatalogOrder({ storeId, orderId }: { storeId: string; orderId?: 
     })();
 
     return () => { mounted = false; };
-  }, [storeId, orderId]);
+  }, [storeId, orderId, isConfirmFlow]);
 
   const setQuantity = (productId: string, delta: number) => {
+    if (isConfirmFlow && !productIdAllowed(productId)) return;
     setProductsWithQty((prev) =>
       prev.map((p) => {
         if (p.id !== productId) return p;
@@ -143,6 +176,7 @@ export function CatalogOrder({ storeId, orderId }: { storeId: string; orderId?: 
   };
 
   const setQuantityAbsolute = (productId: string, value: number) => {
+    if (isConfirmFlow && !productIdAllowed(productId)) return;
     const raw = Number(value) || 0;
     const next = Math.max(0, Math.floor(raw));
     setProductsWithQty((prev) =>
@@ -215,6 +249,45 @@ export function CatalogOrder({ storeId, orderId }: { storeId: string; orderId?: 
     router.push('/order-review');
   };
 
+  const handleConfirmToPodNavarro = async () => {
+    if (!orderId) return;
+    setFlowError(null);
+    setContinuing(true);
+    try {
+      const order = await ordersApi.getOrderById(orderId);
+      const backendOrderId = String((order as any)?.backendOrderId ?? order?.id ?? orderId).trim();
+      const rows = productsWithQty
+        .filter((p) => p.toOrder > 0 && productIdAllowed(p.id))
+        .map((p) => ({
+          productId: String(p.id),
+          quantity: p.toOrder,
+          unitPrice: Number(p.price) || 0,
+        }));
+      if (rows.length === 0) {
+        setFlowError('Debe haber al menos una línea con cantidad en los productos del pedido.');
+        setContinuing(false);
+        return;
+      }
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(
+          `order_delivery_confirmation_${orderId}`,
+          JSON.stringify({ mode: 'confirm_catalog', source: 'catalog', items: rows })
+        );
+      }
+      const ok = await ordersApi.updateOrderStatus(backendOrderId, false);
+      if (!ok) {
+        setFlowError('No se pudo confirmar el pedido.');
+        setContinuing(false);
+        return;
+      }
+      router.push(`/capture-pod/${orderId}`);
+    } catch {
+      setFlowError('Error al continuar.');
+    } finally {
+      setContinuing(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
@@ -248,16 +321,30 @@ export function CatalogOrder({ storeId, orderId }: { storeId: string; orderId?: 
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => router.push('/select-store')}
+            onClick={() =>
+              isConfirmFlow && orderId
+                ? router.push(`/order/${orderId}`)
+                : router.push('/select-store')
+            }
             className="p-2 h-auto"
           >
             <ArrowLeft className="h-5 w-5" />
           </Button>
           <div>
             <h2 className="text-slate-900 text-sm">{storeInfo?.name ?? t('product_catalog')}</h2>
-            <p className="text-xs text-slate-500">{t('catalog_order_subtitle')}</p>
+            <p className="text-xs text-slate-500">
+              {isConfirmFlow
+                ? 'Confirmar: solo puedes ajustar cantidades de los productos del pedido. Luego POD obligatorio.'
+                : t('catalog_order_subtitle')}
+            </p>
           </div>
         </div>
+
+        {flowError ? (
+          <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">
+            {flowError}
+          </div>
+        ) : null}
 
         <div className="relative mb-3">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
@@ -364,7 +451,11 @@ export function CatalogOrder({ storeId, orderId }: { storeId: string; orderId?: 
               product ? (
               <div
                 key={product.id}
-                className="aspect-square min-w-[64px] min-h-[64px] rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 transition-colors flex flex-col items-center justify-center p-1.5 text-center"
+                className={`aspect-square min-w-[64px] min-h-[64px] rounded-lg border flex flex-col items-center justify-center p-1.5 text-center ${
+                  isConfirmFlow && !productIdAllowed(product.id)
+                    ? 'border-slate-200 bg-slate-100 opacity-55 pointer-events-none'
+                    : 'border-slate-200 bg-slate-50 hover:bg-slate-100 transition-colors'
+                }`}
               >
                 <div className="flex items-center justify-center gap-1 w-full mb-0.5">
                   {product.imageUrl ? (
@@ -395,31 +486,37 @@ export function CatalogOrder({ storeId, orderId }: { storeId: string; orderId?: 
                   ${product.price.toFixed(2)}
                 </span>
                 <div className="mt-1 flex items-center gap-0.5">
-                  <button
-                    type="button"
-                    onClick={() => setQuantity(product.id, -1)}
-                    className="w-4 h-4 rounded bg-white/80 border border-slate-200 text-slate-700 text-[10px] font-semibold leading-none"
-                    aria-label="Disminuir"
-                    disabled={product.toOrder <= 0}
-                  >
-                    −
-                  </button>
-                  <input
-                    type="tel"
-                    inputMode="numeric"
-                    value={product.toOrder}
-                    onChange={(e) => setQuantityAbsolute(product.id, e.target.value)}
-                    className="w-[28px] h-4 rounded bg-white/80 border border-slate-200 text-[10px] text-slate-900 font-semibold tabular-nums text-center px-0.5"
-                    aria-label="Cantidad"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setQuantity(product.id, 1)}
-                    className="w-4 h-4 rounded bg-white/80 border border-slate-200 text-slate-700 text-[10px] font-semibold leading-none"
-                    aria-label="Aumentar"
-                  >
-                    +
-                  </button>
+                  {isConfirmFlow && !productIdAllowed(product.id) ? (
+                    <span className="text-[8px] text-slate-400">—</span>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => setQuantity(product.id, -1)}
+                        className="w-4 h-4 rounded bg-white/80 border border-slate-200 text-slate-700 text-[10px] font-semibold leading-none"
+                        aria-label="Disminuir"
+                        disabled={product.toOrder <= 0}
+                      >
+                        −
+                      </button>
+                      <input
+                        type="tel"
+                        inputMode="numeric"
+                        value={product.toOrder}
+                        onChange={(e) => setQuantityAbsolute(product.id, e.target.value)}
+                        className="w-[28px] h-4 rounded bg-white/80 border border-slate-200 text-[10px] text-slate-900 font-semibold tabular-nums text-center px-0.5"
+                        aria-label="Cantidad"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setQuantity(product.id, 1)}
+                        className="w-4 h-4 rounded bg-white/80 border border-slate-200 text-slate-700 text-[10px] font-semibold leading-none"
+                        aria-label="Aumentar"
+                      >
+                        +
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
               ) : (
@@ -442,14 +539,25 @@ export function CatalogOrder({ storeId, orderId }: { storeId: string; orderId?: 
       {/* Fixed bottom CTA */}
       <div className="fixed bottom-20 left-0 right-0 bg-white border-t border-slate-200 p-4 shadow-lg">
         <div className="flex gap-3 max-w-2xl mx-auto">
-          <Button
-            onClick={handleReviewOrder}
-            className="flex-1 bg-indigo-600 hover:bg-indigo-700"
-            disabled={totalToOrder === 0}
-          >
-            <Send className="h-4 w-4 mr-2" />
-            {t('review_order')}
-          </Button>
+          {isConfirmFlow ? (
+            <Button
+              onClick={handleConfirmToPodNavarro}
+              className="flex-1 bg-indigo-600 hover:bg-indigo-700"
+              disabled={totalToOrder === 0 || continuing}
+            >
+              <Send className="h-4 w-4 mr-2" />
+              {continuing ? 'Procesando…' : 'Continuar a POD (confirmar)'}
+            </Button>
+          ) : (
+            <Button
+              onClick={handleReviewOrder}
+              className="flex-1 bg-indigo-600 hover:bg-indigo-700"
+              disabled={totalToOrder === 0}
+            >
+              <Send className="h-4 w-4 mr-2" />
+              {t('review_order')}
+            </Button>
+          )}
         </div>
       </div>
     </div>

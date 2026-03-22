@@ -9,6 +9,7 @@ import { ordersApi, OrderForUI } from '@/shared/api/orders-api';
 import { storesApi } from '@/shared/api/stores-api';
 import { citiesApi } from '@/shared/api/cities-api';
 import { histpricesApi } from '@/shared/api/histprices-api';
+import { productsApi } from '@/shared/api/products-api';
 import { Card, CardContent } from '@/shared/ui/card';
 import { Badge } from '@/shared/ui/badge';
 import { Button } from '@/shared/ui/button';
@@ -31,9 +32,15 @@ export function PendingPOD() {
       setLoading(true);
       if (user?.id) {
         let all = await ordersApi.getOrdersByUser(user.id);
-        const pending = all.filter(
-          (o) => ((o.status || '').toLowerCase() === 'pending' && (o.podRequired !== false) && !o.podUploaded)
-        );
+        const productFamilyCache = new Map<string, string>();
+        const pending = all.filter((o) => {
+          const status = (o.status || '').toLowerCase();
+          return (
+            (status === 'confirmed' || status === 'completed') &&
+            o.podRequired !== false &&
+            !o.podUploaded
+          );
+        });
         // Mismo criterio que historial: rellenar total con precios de histprices cuando sea 0
         const enriched = await Promise.all(
           pending.map(async (order): Promise<OrderForUI> => {
@@ -44,8 +51,23 @@ export function PendingPOD() {
               const enrichedItems = await Promise.all(
                 items.map(async (item: any) => {
                   let price = Number(item.price) || 0;
-                  if (item.productId && !price) {
-                    price = await histpricesApi.getLatest(String(item.productId)); // último del historial
+                  if (!price) {
+                    const inlineFamilyId = String(
+                      item?.familyId ?? item?.FamilyId ?? item?.categoryId ?? item?.CategoryId ?? ''
+                    ).trim();
+                    let familyId = inlineFamilyId;
+                    if (!familyId && item?.productId) {
+                      const productId = String(item.productId).trim();
+                      familyId = productFamilyCache.get(productId) || '';
+                      if (!familyId) {
+                        const product = await productsApi.getById(productId);
+                        familyId = String(product?.familyId ?? product?.categoryId ?? '').trim();
+                        if (familyId) productFamilyCache.set(productId, familyId);
+                      }
+                    }
+                    if (familyId) {
+                      price = await histpricesApi.getLatest(familyId); // último del historial por familia
+                    }
                   }
                   return { ...item, price };
                 })
@@ -123,7 +145,7 @@ export function PendingPOD() {
             const displayAddress = (cached?.address || order.storeAddress || '').trim();
             const displayCity = (cached?.city || '').trim();
             const displayPo = (order.po || '').trim();
-            const titleMain = displayPo ? `PO - ${displayPo}` : displayStoreName;
+            const titleMain = displayPo ? `${displayPo}` : displayStoreName;
             const subtitleStore = displayPo ? displayStoreName : null;
             const computedTotal = order.items?.length
               ? order.items.reduce((s: number, i: any) => s + (i.quantity ?? i.toOrder ?? 0) * (Number(i.price) || 0), 0)

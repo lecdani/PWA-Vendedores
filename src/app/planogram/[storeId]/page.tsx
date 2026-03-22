@@ -7,14 +7,15 @@ export default async function PlanogramPage({
   searchParams,
 }: {
   params: Promise<{ storeId: string }>;
-  searchParams: Promise<{ orderId?: string }>;
+  searchParams: Promise<{ orderId?: string; mode?: string }>;
 }) {
   const { storeId } = await params;
-  const { orderId } = await searchParams;
+  const { orderId, mode } = await searchParams;
+  const flowMode = mode === 'invoice' ? 'invoice' : 'create';
   return (
     <ProtectedRoute>
       <MainLayout>
-        <Planogram storeId={storeId} orderId={orderId ?? undefined} />
+        <Planogram storeId={storeId} orderId={orderId ?? undefined} mode={flowMode} />
       </MainLayout>
     </ProtectedRoute>
   );

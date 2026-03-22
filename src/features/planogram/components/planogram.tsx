@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { ArrowLeft, Send, Grid3x3, Loader2, Package } from 'lucide-react';
 import { useLanguage } from '@/shared/i18n/language-provider';
@@ -34,7 +34,15 @@ export interface ProductPosition {
   imageUrl?: string;
 }
 
-export function Planogram({ storeId, orderId }: { storeId: string; orderId?: string }) {
+export function Planogram({
+  storeId,
+  orderId,
+  mode = 'create',
+}: {
+  storeId: string;
+  orderId?: string;
+  mode?: 'create' | 'invoice';
+}) {
   const { t } = useLanguage();
   const router = useRouter();
   const [storeInfo, setStoreInfo] = useState<any>(null);
@@ -45,8 +53,21 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
   const [planogramName, setPlanogramName] = useState<string | null>(null);
   const [allCategories, setAllCategories] = useState<CategoryForUI[]>([]);
   const [limitError, setLimitError] = useState<string | null>(null);
+  const [flowError, setFlowError] = useState<string | null>(null);
+  const [continuing, setContinuing] = useState(false);
+  /** En modo factura: solo estos productId pueden tener cantidad > 0 (el pedido inicial no cambia). */
+  const allowedProductIdsRef = useRef<Set<string>>(new Set());
 
   const MAX_QTY_PER_PRODUCT_PLANOGRAM = 10;
+  const isInvoiceFlow = mode === 'invoice' && !!orderId;
+
+  const productIdAllowed = (productId: string): boolean => {
+    if (!isInvoiceFlow) return true;
+    const pid = String(productId).trim();
+    const allowed = allowedProductIdsRef.current;
+    if (allowed.size === 0) return false;
+    return allowed.has(pid) || allowed.has(String(Number(pid)));
+  };
 
   useEffect(() => {
     if (storeId) {
@@ -156,11 +177,20 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
         if (orderId && mounted) {
           const details = await ordersApi.getOrderDetailsByOrderIdRaw(orderId);
           const qtyByProduct = new Map<string, number>();
+          const allowed = new Set<string>();
           details.forEach((d: any) => {
-            const pid = String(d?.productId ?? d?.ProductId ?? '');
+            const pid = String(d?.productId ?? d?.ProductId ?? '').trim();
             const qty = Number(d?.quantity ?? d?.Quantity ?? 0);
-            if (pid) qtyByProduct.set(pid, (qtyByProduct.get(pid) ?? 0) + qty);
+            if (pid) {
+              qtyByProduct.set(pid, (qtyByProduct.get(pid) ?? 0) + qty);
+              allowed.add(pid);
+            }
           });
+          if (isInvoiceFlow) {
+            allowedProductIdsRef.current = allowed;
+          } else {
+            allowedProductIdsRef.current = new Set();
+          }
           const merged = grid.map((item) => {
             const qty = item.productId
               ? (qtyByProduct.get(item.productId) ?? qtyByProduct.get(String(Number(item.productId))) ?? 0)
@@ -169,6 +199,7 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
           });
           setPlanogramData(merged);
         } else {
+          allowedProductIdsRef.current = new Set();
           setPlanogramData(grid);
         }
       } catch (e) {
@@ -181,7 +212,7 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
     return () => {
       mounted = false;
     };
-  }, [storeId, orderId, t]);
+  }, [storeId, orderId, t, isInvoiceFlow]);
 
   const setQtyForCell = (row: number, col: number, nextQty: number) => {
     const raw = Number(nextQty) || 0;
@@ -193,6 +224,7 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
       if (idx < 0) return prev;
       const current = prev[idx];
       if (!current.productId) return prev;
+      if (isInvoiceFlow && !productIdAllowed(current.productId)) return prev;
 
       const next = [...prev];
       next[idx] = { ...current, toOrder: qty };
@@ -203,12 +235,14 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
   const incQty = (row: number, col: number) => {
     const current = planogramData.find((p) => p.row === row && p.col === col);
     if (!current || !current.productId) return;
+    if (isInvoiceFlow && !productIdAllowed(current.productId)) return;
     setQtyForCell(row, col, (current.toOrder || 0) + 1);
   };
 
   const decQty = (row: number, col: number) => {
     const current = planogramData.find((p) => p.row === row && p.col === col);
     if (!current || !current.productId) return;
+    if (isInvoiceFlow && !productIdAllowed(current.productId)) return;
     setQtyForCell(row, col, (current.toOrder || 0) - 1);
   };
 
@@ -221,6 +255,8 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
   const getCellStyle = (item: ProductPosition) => {
     const hasProduct = !!item.productId;
     if (!hasProduct) return 'bg-slate-400 border-slate-500'; // vacío: solo más oscuro
+    const locked = isInvoiceFlow && item.productId && !productIdAllowed(item.productId);
+    if (locked) return 'bg-slate-200 border-slate-300 opacity-60';
     if (item.toOrder > 0) return 'bg-indigo-50 border-indigo-300';
     return 'bg-slate-100 border-slate-200';
   };
@@ -234,6 +270,45 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
       editOrderId: orderId ?? undefined,
     });
     router.push('/order-review');
+  };
+
+  const handleContinueToPodAndInvoice = async () => {
+    if (!orderId) return;
+    setFlowError(null);
+    setContinuing(true);
+    try {
+      const order = await ordersApi.getOrderById(orderId);
+      const backendOrderId = String((order as any)?.backendOrderId ?? order?.id ?? orderId).trim();
+      const rows = planogramData
+        .filter((i) => i.productId && i.toOrder > 0 && productIdAllowed(i.productId))
+        .map((i) => ({
+          productId: String(i.productId),
+          quantity: i.toOrder,
+          unitPrice: Number(i.price) || 0,
+        }));
+      if (rows.length === 0) {
+        setFlowError('Indica al menos una cantidad entregada en los productos del pedido.');
+        setContinuing(false);
+        return;
+      }
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(
+          `order_delivery_confirmation_${orderId}`,
+          JSON.stringify({ mode: 'invoice', source: 'planogram', items: rows })
+        );
+      }
+      const ok = await ordersApi.updateOrderStatus(backendOrderId, false);
+      if (!ok) {
+        setFlowError('No se pudo confirmar el pedido. Intenta de nuevo.');
+        setContinuing(false);
+        return;
+      }
+      router.push(`/capture-pod/${orderId}`);
+    } catch {
+      setFlowError('Error al continuar. Revisa la conexión.');
+    } finally {
+      setContinuing(false);
+    }
   };
 
   if (loading) {
@@ -270,14 +345,22 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => router.push('/select-store')}
+              onClick={() =>
+                isInvoiceFlow && orderId
+                  ? router.push(`/order/${orderId}`)
+                  : router.push('/select-store')
+              }
               className="p-2 h-auto"
             >
               <ArrowLeft className="h-5 w-5" />
             </Button>
             <div>
               <h2 className="text-slate-900 text-sm">{storeInfo?.name ?? t('product_organization')}</h2>
-              <p className="text-xs text-slate-500">{planogramName ?? t('planogram')}</p>
+              <p className="text-xs text-slate-500">
+                {isInvoiceFlow
+                  ? 'Facturar: ajusta cantidades entregadas (solo productos del pedido). Luego POD.'
+                  : (planogramName ?? t('planogram'))}
+              </p>
             </div>
           </div>
           
@@ -313,6 +396,11 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
         {limitError && (
           <div className="mb-3">
             <p className="text-xs text-red-600 font-medium text-right">{limitError}</p>
+          </div>
+        )}
+        {flowError && (
+          <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">
+            {flowError}
           </div>
         )}
 
@@ -363,30 +451,36 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
                     </span>
 
                     <div className="mt-1 flex items-center gap-0.5">
-                      <button
-                        type="button"
-                        onClick={() => decQty(item.row, item.col)}
-                        className="w-4 h-4 rounded bg-white/80 border border-slate-200 text-slate-700 text-[10px] font-semibold leading-none"
-                        aria-label="Disminuir"
-                      >
-                        −
-                      </button>
-                      <input
-                        type="tel"
-                        inputMode="numeric"
-                        value={item.toOrder > 0 ? item.toOrder : 0}
-                        onChange={(e) => setQtyForCell(item.row, item.col, Number(e.target.value || 0))}
-                        className="w-[28px] h-4 rounded bg-white/80 border border-slate-200 text-[9px] text-slate-900 font-semibold tabular-nums text-center px-0.5"
-                        aria-label="Cantidad"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => incQty(item.row, item.col)}
-                        className="w-4 h-4 rounded bg-white/80 border border-slate-200 text-slate-700 text-[10px] font-semibold leading-none"
-                        aria-label="Aumentar"
-                      >
-                        +
-                      </button>
+                      {isInvoiceFlow && !productIdAllowed(item.productId) ? (
+                        <span className="text-[8px] text-slate-400 px-0.5">—</span>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => decQty(item.row, item.col)}
+                            className="w-4 h-4 rounded bg-white/80 border border-slate-200 text-slate-700 text-[10px] font-semibold leading-none"
+                            aria-label="Disminuir"
+                          >
+                            −
+                          </button>
+                          <input
+                            type="tel"
+                            inputMode="numeric"
+                            value={item.toOrder > 0 ? item.toOrder : 0}
+                            onChange={(e) => setQtyForCell(item.row, item.col, Number(e.target.value || 0))}
+                            className="w-[28px] h-4 rounded bg-white/80 border border-slate-200 text-[9px] text-slate-900 font-semibold tabular-nums text-center px-0.5"
+                            aria-label="Cantidad"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => incQty(item.row, item.col)}
+                            className="w-4 h-4 rounded bg-white/80 border border-slate-200 text-slate-700 text-[10px] font-semibold leading-none"
+                            aria-label="Aumentar"
+                          >
+                            +
+                          </button>
+                        </>
+                      )}
                     </div>
                   </>
                 ) : null}
@@ -448,14 +542,25 @@ export function Planogram({ storeId, orderId }: { storeId: string; orderId?: str
       {/* Action Buttons */}
       <div className="fixed bottom-20 left-0 right-0 bg-white border-t border-slate-200 p-4 shadow-lg">
         <div className="flex gap-3 max-w-2xl mx-auto">
-          <Button
-            onClick={handleSendOrder}
-            className="flex-1 bg-indigo-600 hover:bg-indigo-700"
-            disabled={totalToOrder === 0}
-          >
-            <Send className="h-4 w-4 mr-2" />
-            {t('review_order')}
-          </Button>
+          {isInvoiceFlow ? (
+            <Button
+              onClick={handleContinueToPodAndInvoice}
+              className="flex-1 bg-indigo-600 hover:bg-indigo-700"
+              disabled={totalToOrder === 0 || continuing}
+            >
+              <Send className="h-4 w-4 mr-2" />
+              {continuing ? 'Procesando…' : 'Continuar a POD y facturar'}
+            </Button>
+          ) : (
+            <Button
+              onClick={handleSendOrder}
+              className="flex-1 bg-indigo-600 hover:bg-indigo-700"
+              disabled={totalToOrder === 0}
+            >
+              <Send className="h-4 w-4 mr-2" />
+              {t('review_order')}
+            </Button>
+          )}
         </div>
       </div>
     </div>

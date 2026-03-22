@@ -29,6 +29,7 @@ export function CapturePOD({ orderId }: { orderId: string }) {
   const [orderLoadError, setOrderLoadError] = useState(false);
   const [podUploadError, setPodUploadError] = useState<string | null>(null);
   const [podSuccessMessage, setPodSuccessMessage] = useState<string | null>(null);
+  const [storeHasPlanogram, setStoreHasPlanogram] = useState<boolean>(true);
 
   // Cargar pedido desde la API, resolver tienda y total (como en listado de pedidos)
   useEffect(() => {
@@ -52,7 +53,13 @@ export function CapturePOD({ orderId }: { orderId: string }) {
             let productName = (item.productName || item.sku || '').trim();
             let price = Number(item.price) || 0;
             if (item.productId) {
-              if (!price) price = await histpricesApi.getLatest(item.productId); // último del historial
+              if (!price) {
+                const product = await productsApi.getById(item.productId);
+                const familyId = String(
+                  product?.familyId ?? product?.categoryId ?? ''
+                ).trim();
+                price = familyId ? await histpricesApi.getLatest(familyId) : 0;
+              }
               if (!productName) {
                 const product = await productsApi.getById(item.productId);
                 if (product) productName = product.name || product.code || product.sku || '';
@@ -68,7 +75,10 @@ export function CapturePOD({ orderId }: { orderId: string }) {
       let storeNameResolved: string | undefined;
       if (orderToUse.storeId && looksLikeId) {
         const store = await storesApi.fetchStoreById(orderToUse.storeId);
-        if (store?.name) storeNameResolved = store.name;
+        if (store) {
+          if (store?.name) storeNameResolved = store.name;
+          setStoreHasPlanogram(store.hasPlanogram !== false);
+        }
       } else if (name) {
         storeNameResolved = name;
       }
@@ -119,6 +129,8 @@ export function CapturePOD({ orderId }: { orderId: string }) {
   };
 
   const handleSubmit = async () => {
+    const status = String(orderData?.status || '').toLowerCase();
+
     if (!podImage || !podFile) {
       setPodUploadError(t('pod_image_required') || 'Debes agregar una foto o imagen del comprobante de entrega.');
       return;
@@ -130,37 +142,82 @@ export function CapturePOD({ orderId }: { orderId: string }) {
 
     try {
       const backendOrderId = orderData?.backendOrderId ?? orderData?.id ?? orderId;
-      let invoiceId: string | number | null = orderData?.invoiceId ?? null;
-      if (invoiceId == null) invoiceId = await ordersApi.getInvoiceIdForOrder(orderId);
-      if (invoiceId == null) invoiceId = await ordersApi.getInvoiceIdForOrder(String(backendOrderId));
-
-      if (invoiceId != null) {
-        const { fileName } = await uploadImage(podFile);
-        const podOk = await ordersApi.uploadPODForInvoice({
-          invoiceId,
-          fileName,
-          notes: notes || undefined,
-        });
-        if (!podOk) {
-          setPodUploadError(t('pod_upload_failed') || 'No se pudo guardar el comprobante. Revisa tu conexión e intenta de nuevo.');
+      if (status === 'initial' || status === 'pending') {
+        const confirmed = await ordersApi.updateOrderStatus(backendOrderId, false);
+        if (!confirmed) {
+          setPodUploadError('No se pudo confirmar el pedido para facturacion.');
           setUploading(false);
           return;
         }
-      } else {
-        setPodUploadError(t('pod_upload_failed') || 'No se pudo guardar el comprobante. No hay factura asociada a este pedido.');
+      }
+
+      let deliveredItems: Array<{ productId: string; quantity: number; unitPrice?: number }> = [];
+      if (typeof window !== 'undefined') {
+        const saved = window.localStorage.getItem(`order_delivery_confirmation_${orderId}`);
+        if (saved) {
+          try {
+            const parsed = JSON.parse(saved);
+            deliveredItems = Array.isArray(parsed?.items) ? parsed.items : [];
+          } catch {
+            deliveredItems = [];
+          }
+        }
+      }
+
+      /** Catálogo / sin planograma: mismo POST de factura que planograma; si no hay localStorage, usar líneas del pedido. */
+      if (deliveredItems.length === 0 && orderData?.items?.length) {
+        deliveredItems = orderData.items
+          .map((it: any) => {
+            const productId = String(it.productId ?? it.ProductId ?? '').trim();
+            const quantity = Number(it.quantity ?? it.toOrder ?? it.Quantity ?? 0) || 0;
+            const unitPrice = Number(it.price ?? it.unitPrice ?? 0) || 0;
+            return { productId, quantity, unitPrice };
+          })
+          .filter((it) => it.productId && it.quantity > 0);
+      }
+
+      const { fileName } = await uploadImage(podFile);
+      if (!fileName?.trim()) {
+        setPodUploadError(t('pod_upload_failed') || 'No se pudo subir la imagen.');
         setUploading(false);
         return;
       }
 
-      // Pasar pedido a estado \"entregado\" en backend: PUT /orders/order/{id}/status con body = true
+      if (!deliveredItems.length) {
+        setPodUploadError(
+          storeHasPlanogram
+            ? 'Faltan las cantidades de facturación. Vuelve al planograma y usa «Continuar a POD y facturar».'
+            : t('pod_catalog_missing_lines')
+        );
+        setUploading(false);
+        return;
+      }
+
+      const invoiceId = await ordersApi.ensureInvoiceForOrder(backendOrderId, deliveredItems, {
+        podFileName: fileName,
+        notes: notes || undefined,
+      });
+      if (invoiceId == null) {
+        setPodUploadError(
+          'No se pudo crear la factura con POD. Revisa la conexión o los datos del pedido.'
+        );
+        setUploading(false);
+        return;
+      }
       const statusOk = await ordersApi.updateOrderStatus(backendOrderId, true);
       if (!statusOk) {
-        setPodUploadError(t('pod_upload_failed') || 'Comprobante guardado pero no se pudo actualizar el estado del pedido. Revisa el detalle del pedido.');
+        setPodUploadError(
+          t('pod_upload_failed') ||
+            'Comprobante guardado pero no se pudo actualizar el estado del pedido. Revisa el detalle del pedido.'
+        );
         setUploading(false);
         return;
       }
 
       setPodSuccessMessage(t('pod_success') || 'Comprobante cargado correctamente. Redirigiendo al pedido...');
+      if (typeof window !== 'undefined') {
+        window.localStorage.removeItem(`order_delivery_confirmation_${orderId}`);
+      }
       await new Promise((resolve) => setTimeout(resolve, 1800));
       router.refresh();
       router.push(`/order/${orderId}`);

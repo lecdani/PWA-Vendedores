@@ -11,6 +11,18 @@ export interface OrderItemInput {
   price: number;
 }
 
+function generateUuidV4(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  // Fallback UUID v4 when randomUUID is unavailable
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = Math.floor(Math.random() * 16);
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 export interface CreateOrderInput {
   storeId: string;
   storeName?: string;
@@ -34,6 +46,12 @@ export interface CreatedOrderResult {
   errorMessage?: string;
 }
 
+export interface DeliveredItemInput {
+  productId: string;
+  quantity: number;
+  unitPrice?: number;
+}
+
 async function safePost<T>(endpoint: string, body: unknown): Promise<T | null> {
   try {
     return await apiClient.post<T>(endpoint, body);
@@ -50,16 +68,6 @@ async function safePut<T>(endpoint: string, body: unknown): Promise<T | null> {
   } catch (error) {
     const err = error as ApiError;
     console.error('[orders-api] PUT', endpoint, 'failed:', (err as any)?.message ?? err);
-    return null;
-  }
-}
-
-async function safePatch<T>(endpoint: string, body: unknown): Promise<T | null> {
-  try {
-    return await apiClient.patch<T>(endpoint, body);
-  } catch (error) {
-    const err = error as ApiError;
-    console.error('[orders-api] PATCH', endpoint, 'failed:', (err as any)?.message ?? err);
     return null;
   }
 }
@@ -95,6 +103,47 @@ function extractFirstArray(obj: any, depth = 0): any[] | null {
     if (nested && nested.length > 0) return nested;
   }
   return null;
+}
+
+/**
+ * Recorre data/value/invoice/result típicos de .NET para leer cabecera, líneas y POD
+ * aunque vengan anidados (evita factura “vacía” en UI y POD solo en el wrapper).
+ */
+function peelInvoiceLayers(obj: any, maxDepth = 8): any[] {
+  const out: any[] = [];
+  const seen = new Set<any>();
+  let cur: any = obj;
+  let d = 0;
+  while (cur != null && typeof cur === 'object' && d < maxDepth) {
+    if (seen.has(cur)) break;
+    seen.add(cur);
+    out.push(cur);
+    const next =
+      cur?.data ??
+      cur?.Data ??
+      cur?.value ??
+      cur?.Value ??
+      cur?.invoice ??
+      cur?.Invoice ??
+      cur?.result ??
+      cur?.Result ??
+      null;
+    if (next == null || typeof next !== 'object') break;
+    cur = next;
+    d++;
+  }
+  return out;
+}
+
+function firstPositiveNumericFromLayers(layers: any[], keys: string[]): number {
+  for (const L of layers) {
+    if (!L || typeof L !== 'object') continue;
+    for (const k of keys) {
+      const n = Number((L as any)[k]);
+      if (Number.isFinite(n) && n > 0) return n;
+    }
+  }
+  return 0;
 }
 
 /** Normaliza la respuesta de GET /invoice/invoices (array directo o { data/invoices/Data/Invoices: [...] }). */
@@ -138,9 +187,6 @@ function unwrapInvoiceItem(x: any): any {
 async function getInvoiceList(): Promise<any[]> {
   const list = await safeGet<any>('/invoice/invoices');
   const arr = list != null ? normalizeInvoiceList(list) : [];
-  if (typeof process !== 'undefined' && process.env.NODE_ENV === 'development' && arr.length === 0 && list != null) {
-    console.warn('[orders-api] GET /invoice/invoices devolvió datos pero la lista normalizada está vacía. Keys del response:', list && typeof list === 'object' ? Object.keys(list) : typeof list);
-  }
   return arr;
 }
 
@@ -163,58 +209,138 @@ async function getInvoiceById(invoiceId: string): Promise<any | null> {
  */
 function getPodFromInvoice(inv: any): string {
   if (inv == null) return '';
-  const root = inv?.data ?? inv?.invoice ?? inv?.value ?? inv?.result ?? inv;
-  const v =
-    root?.pod ??
-    root?.Pod ??
-    root?.POD ??
-    root?.podUrl ??
-    root?.PodUrl ??
-    root?.podImageUrl ??
-    root?.PodImageUrl ??
-    root?.podPath ??
-    root?.PodPath ??
-    root?.ruta ??
-    root?.Ruta ??
-    root?.imagePath ??
-    root?.ImagePath ??
-    root?.filePath ??
-    root?.FilePath ??
-    root?.fileName ??
-    root?.FileName ??
-    root?.PodFileName ??
-    root?.url ??
-    root?.Url ??
-    root?.link ??
-    root?.Link ??
-    root?.Reference ??
-    root?.reference ??
-    inv?.pod ??
-    inv?.Pod ??
-    inv?.POD ??
-    inv?.podUrl ??
-    inv?.PodUrl ??
-    inv?.podPath ??
-    inv?.podImageUrl ??
-    inv?.ruta ??
-    inv?.url ??
-    inv?.link;
-  const str = typeof v === 'string' ? v.trim() : v != null && v !== '' ? String(v).trim() : '';
-  if (str) return str;
-  const base64 = root?.podBase64 ?? root?.PodBase64 ?? inv?.podBase64 ?? inv?.PodBase64;
-  if (typeof base64 === 'string' && base64.length > 0) return `data:image/png;base64,${base64}`;
+  const podKeys = [
+    'pod',
+    'Pod',
+    'POD',
+    'podUrl',
+    'PodUrl',
+    'podImageUrl',
+    'PodImageUrl',
+    'podPath',
+    'PodPath',
+    'ruta',
+    'Ruta',
+    'imagePath',
+    'ImagePath',
+    'filePath',
+    'FilePath',
+    'fileName',
+    'FileName',
+    'PodFileName',
+    'podFileName',
+    'url',
+    'Url',
+    'link',
+    'Link',
+    'Reference',
+    'reference',
+  ] as const;
+  const layers = peelInvoiceLayers(inv);
+  const seen = new Set<any>();
+  for (const root of layers) {
+    if (root == null || typeof root !== 'object' || seen.has(root)) continue;
+    seen.add(root);
+    for (const pk of podKeys) {
+      const v = (root as any)[pk];
+      const str = typeof v === 'string' ? v.trim() : v != null && v !== '' ? String(v).trim() : '';
+      if (str) return str;
+    }
+    const base64 = (root as any)?.podBase64 ?? (root as any)?.PodBase64;
+    if (typeof base64 === 'string' && base64.length > 0) return `data:image/png;base64,${base64}`;
+  }
+  return '';
+}
+
+/** PO en payload de factura (el backend puede devolverlo solo en la factura). */
+function getPoFromInvoice(raw: any): string {
+  if (raw == null) return '';
+  const poKeys = [
+    'po',
+    'Po',
+    'PO',
+    'purchaseOrder',
+    'PurchaseOrder',
+    'purchase_order',
+    'Purchase_Order',
+    'orderPo',
+    'OrderPo',
+    'pO',
+  ] as const;
+  const layers = peelInvoiceLayers(raw);
+  const seen = new Set<any>();
+  for (const root of layers) {
+    if (root == null || typeof root !== 'object' || seen.has(root)) continue;
+    seen.add(root);
+    for (const pk of poKeys) {
+      const v = (root as any)[pk];
+      const str = typeof v === 'string' ? v.trim() : v != null && v !== '' ? String(v).trim() : '';
+      if (str) return str;
+    }
+  }
   return '';
 }
 
 /** Extrae cantidad de un registro de detalle (diversos nombres del backend). */
 function detailQuantity(d: any): number {
-  const n = Number(d?.quantity ?? d?.Quantity ?? d?.qty ?? d?.Qty ?? d?.amount ?? d?.Amount ?? 0);
-  return Number.isFinite(n) ? n : 0;
+  const n = Number(
+    d?.quantity ??
+      d?.Quantity ??
+      d?.qty ??
+      d?.Qty ??
+      d?.invoiceQty ??
+      d?.InvoiceQty ??
+      d?.deliveredQuantity ??
+      d?.DeliveredQuantity ??
+      d?.deliveredQty ??
+      d?.DeliveredQty ??
+      d?.units ??
+      d?.Units ??
+      d?.pcs ??
+      d?.Pcs ??
+      d?.lineQuantity ??
+      d?.LineQuantity ??
+      d?.orderQuantity ??
+      d?.OrderQuantity ??
+      d?.count ??
+      d?.Count ??
+      d?.toOrder ??
+      d?.ToOrder ??
+      0
+  );
+  if (Number.isFinite(n) && n > 0) return n;
+  /** Algunos backends solo envían subtotal + precio unitario */
+  const sub = Number(
+    d?.subtotal ?? d?.Subtotal ?? d?.SubTotal ?? d?.amount ?? d?.Amount ?? d?.lineTotal ?? d?.LineTotal ?? 0
+  );
+  const up = Number(d?.unitPrice ?? d?.UnitPrice ?? d?.price ?? d?.Price ?? d?.unit_price ?? 0);
+  if (sub > 0 && up > 0) {
+    const q = sub / up;
+    if (Number.isFinite(q) && q > 0) return Math.round(q * 1000) / 1000;
+  }
+  return 0;
 }
 
 /** Extrae subtotal/importe de un registro de detalle (diversos nombres del backend). */
 function detailSubtotal(d: any): number {
-  const n = Number(d?.subtotal ?? d?.Subtotal ?? d?.SubTotal ?? d?.amount ?? d?.Amount ?? d?.total ?? d?.Total ?? d?.price ?? d?.Price ?? 0);
+  const n = Number(
+    d?.subtotal ??
+      d?.Subtotal ??
+      d?.SubTotal ??
+      d?.lineTotal ??
+      d?.LineTotal ??
+      d?.amount ??
+      d?.Amount ??
+      d?.total ??
+      d?.Total ??
+      d?.price ??
+      d?.Price ??
+      0
+  );
+  if (Number.isFinite(n) && n > 0) return n;
+  const qty = detailQuantity(d);
+  const up = Number(d?.unitPrice ?? d?.UnitPrice ?? 0);
+  if (qty > 0 && up > 0) return qty * up;
   return Number.isFinite(n) ? n : 0;
 }
 
@@ -236,12 +362,177 @@ function detailProductName(d: any): string {
   return (typeof fromDetail === 'string' ? fromDetail : '').trim();
 }
 
+/** ¿Parece una línea de pedido/factura? (producto identificable; cantidades pueden venir solo en subtotal/precio). */
+function isLineLikeRecord(el: any): boolean {
+  if (el == null || typeof el !== 'object' || Array.isArray(el)) return false;
+  const pid = detailProductId(el);
+  const sku = String(el?.sku ?? el?.Sku ?? '').trim();
+  return pid.length > 0 || sku.length > 0;
+}
+
+/**
+ * Línea de factura en APIs raras: a veces no traen productId/sku pero sí importe o texto.
+ * (El POD se lee bien en el mismo JSON porque se escanean más claves — esto alinea líneas con eso.)
+ */
+function isInvoiceLineCandidate(el: any): boolean {
+  if (el == null || typeof el !== 'object' || Array.isArray(el)) return false;
+  if (isLineLikeRecord(el)) return true;
+  if (el?.product && typeof el.product === 'object') return true;
+  if (el?.Product && typeof el.Product === 'object') return true;
+  const nm = (
+    detailProductName(el) ||
+    String(el?.code ?? el?.Code ?? el?.itemCode ?? el?.ItemCode ?? el?.description ?? el?.Description ?? '').trim()
+  );
+  const sub = detailSubtotal(el);
+  const q = detailQuantity(el);
+  if (nm.length > 0 && (sub > 0 || q > 0)) return true;
+  /** Línea típica de detalle de factura con id propio, aunque falte nombre/SKU */
+  const lineId = String(
+    el?.invoiceDetailId ??
+      el?.InvoiceDetailId ??
+      el?.orderDetailId ??
+      el?.OrderDetailId ??
+      el?.lineNumber ??
+      el?.LineNumber ??
+      ''
+  ).trim();
+  if (lineId.length > 0 && (sub > 0 || q > 0)) return true;
+  /** Cantidad e importe de línea (sin confundir con un solo monto suelto) */
+  if (q > 0 && sub > 0) return true;
+  return false;
+}
+
+/**
+ * Recorre todo el árbol del JSON de factura (como hace getPodFromInvoice con las capas) y elige el array
+ * más largo que parezca líneas de factura. Cubre hermanos de `data`, nombres raros de propiedad, etc.
+ */
+function findBestInvoiceDetailsArray(raw: any): any[] {
+  if (raw == null) return [];
+  const buckets: any[][] = [];
+  const seenNodes = new WeakSet<object>();
+  const seenArrays = new Set<any>();
+
+  function visit(obj: any, depth: number) {
+    if (obj == null || depth > 16) return;
+    if (typeof obj !== 'object') return;
+    if (seenNodes.has(obj)) return;
+    seenNodes.add(obj);
+    if (Array.isArray(obj)) {
+      for (const el of obj) visit(el, depth + 1);
+      return;
+    }
+    for (const v of Object.values(obj)) {
+      if (!Array.isArray(v) || v.length === 0 || seenArrays.has(v)) continue;
+      const first = v[0];
+      if (first && typeof first === 'object' && !Array.isArray(first) && isInvoiceLineCandidate(first)) {
+        seenArrays.add(v);
+        buckets.push(v);
+      }
+    }
+    for (const v of Object.values(obj)) {
+      if (v != null && typeof v === 'object') visit(v, depth + 1);
+    }
+  }
+
+  visit(raw, 0);
+  if (buckets.length === 0) return [];
+  buckets.sort((a, b) => b.length - a.length);
+  return buckets[0];
+}
+
+/** Busca en profundidad el array más largo de objetos tipo línea (factura/pedido anidados raros). */
+function deepFindLongestLineItemArray(node: any, depth: number, maxDepth: number): any[] {
+  if (node == null || depth > maxDepth) return [];
+  if (Array.isArray(node)) {
+    if (node.length > 0 && isLineLikeRecord(node[0])) return node;
+    return [];
+  }
+  if (typeof node !== 'object') return [];
+  let best: any[] = [];
+  for (const v of Object.values(node)) {
+    const got = deepFindLongestLineItemArray(v, depth + 1, maxDepth);
+    if (got.length > best.length) best = got;
+  }
+  return best;
+}
+
+const ORDER_OR_INVOICE_LINE_KEYS = [
+  'invoiceDetails',
+  'InvoiceDetails',
+  'orderDetails',
+  'OrderDetails',
+  'details',
+  'Details',
+  'items',
+  'Items',
+  'invoiceItems',
+  'InvoiceItems',
+  'orderLines',
+  'OrderLines',
+  'lines',
+  'Lines',
+  'invoiceLines',
+  'InvoiceLines',
+  'orderDetailList',
+  'OrderDetailList',
+  'orderDetailDtos',
+  'OrderDetailDtos',
+  'lineItems',
+  'LineItems',
+  'detalles',
+  'Detalles',
+  'products',
+  'Products',
+  'rows',
+  'Rows',
+  'detailLines',
+  'DetailLines',
+] as const;
+
+/** Líneas de pedido desde cualquier forma habitual del GET /orders/orders/{id}. */
+function extractOrderDetailsFromOrderPayload(payload: any): any[] {
+  if (payload == null) return [];
+  if (Array.isArray(payload)) return payload.length > 0 && isLineLikeRecord(payload[0]) ? payload : [];
+  const layers = peelInvoiceLayers(payload);
+  const seenLayers = new Set<any>();
+  for (const layer of layers) {
+    if (!layer || typeof layer !== 'object' || seenLayers.has(layer)) continue;
+    seenLayers.add(layer);
+    for (const k of ORDER_OR_INVOICE_LINE_KEYS) {
+      const v = (layer as any)[k];
+      if (Array.isArray(v) && v.length) return v;
+    }
+  }
+  for (const k of ORDER_OR_INVOICE_LINE_KEYS) {
+    const v = (payload as any)[k];
+    if (Array.isArray(v) && v.length) return v;
+  }
+  const extracted = extractFirstArray(payload);
+  if (Array.isArray(extracted) && extracted.length > 0 && isLineLikeRecord(extracted[0])) return extracted;
+  return deepFindLongestLineItemArray(payload, 0, 8);
+}
+
 /** Normaliza lista de detalles desde respuesta de API (array o objeto con data/items/details/invoiceDetails). */
 function normalizeDetailList(raw: any): any[] {
   if (raw == null) return [];
   if (Array.isArray(raw)) return raw;
-  const arr = raw?.invoiceDetails ?? raw?.InvoiceDetails ?? raw?.details ?? raw?.Details ?? raw?.items ?? raw?.Items ?? raw?.data ?? raw?.Data ?? [];
-  return Array.isArray(arr) ? arr : [];
+  const detailKeys = ORDER_OR_INVOICE_LINE_KEYS;
+  const layers = peelInvoiceLayers(raw);
+  const seenLayers = new Set<any>();
+  for (const layer of layers) {
+    if (!layer || typeof layer !== 'object' || seenLayers.has(layer)) continue;
+    seenLayers.add(layer);
+    for (const k of detailKeys) {
+      const v = (layer as any)[k];
+      if (Array.isArray(v) && v.length) return v;
+    }
+  }
+  const fallbackKeys = detailKeys.map((k) => (raw as any)?.[k]).find((v) => Array.isArray(v) && v.length);
+  if (Array.isArray(fallbackKeys)) return fallbackKeys;
+  const extracted = extractFirstArray(raw);
+  if (Array.isArray(extracted) && extracted.length > 0 && isLineLikeRecord(extracted[0])) return extracted;
+  const deep = deepFindLongestLineItemArray(raw, 0, 8);
+  return deep;
 }
 
 function looksLikeId(s: string): boolean {
@@ -320,10 +611,132 @@ export interface OrderForUI {
   po?: string;
    /** ID del planograma asociado al pedido (tabla orders.planogram_id). */
   planogramId?: string;
+  /** Nº de líneas de factura (relleno en historial cuando se muestran datos de factura). */
+  invoiceLineCount?: number;
 }
 
-/** Solo hay 2 estados: pending o invoiced. La BD puede enviar "pending"/"invoiced" o true/false (isInvoiced). Acepta respuesta envuelta (data/order). */
-function normalizeOrderStatus(raw: any): 'pending' | 'invoiced' {
+/** Una factura asociada a un pedido del vendedor (reporte de ventas por factura). */
+export interface InvoiceReportRow {
+  invoiceId: string;
+  orderId: string;
+  po: string;
+  storeId: string;
+  orderDate: string;
+  invoiceDate: string;
+  total: number;
+  items: Array<{ qty: number; code: string; description: string; price: number; amount: number }>;
+  /** Tienda / cliente si vienen en el JSON de la factura (evita consultas extra). */
+  storeDisplayName?: string;
+  storeDisplayAddress?: string;
+  storeDisplayCity?: string;
+}
+
+function extractInvoiceOrderIdFromLayer(inv: any): string {
+  if (inv == null) return '';
+  return String(
+    inv?.orderId ??
+      inv?.OrderId ??
+      (inv as any)?.OrderID ??
+      inv?.order_id ??
+      inv?.Order_Id ??
+      inv?.order?.id ??
+      inv?.Order?.Id ??
+      inv?.order?.orderId ??
+      inv?.Order?.OrderId ??
+      ''
+  ).trim();
+}
+
+/** PO en cabecera de factura (prioridad sobre el pedido). */
+function extractPoFromInvoiceLayers(
+  invLayer: any,
+  display?: { invoiceNumber?: string } | null
+): string {
+  if (invLayer != null && typeof invLayer === 'object') {
+    const v = String(
+      invLayer.po ??
+        invLayer.Po ??
+        invLayer.PO ??
+        invLayer.purchaseOrder ??
+        invLayer.PurchaseOrder ??
+        invLayer.orderPo ??
+        invLayer.OrderPo ??
+        invLayer.referencePo ??
+        invLayer.ReferencePo ??
+        ''
+    ).trim();
+    if (v) return v;
+  }
+  if (display?.invoiceNumber) {
+    const n = String(display.invoiceNumber).trim();
+    if (n && n !== '—') return n;
+  }
+  return '';
+}
+
+function extractStoreDisplayFromInvoice(invLayer: any): {
+  name?: string;
+  address?: string;
+  city?: string;
+} {
+  if (invLayer == null || typeof invLayer !== 'object') return {};
+  const name = String(
+    invLayer.storeName ??
+      invLayer.StoreName ??
+      invLayer.clientName ??
+      invLayer.ClientName ??
+      invLayer.customerName ??
+      invLayer.CustomerName ??
+      invLayer.store?.name ??
+      invLayer.Store?.Name ??
+      ''
+  ).trim();
+  const address = String(
+    invLayer.storeAddress ??
+      invLayer.StoreAddress ??
+      invLayer.address ??
+      invLayer.Address ??
+      invLayer.store?.address ??
+      invLayer.Store?.Address ??
+      ''
+  ).trim();
+  const city = String(
+    invLayer.storeCity ??
+      invLayer.StoreCity ??
+      invLayer.city ??
+      invLayer.City ??
+      invLayer.store?.city ??
+      invLayer.Store?.City ??
+      ''
+  ).trim();
+  return {
+    ...(name ? { name } : {}),
+    ...(address ? { address } : {}),
+    ...(city ? { city } : {}),
+  };
+}
+
+function findOrderMatchingInvoiceOid(orders: OrderForUI[], oid: string): OrderForUI | undefined {
+  const n = String(oid).trim();
+  if (!n) return undefined;
+  const lower = n.toLowerCase();
+  const num = Number(n);
+  const numStr = !Number.isNaN(num) ? String(num) : '';
+  return orders.find((o) => {
+    const id = String(o.id).trim();
+    const back = String(o.backendOrderId ?? '').trim();
+    return (
+      id === n ||
+      id.toLowerCase() === lower ||
+      back === n ||
+      (numStr !== '' && (back === numStr || id === numStr)) ||
+      back.toLowerCase() === lower
+    );
+  });
+}
+
+/** Flujo de estados en PWA: initial -> confirmed -> invoiced; cancelled = anulado por vendedor/admin. */
+function normalizeOrderStatus(raw: any): 'initial' | 'confirmed' | 'invoiced' | 'cancelled' {
   const inner = raw?.data ?? raw?.order ?? raw?.Order ?? raw?.value ?? raw?.result ?? raw;
   const v =
     inner?.status ?? inner?.Status ?? inner?.isInvoiced ?? inner?.IsInvoiced
@@ -332,10 +745,14 @@ function normalizeOrderStatus(raw: any): 'pending' | 'invoiced' {
     ?? raw?.status ?? raw?.Status ?? raw?.isInvoiced ?? raw?.IsInvoiced
     ?? raw?.orderStatus ?? raw?.OrderStatus ?? raw?.state ?? raw?.State;
   if (v === true) return 'invoiced';
-  if (v === false) return 'pending';
+  if (v === false) return 'initial';
   const s = String(v ?? '').trim().toLowerCase();
-  if (s === 'invoiced' || s === 'facturado' || s === 'completed' || s === 'delivered' || s === '1') return 'invoiced';
-  return 'pending';
+  if (s === 'cancelled' || s === 'canceled' || s === 'cancelado' || s === 'anulado' || s === 'void') {
+    return 'cancelled';
+  }
+  if (s === 'invoiced' || s === 'facturado' || s === 'delivered' || s === '1') return 'invoiced';
+  if (s === 'completed' || s === 'confirmado' || s === 'confirmed') return 'confirmed';
+  return 'initial';
 }
 
 function mapRawOrderToUI(raw: any, details: any[] = []): OrderForUI {
@@ -348,7 +765,7 @@ function mapRawOrderToUI(raw: any, details: any[] = []): OrderForUI {
       raw?.PLANOGRAM_ID ??
       '') as string;
   const items = (details || []).map((d: any) => {
-    const qty = Number(d?.quantity ?? d?.Quantity ?? 0);
+    const qty = detailQuantity(d);
     const subtotalRow = Number(d?.subtotal ?? d?.Subtotal ?? d?.SubTotal ?? 0);
     const unitPrice =
       Number(d?.unitPrice ?? d?.UnitPrice ?? d?.price ?? d?.Price ?? d?.product?.unitPrice ?? d?.Product?.UnitPrice ?? 0) ||
@@ -410,58 +827,60 @@ function mapRawOrderToUI(raw: any, details: any[] = []): OrderForUI {
 
 export const ordersApi = {
   /**
-   * Crea un pedido en la API (header + detalles) usando los endpoints:
-   * - POST /orders/orders
-   * - POST /orderdetails/orderdetails
-   *
+   * Crea un pedido con Unit of Work (header + detalles en un solo POST /orders/orders).
    * Devuelve el id del pedido creado en backend (orderId) si se pudo obtener.
    */
   async createOrder(input: CreateOrderInput): Promise<CreatedOrderResult | null> {
-    // 1) Crear header de pedido (el backend espera PO como varchar, único)
+    // Unit of Work: crear cabecera + detalles en un solo request
+    const generatedOrderId = generateUuidV4();
     const poTrimmed = (input.po ?? '').trim();
-    const headerBody: Record<string, unknown> = {
-      storeId: input.storeId,
-      StoreId: input.storeId,
+    const mappedItems = input.items.map((item) => {
+      const detailId = generateUuidV4();
+      return {
+        orderDetailId: detailId,
+        OrderDetailId: detailId,
+        productId: item.productId,
+        ProductId: item.productId,
+        quantity: Number(item.quantity) || 0,
+        Quantity: Number(item.quantity) || 0,
+      };
+    });
+
+    const payload: Record<string, unknown> = {
+      id: generatedOrderId,
+      Id: generatedOrderId,
       salespersonId: input.salespersonId,
       SalespersonId: input.salespersonId,
-      vendorNumber: input.vendorNumber,
-      VendorNumber: input.vendorNumber,
-      status: 'pending',
-      Status: 'pending',
-      createdAt: new Date().toISOString(),
-      CreatedAt: new Date().toISOString(),
-      subtotal: input.subtotal,
-      Subtotal: input.subtotal,
-      tax: input.tax,
-      Tax: input.tax,
-      total: input.total,
-      Total: input.total,
+      storeId: input.storeId,
+      StoreId: input.storeId,
+      items: mappedItems,
+      Items: mappedItems,
     };
     if (poTrimmed) {
-      headerBody.po = poTrimmed;
-      headerBody.Po = poTrimmed;
+      payload.po = poTrimmed;
+      payload.Po = poTrimmed;
     }
-  if ((input.planogramId ?? '').trim()) {
-    const pid = String(input.planogramId).trim();
-    headerBody.planogramId = pid;
-    headerBody.PlanogramId = pid;
-    headerBody.planogram_id = pid;
-    headerBody.PLANOGRAM_ID = pid;
-  }
+    if ((input.planogramId ?? '').trim()) {
+      const pid = String(input.planogramId).trim();
+      payload.planogramId = pid;
+      payload.PlanogramId = pid;
+      payload.planogram_id = pid;
+      payload.PLANOGRAM_ID = pid;
+    }
 
     let createdOrder: any;
     try {
-      createdOrder = await apiClient.post<any>('/orders/orders', headerBody);
+      createdOrder = await apiClient.post<any>('/orders/orders', payload);
     } catch (error) {
       const err = error as ApiError;
       return { errorMessage: err.message || 'Error al crear el pedido' };
     }
 
-    let orderId: string | number | null = null;
+    let createdOrderId: string | number | null = null;
     if (typeof createdOrder === 'string' && createdOrder.trim().length > 0) {
-      orderId = createdOrder.trim();
+      createdOrderId = createdOrder.trim();
     } else if (typeof createdOrder === 'object') {
-      orderId =
+      createdOrderId =
         createdOrder.orderId ??
         createdOrder.OrderId ??
         createdOrder.id ??
@@ -477,313 +896,165 @@ export const ordersApi = {
         null;
     }
 
-    if (orderId == null || orderId === '') {
+    if (createdOrderId == null || createdOrderId === '') {
       console.warn('[orders-api] createOrder: respuesta sin orderId.', createdOrder);
       return { errorMessage: 'El servidor no devolvió el ID del pedido.' };
     }
 
-    // 2) Crear detalles de pedido
-    for (const item of input.items) {
-      const detailBody = {
-        orderId,
-        OrderId: orderId,
-        productId: item.productId,
-        ProductId: item.productId,
-        quantity: item.quantity,
-        Quantity: item.quantity,
-        unitPrice: item.price,
-        UnitPrice: item.price,
-        subtotal: item.quantity * item.price,
-        Subtotal: item.quantity * item.price,
-      };
-      await safePost<any>('/orderdetails/orderdetails', detailBody);
+    const invoiceId =
+      createdOrder?.invoiceId ??
+      createdOrder?.InvoiceId ??
+      createdOrder?.data?.invoiceId ??
+      createdOrder?.data?.InvoiceId ??
+      createdOrder?.value?.invoiceId ??
+      createdOrder?.value?.InvoiceId;
+
+    return { orderId: createdOrderId, invoiceId };
+  },
+
+  /**
+   * Factura en BD solo cuando va COMPLETA (Unit of Work): cabecera + ítems + POD en un solo POST.
+   * - Con `podFileName`: POST /invoice/invoices una vez con todo (no antes, no sin POD).
+   * - Sin `podFileName`: no crea nada; solo devuelve id si ya existe factura para el pedido (lectura).
+   */
+  async ensureInvoiceForOrder(
+    orderId: string | number,
+    deliveredItems?: DeliveredItemInput[],
+    options?: { podFileName?: string; notes?: string }
+  ): Promise<string | number | null> {
+    const orderIdStr = String(orderId).trim();
+    if (!orderIdStr) return null;
+
+    const podFileName = String(options?.podFileName ?? '').trim();
+    const withPod = !!podFileName;
+
+    const existingRaw = await this.getInvoiceIdForOrder(orderIdStr);
+    const existingStr =
+      existingRaw != null && String(existingRaw).trim() !== '' ? String(existingRaw).trim() : '';
+
+    /** Nunca persistir factura incompleta: sin POD no hay POST. */
+    if (!withPod) {
+      return existingStr ? existingRaw : null;
     }
 
-    // 3) Crear factura: POST /invoice/invoices enviando el id del pedido para vincular factura ↔ pedido
-    let invoiceId: number | string | undefined;
-    const invoiceBody = {
-      orderId,
-      OrderId: orderId,
-      storeId: input.storeId,
-      StoreId: input.storeId,
-      total: input.total,
-      Total: input.total,
-      subtotal: input.subtotal,
-      Subtotal: input.subtotal,
-      tax: input.tax,
-      Tax: input.tax,
+    if (existingStr) {
+      const inv = await getInvoiceById(existingStr);
+      if (inv && getPodFromInvoice(inv)) return existingRaw;
+    }
+
+    const order = await this.getOrderById(orderIdStr);
+    if (!order) return null;
+
+    /** Id de factura: nuevo UUID o reintento con registro huérfano (sin POD) listado por orderId. */
+    const invoiceGuid =
+      existingStr ? existingStr : generateUuidV4();
+
+    const mappedItems =
+      Array.isArray(deliveredItems) && deliveredItems.length > 0
+        ? deliveredItems.map((it) => {
+            const invoiceDetailId = generateUuidV4();
+            const qty = Number(it.quantity) || 0;
+            const price = Number(it.unitPrice) || 0;
+            const subtotal = qty * price;
+            /** Contrato API: invoiceDetailId, invoiceId, productId, quantity, subtotal (+ PascalCase .NET). */
+            return {
+              invoiceDetailId,
+              InvoiceDetailId: invoiceDetailId,
+              invoiceId: invoiceGuid,
+              InvoiceId: invoiceGuid,
+              productId: it.productId,
+              ProductId: it.productId,
+              quantity: qty,
+              Quantity: qty,
+              subtotal,
+              Subtotal: subtotal,
+            };
+          })
+        : [];
+
+    /** Factura completa = al menos una línea + POD; si no, no tocar BD. */
+    if (mappedItems.length === 0) {
+      return null;
+    }
+
+    const tax = Number(order.tax) || 0;
+    const linesSubtotal = mappedItems.reduce(
+      (s, row: any) => s + Number(row?.subtotal ?? row?.Subtotal ?? 0),
+      0
+    );
+    const subtotalForInvoice = linesSubtotal;
+    const totalForInvoice = subtotalForInvoice + tax;
+
+    const body: Record<string, unknown> = {
+      id: invoiceGuid,
+      Id: invoiceGuid,
+      orderId: orderIdStr,
+      OrderId: orderIdStr,
+      total: totalForInvoice,
+      Total: totalForInvoice,
+      subtotal: subtotalForInvoice,
+      Subtotal: subtotalForInvoice,
+      tax,
+      Tax: tax,
+      storeId: order.storeId,
+      StoreId: order.storeId,
       createdAt: new Date().toISOString(),
       CreatedAt: new Date().toISOString(),
+      items: mappedItems,
+      Items: mappedItems,
+      pod: podFileName,
+      Pod: podFileName,
     };
-    const invoiceRes = await safePost<any>('/invoice/invoices', invoiceBody);
-    if (invoiceRes != null) {
-      if (typeof invoiceRes === 'string' && invoiceRes.trim()) {
-        invoiceId = invoiceRes.trim();
-      } else {
-        const r = invoiceRes as any;
-        invoiceId =
-          r?.invoiceId ?? r?.InvoiceId ?? r?.id ?? r?.Id
-          ?? r?.data?.invoiceId ?? r?.data?.InvoiceId ?? r?.data?.id ?? r?.data?.Id
-          ?? r?.value?.invoiceId ?? r?.value?.id ?? r?.value?.Id
-          ?? undefined;
-      }
-      if (invoiceId && input.items.length > 0) {
-        for (const item of input.items) {
-          const lineSubtotal = item.quantity * item.price;
-          const detailBody = {
-            invoiceId: String(invoiceId),
-            InvoiceId: String(invoiceId),
-            productId: String(item.productId),
-            ProductId: String(item.productId),
-            quantity: Number(item.quantity) || 0,
-            Quantity: Number(item.quantity) || 0,
-            subtotal: lineSubtotal,
-            Subtotal: lineSubtotal,
-          };
-          const postDetail = await safePost<any>('/invoicedetails/invoicedetails', detailBody);
-          if (postDetail === null) {
-            console.error('[orders-api] POST invoicedetails falló para productId', item.productId);
-          }
-        }
-      }
+
+    const n = String(options?.notes ?? '').trim();
+    if (n) {
+      body.notes = n;
+      body.Notes = n;
     }
 
-    return { orderId, invoiceId };
+    const created = await safePost<any>('/invoice/invoices', body);
+    if (created == null) return null;
+    const invoiceId =
+      created?.invoiceId ??
+      created?.InvoiceId ??
+      created?.id ??
+      created?.Id ??
+      created?.data?.invoiceId ??
+      created?.data?.InvoiceId ??
+      created?.data?.id ??
+      created?.data?.Id ??
+      created?.value?.invoiceId ??
+      created?.value?.InvoiceId ??
+      created?.value?.id ??
+      created?.value?.Id ??
+      null;
+    if (invoiceId != null && String(invoiceId).trim() !== '') return invoiceId;
+    return invoiceGuid;
   },
 
   /**
-   * Actualiza un pedido existente (solo si está pendiente).
-   * PUT /orders/order/{id}, PUT/POST/DELETE orderdetails, PUT invoice, PUT invoicedetails.
-   * optionalInvoiceId: si el backend no devuelve invoiceId en el pedido, pasar el id de la factura (p. ej. desde getInvoiceIdForOrder).
+   * Edicion de pedido deshabilitada por regla de negocio.
+   * Solo se permite actualizar estatus en endpoints dedicados.
    */
   async updateOrder(orderId: string | number, input: CreateOrderInput, optionalInvoiceId?: string | number | null): Promise<{ ok: boolean; errorMessage?: string }> {
-    const id = String(orderId);
-    const existingOrder = await safeGet<any>(`/orders/orders/${encodeURIComponent(id)}`);
-    let salespersonId = input.salespersonId;
-    if (!salespersonId && existingOrder) {
-      salespersonId = existingOrder.salespersonId ?? existingOrder.SalespersonId ?? existingOrder.userId ?? existingOrder.UserId;
-      if (salespersonId != null) salespersonId = String(salespersonId);
-    }
-    const headerBody: Record<string, unknown> = {
-      storeId: input.storeId,
-      StoreId: input.storeId,
-      status: 'pending',
-      Status: 'pending',
-      subtotal: input.subtotal,
-      Subtotal: input.subtotal,
-      tax: input.tax,
-      Tax: input.tax,
-      total: input.total,
-      Total: input.total,
+    return {
+      ok: false,
+      errorMessage:
+        'La actualizacion de pedido/detalles ya no esta permitida. Solo se puede actualizar estatus.',
     };
-    if (salespersonId) {
-      headerBody.salespersonId = salespersonId;
-      headerBody.SalespersonId = salespersonId;
-    }
-    const poTrimmed = (input.po ?? '').trim();
-    if (poTrimmed) {
-      headerBody.po = poTrimmed;
-      headerBody.Po = poTrimmed;
-    }
-    if ((input.planogramId ?? '').trim()) {
-      const pid = String(input.planogramId).trim();
-      headerBody.planogramId = pid;
-      headerBody.PlanogramId = pid;
-      headerBody.planogram_id = pid;
-      headerBody.PLANOGRAM_ID = pid;
-    }
-    try {
-      await apiClient.put<any>(`/orders/order/${encodeURIComponent(id)}`, headerBody);
-    } catch (error) {
-      const err = error as ApiError;
-      return { ok: false, errorMessage: err.message || 'Error al actualizar el pedido' };
-    }
-
-    const existingDetails = await this.getOrderDetailsByOrderIdRaw(id);
-    const byProductId = new Map<string, { id: string; detail: any }>();
-    existingDetails.forEach((d: any) => {
-      const pid = String(d?.productId ?? d?.ProductId ?? '');
-      const detailId = d?.id ?? d?.Id ?? d?.orderDetailId ?? d?.OrderDetailId;
-      if (pid && detailId != null) byProductId.set(pid, { id: String(detailId), detail: d });
-    });
-
-    const newProductIds = new Set(input.items.map((i) => String(i.productId)));
-    for (const item of input.items) {
-      const pid = String(item.productId);
-      const detailBody = {
-        orderId: id,
-        OrderId: id,
-        productId: item.productId,
-        ProductId: item.productId,
-        quantity: item.quantity,
-        Quantity: item.quantity,
-        unitPrice: item.price,
-        UnitPrice: item.price,
-        subtotal: item.quantity * item.price,
-        Subtotal: item.quantity * item.price,
-      };
-      const existing = byProductId.get(pid);
-      if (existing) {
-        await safePut<any>(`/orderdetails/orderdetails/${encodeURIComponent(existing.id)}`, detailBody);
-      } else {
-        await safePost<any>('/orderdetails/orderdetails', detailBody);
-      }
-    }
-    // Si el backend no expone DELETE en orderdetails, actualizamos a cantidad 0 en lugar de borrar
-    for (const [pid, { id: detailId, detail }] of byProductId) {
-      if (!newProductIds.has(pid)) {
-        const productId = detail?.productId ?? detail?.ProductId ?? pid;
-        const zeroBody = {
-          orderId: id,
-          OrderId: id,
-          productId,
-          ProductId: productId,
-          quantity: 0,
-          Quantity: 0,
-          unitPrice: 0,
-          UnitPrice: 0,
-          subtotal: 0,
-          Subtotal: 0,
-        };
-        await safePut<any>(`/orderdetails/orderdetails/${encodeURIComponent(detailId)}`, zeroBody);
-      }
-    }
-
-    // Obtener invoiceId: pedido, lista por orderId, o getInvoiceIdForOrder
-    let invoiceId: string | number | null = null;
-    if (existingOrder) {
-      const fromOrder =
-        existingOrder.invoiceId ?? existingOrder.InvoiceId
-        ?? existingOrder.invoice?.id ?? existingOrder.Invoice?.Id
-        ?? (Array.isArray(existingOrder.invoices) ? existingOrder.invoices[0]?.id ?? existingOrder.invoices[0]?.Id : null)
-        ?? (Array.isArray(existingOrder.Invoices) ? existingOrder.Invoices[0]?.id ?? existingOrder.Invoices[0]?.Id : null);
-      if (fromOrder != null) invoiceId = String(fromOrder);
-    }
-    if (invoiceId == null) invoiceId = await this.getInvoiceIdForOrder(id);
-    if (invoiceId == null && optionalInvoiceId != null && optionalInvoiceId !== '') invoiceId = String(optionalInvoiceId);
-
-    if (invoiceId != null) {
-      const invIdStr = String(invoiceId).trim();
-      const rawInv = await getInvoiceById(invIdStr) ?? await this.getInvoiceForOrder(id);
-      const existingInvoice = unwrapInvoiceResponse(rawInv) ?? rawInv;
-      const orderIdForBody = id;
-      const invBody: Record<string, unknown> = {
-        id: invIdStr,
-        Id: invIdStr,
-        orderId: orderIdForBody,
-        OrderId: orderIdForBody,
-        storeId: input.storeId,
-        StoreId: input.storeId,
-        total: Number(input.total),
-        Total: Number(input.total),
-        subtotal: Number(input.subtotal),
-        Subtotal: Number(input.subtotal),
-        tax: Number(input.tax),
-        Tax: Number(input.tax),
-      };
-      if (existingInvoice && typeof existingInvoice === 'object') {
-        for (const [k, v] of Object.entries(existingInvoice)) {
-          if (v === null || v === undefined) continue;
-          if (typeof v === 'object' && !Array.isArray(v)) continue;
-          if (Array.isArray(v)) continue;
-          if (invBody[k] === undefined) invBody[k] = v;
-        }
-      }
-
-      const putInvRes = await safePut<any>(`/invoice/invoices/${encodeURIComponent(invIdStr)}`, invBody);
-      if (putInvRes === null) return { ok: false, errorMessage: 'Error al actualizar la factura' };
-
-      const invDetailsList = await this.getInvoiceDetailsByInvoiceId(invIdStr);
-      const invByProduct = new Map<string, { id: string; detail: any }>();
-      invDetailsList.forEach((d: any) => {
-        const pid = String(d?.productId ?? d?.ProductId ?? '').trim();
-        const did = d?.id ?? d?.Id ?? d?.invoiceDetailId ?? d?.InvoiceDetailId ?? d?.invoice_detail_id ?? d?.Invoice_Detail_Id;
-        if (pid && did != null) invByProduct.set(pid, { id: String(did), detail: d });
-      });
-
-      for (const item of input.items) {
-        const pid = String(item.productId).trim();
-        const lineSubtotal = item.quantity * item.price;
-        const existing = invByProduct.get(pid);
-        const productIdVal = item.productId;
-        if (existing) {
-          const d = existing.detail;
-          const detailBody: Record<string, unknown> = {
-            id: existing.id,
-            Id: existing.id,
-            invoiceId: invIdStr,
-            InvoiceId: invIdStr,
-            productId: productIdVal,
-            ProductId: productIdVal,
-            quantity: Number(item.quantity),
-            Quantity: Number(item.quantity),
-            subtotal: Number(lineSubtotal),
-            Subtotal: Number(lineSubtotal),
-          };
-          if (d && typeof d === 'object') {
-            for (const [k, v] of Object.entries(d)) {
-              if (v === null || v === undefined) continue;
-              if (typeof v === 'object' && !Array.isArray(v)) continue;
-              if (Array.isArray(v)) continue;
-              if (detailBody[k] === undefined) detailBody[k] = v;
-            }
-          }
-          const putDetailRes = await safePut<any>(`/invoicedetails/invoicedetails/${encodeURIComponent(existing.id)}`, detailBody);
-          if (putDetailRes === null) return { ok: false, errorMessage: 'Error al actualizar detalle de factura' };
-        } else {
-          const postBody = {
-            invoiceId: invIdStr,
-            InvoiceId: invIdStr,
-            productId: productIdVal,
-            ProductId: productIdVal,
-            quantity: Number(item.quantity),
-            Quantity: Number(item.quantity),
-            subtotal: Number(lineSubtotal),
-            Subtotal: Number(lineSubtotal),
-          };
-          const postRes = await safePost<any>('/invoicedetails/invoicedetails', postBody);
-          if (postRes === null) return { ok: false, errorMessage: 'Error al crear detalle de factura' };
-        }
-      }
-      for (const [pid, { id: detailId, detail: d }] of invByProduct) {
-        if (!newProductIds.has(pid)) {
-          const productIdVal = d?.productId ?? d?.ProductId ?? pid;
-          const zeroBody: Record<string, unknown> = {
-            id: detailId,
-            Id: detailId,
-            invoiceId: invIdStr,
-            InvoiceId: invIdStr,
-            productId: productIdVal,
-            ProductId: productIdVal,
-            quantity: 0,
-            Quantity: 0,
-            subtotal: 0,
-            Subtotal: 0,
-          };
-          if (d && typeof d === 'object') {
-            for (const [k, v] of Object.entries(d)) {
-              if (v === null || v === undefined) continue;
-              if (typeof v === 'object' && !Array.isArray(v)) continue;
-              if (Array.isArray(v)) continue;
-              if (zeroBody[k] === undefined) zeroBody[k] = v;
-            }
-          }
-          const putZeroRes = await safePut<any>(`/invoicedetails/invoicedetails/${encodeURIComponent(detailId)}`, zeroBody);
-          if (putZeroRes === null) return { ok: false, errorMessage: 'Error al actualizar factura' };
-        }
-      }
-    }
-    return { ok: true };
   },
 
   /**
-   * Detalles de factura por invoiceId. GET /invoicedetails/invoicedetails/invoice/{invoiceId}
+   * Detalles de factura por invoiceId desde GET /invoice/invoices/{invoiceId}.
+   * El backend devuelve la factura con sus detalles anidados.
    */
   async getInvoiceDetailsByInvoiceId(invoiceId: string): Promise<any[]> {
     const id = String(invoiceId).trim();
     if (!id) return [];
-    const res = await safeGet<any>(`/invoicedetails/invoicedetails/invoice/${encodeURIComponent(id)}`);
-    return normalizeDetailList(res);
+    const invoice = await getInvoiceById(id);
+    let rows = normalizeDetailList(invoice);
+    if (rows.length === 0 && invoice) rows = findBestInvoiceDetailsArray(invoice);
+    return rows;
   },
 
   /**
@@ -844,10 +1115,11 @@ export const ordersApi = {
   async getInvoiceTotalForOrder(orderId: string): Promise<number> {
     const inv = await this.getInvoiceForOrder(orderId);
     if (!inv) return 0;
-    let total = Number(inv?.total ?? inv?.Total ?? inv?.amount ?? inv?.Amount ?? inv?.totalAmount ?? inv?.TotalAmount ?? inv?.grandTotal ?? inv?.GrandTotal ?? 0);
+    const layers = peelInvoiceLayers(inv);
+    const totalKeys = ['total', 'Total', 'amount', 'Amount', 'totalAmount', 'TotalAmount', 'grandTotal', 'GrandTotal', 'totalUsd', 'TotalUsd'];
+    let total = firstPositiveNumericFromLayers(layers, totalKeys);
     if (total <= 0) {
-      const details = inv?.invoiceDetails ?? inv?.InvoiceDetails ?? inv?.details ?? inv?.Details ?? inv?.items ?? inv?.Items ?? [];
-      const arr = Array.isArray(details) ? details : [];
+      const arr = normalizeDetailList(inv);
       total = arr.reduce((s: number, d: any) => s + Number(d?.subtotal ?? d?.Subtotal ?? d?.SubTotal ?? d?.total ?? d?.Total ?? 0), 0);
     }
     return total;
@@ -890,9 +1162,14 @@ export const ordersApi = {
   /**
    * Datos de la factura para pantalla.
    * Flujo: con el orderId del pedido seleccionado se busca la factura en GET /invoice/invoices (comparando orderId),
-   * luego GET /invoice/invoices/{id} y GET /invoicedetails/invoicedetails/invoice/{invoiceId} para items y totales.
+   * luego GET /invoice/invoices/{id} (ya incluye detalles) para items y totales.
    */
-  async getInvoiceDisplayForOrder(orderId: string, optionalInvoiceId?: string | number): Promise<{
+  async getInvoiceDisplayForOrder(
+    orderId: string,
+    optionalInvoiceId?: string | number,
+    /** Pedido ya cargado: evita un GET duplicado y asegura cruce SKU/productId con líneas de factura */
+    orderForLines?: OrderForUI | null
+  ): Promise<{
     invoiceNumber: string;
     date: string;
     total: number;
@@ -900,6 +1177,8 @@ export const ordersApi = {
     items: Array<{ qty: number; code: string; description: string; price: number; amount: number }>;
     /** Ruta del POD desde la factura (ej. /imagenes/dani.png) para pedidos viejos */
     pod?: string;
+    /** PO devuelto por la factura (si el backend lo envía aquí). */
+    po?: string;
   } | null> {
     let invId = '';
     let invoice: any = null;
@@ -921,7 +1200,7 @@ export const ordersApi = {
       if (invoice != null) invId = String(invoice?.id ?? invoice?.Id ?? invoice?.invoiceId ?? invoice?.InvoiceId ?? '').trim();
     }
     // 3) Pedido desde API (puede traer invoiceId o backendOrderId)
-    const order = await this.getOrderById(orderId);
+    const order = orderForLines ?? (await this.getOrderById(orderId));
     if (!invId && order?.invoiceId != null) invId = String(order.invoiceId);
     if (!invId && order?.backendOrderId != null) {
       const byBackend = await this.getInvoiceIdForOrder(String(order.backendOrderId));
@@ -929,15 +1208,19 @@ export const ordersApi = {
     }
     if (!invId) return null;
 
-    if (!invoice) {
-      rawInvoice = await getInvoiceById(invId);
-    } else if (!rawInvoice) {
-      rawInvoice = await getInvoiceById(invId);
-    }
-    invoice = unwrapInvoiceResponse(rawInvoice ?? invoice);
-    if (invoice == null && rawInvoice != null) invoice = rawInvoice;
+    const invoiceById = await getInvoiceById(invId);
+    const rawForInvoice = invoiceById ?? rawInvoice ?? invoice;
+    if (rawForInvoice == null) return null;
+    const layers = peelInvoiceLayers(rawForInvoice);
+    invoice =
+      layers[layers.length - 1] ??
+      unwrapInvoiceResponse(rawForInvoice) ??
+      rawForInvoice;
+    if (invoice == null && rawForInvoice != null) invoice = rawForInvoice;
 
-    let details = normalizeDetailList(invoice);
+    let details = normalizeDetailList(rawForInvoice);
+    /** Mismo criterio que POD: barrido completo del JSON por si las líneas no están en las claves habituales */
+    if (details.length === 0) details = findBestInvoiceDetailsArray(rawForInvoice);
     if (details.length === 0) details = await this.getInvoiceDetailsByInvoiceId(invId);
 
     const orderItemsByProduct = new Map<string, { productName?: string; sku?: string; price?: number }>();
@@ -987,45 +1270,59 @@ export const ordersApi = {
       })
     );
 
-    const total = Number(invoice?.total ?? invoice?.Total ?? invoice?.amount ?? invoice?.Amount ?? 0);
+    const totalKeys = ['total', 'Total', 'amount', 'Amount', 'totalAmount', 'TotalAmount', 'grandTotal', 'GrandTotal', 'totalUsd', 'TotalUsd'];
+    let total = firstPositiveNumericFromLayers(layers, totalKeys);
+    if (total <= 0) {
+      total = Number(invoice?.total ?? invoice?.Total ?? invoice?.amount ?? invoice?.Amount ?? 0);
+    }
     const totalFromDetails = items.reduce((s, i) => s + i.amount, 0);
-    const date = invoice?.date ?? invoice?.Date ?? invoice?.createdAt ?? invoice?.CreatedAt ?? order?.date ?? new Date().toISOString();
+    const dateFields = ['date', 'Date', 'createdAt', 'CreatedAt', 'invoiceDate', 'InvoiceDate'];
+    let date: string | undefined;
+    for (const L of layers) {
+      if (!L || typeof L !== 'object') continue;
+      for (const k of dateFields) {
+        const v = (L as any)[k];
+        if (v != null && v !== '') {
+          date = typeof v === 'string' ? v : v instanceof Date ? v.toISOString() : String(v);
+          break;
+        }
+      }
+      if (date) break;
+    }
+    if (!date) {
+      date =
+        (invoice?.date ??
+          invoice?.Date ??
+          invoice?.createdAt ??
+          invoice?.CreatedAt ??
+          order?.date ??
+          new Date().toISOString()) as string;
+    }
     const invNumber = invoice?.invoiceNumber ?? invoice?.InvoiceNumber ?? invoice?.invoiceId ?? invoice?.InvoiceId ?? invId;
-    const podFromInvoice = getPodFromInvoice(rawInvoice) || getPodFromInvoice(invoice);
+    const podFromInvoice = getPodFromInvoice(rawForInvoice);
+    const poFromInvoice = getPoFromInvoice(rawForInvoice);
 
+    const dateOut = (typeof date === 'string' && date ? date : new Date().toISOString()) as string;
     return {
       invoiceNumber: String(invNumber),
-      date: typeof date === 'string' ? date : (date instanceof Date ? date.toISOString() : new Date().toISOString()),
+      date: dateOut,
       total: total > 0 ? total : totalFromDetails,
       storeId: invoice?.storeId ?? invoice?.StoreId ?? order?.storeId,
       items,
       ...(podFromInvoice ? { pod: podFromInvoice } : {}),
+      ...(poFromInvoice ? { po: poFromInvoice } : {}),
     };
   },
 
   /**
-   * Asocia el POD a la factura enviando solo el fileName (clave en S3).
-   * La imagen debe subirse antes con POST /images/upload; este PATCH solo envía el link/fileName.
-   * PATCH /invoice/invoices/{id}/pod — body: { id, pod: fileName } (sin base64).
+   * Obsoleto: el API no expone PATCH .../pod. Usar ensureInvoiceForOrder(orderId, items, { podFileName }).
    */
-  async uploadPODForInvoice(params: {
+  async uploadPODForInvoice(_params: {
     invoiceId: number | string;
-    /** Nombre del archivo devuelto por POST /images/upload (clave S3). */
     fileName: string;
     notes?: string;
   }): Promise<boolean> {
-    const id = String(params.invoiceId).trim();
-    const fileName = (params.fileName || '').trim();
-    if (!fileName) return false;
-    const body: Record<string, unknown> = { id, pod: fileName };
-    if (params.notes) body.notes = params.notes;
-    try {
-      const res = await safePatch<any>(`/invoice/invoices/${encodeURIComponent(id)}/pod`, body);
-      return res !== null && res !== undefined;
-    } catch (e) {
-      console.error('[orders-api] uploadPODForInvoice failed:', e);
-      return false;
-    }
+    return false;
   },
 
   // VisitLogs removidos: el sistema ahora usa Assignments (tiendas asignadas).
@@ -1052,12 +1349,107 @@ export const ordersApi = {
   },
 
   /**
+   * Cancelación solicitada por el vendedor (pedido inicial sin facturar).
+   * PUT /orders/order/{id}/status con estado cancelado. La eliminación física queda solo para administración.
+   */
+  async cancelOrderBySeller(orderId: string | number): Promise<boolean> {
+    const idStr = String(orderId).trim();
+    if (!idStr) return false;
+    const body = {
+      orderId: idStr,
+      OrderId: idStr,
+      status: 'cancelled',
+      Status: 'Cancelled',
+      isInvoiced: false,
+      IsInvoiced: false,
+    };
+    const res = await safePut<any>(`/orders/order/${encodeURIComponent(idStr)}/status`, body);
+    return res !== null;
+  },
+
+  /**
    * Elimina un pedido. Solo debe usarse para pedidos pendientes (sin POD).
    * Usa DELETE /orders/orders/{id} (el recurso plural admite DELETE; /orders/order/{id} devuelve 405).
    */
   async deleteOrder(orderId: string | number): Promise<boolean> {
     const res = await safeDelete<any>(`/orders/orders/${encodeURIComponent(String(orderId))}`);
     return res !== null;
+  },
+
+  /**
+   * Cruza facturas globales con los pedidos del vendedor para métricas y reportes por factura.
+   */
+  async buildInvoiceReportRows(orders: OrderForUI[]): Promise<InvoiceReportRow[]> {
+    if (!orders.length) return [];
+    const list = await getInvoiceList();
+    const seenInv = new Set<string>();
+    const candidates: { invId: string; order: OrderForUI; invLayer: any }[] = [];
+    for (const x of list) {
+      const inv = unwrapInvoiceItem(x) ?? x;
+      const oid = extractInvoiceOrderIdFromLayer(inv);
+      if (!oid) continue;
+      const order = findOrderMatchingInvoiceOid(orders, oid);
+      if (!order) continue;
+      const invId = String(
+        inv?.id ??
+          inv?.Id ??
+          inv?.invoiceId ??
+          inv?.InvoiceId ??
+          (x as any)?.id ??
+          (x as any)?.Id ??
+          ''
+      ).trim();
+      if (!invId || seenInv.has(invId)) continue;
+      seenInv.add(invId);
+      candidates.push({ invId, order, invLayer: inv });
+    }
+    const rows = await Promise.all(
+      candidates.map(async ({ invId, order, invLayer }) => {
+        const display = await this.getInvoiceDisplayForOrder(order.id, invId, order);
+        const fallbackTotal = Number(
+          invLayer?.total ?? invLayer?.Total ?? invLayer?.amount ?? invLayer?.Amount ?? 0
+        );
+        if (display?.items?.length) {
+          const total =
+            Number(display.total) > 0 ? Number(display.total) : fallbackTotal;
+          const poFromDisplay = String(display.po ?? '').trim();
+          return {
+            invoiceId: invId,
+            orderId: order.id,
+            po: poFromDisplay || String(order.po ?? '').trim(),
+            storeId: order.storeId,
+            orderDate: order.date,
+            invoiceDate: display.date,
+            total,
+            items: display.items,
+          } as InvoiceReportRow;
+        }
+        if (fallbackTotal > 0) {
+          const invDate = String(
+            invLayer?.date ??
+              invLayer?.Date ??
+              invLayer?.createdAt ??
+              invLayer?.CreatedAt ??
+              order.date
+          );
+          const poFromLayer = String(
+            getPoFromInvoice(invLayer) || (invLayer as any)?.po || (invLayer as any)?.Po || ''
+          ).trim();
+          return {
+            invoiceId: invId,
+            orderId: order.id,
+            po: poFromLayer || String(order.po ?? '').trim(),
+            storeId: order.storeId,
+            orderDate: order.date,
+            invoiceDate: invDate,
+            total: fallbackTotal,
+            items: [],
+          } as InvoiceReportRow;
+        }
+        return null;
+      })
+    );
+    return rows.filter((r): r is InvoiceReportRow => r != null);
   },
 
   /**
@@ -1100,8 +1492,7 @@ export const ordersApi = {
       }
     });
     const sumFromDetails = (inv: any): number => {
-      const details = inv?.invoiceDetails ?? inv?.InvoiceDetails ?? inv?.details ?? inv?.Details ?? inv?.items ?? inv?.Items ?? [];
-      const arr = Array.isArray(details) ? details : [];
+      const arr = normalizeDetailList(inv);
       return arr.reduce((s: number, d: any) => s + Number(d?.subtotal ?? d?.Subtotal ?? d?.SubTotal ?? d?.total ?? d?.Total ?? 0), 0);
     };
 
@@ -1114,7 +1505,12 @@ export const ordersApi = {
       if (match) {
         const invId = match.invId;
         const inv = match.inv;
-        if (next.invoiceId == null || next.invoiceId === '') next = { ...next, invoiceId: invId };
+        if (
+          (next.status || '').toLowerCase() !== 'initial' &&
+          (next.invoiceId == null || next.invoiceId === '')
+        ) {
+          next = { ...next, invoiceId: invId };
+        }
         const podFromInv = getPodFromInvoice(inv);
         if (podFromInv) {
           next = { ...next, podImageUrl: next.podImageUrl || podFromInv, podFileName: next.podFileName || podFromInv, podUploaded: true };
@@ -1189,13 +1585,10 @@ export const ordersApi = {
     const raw = await safeGet<any>(`/orders/orders/${encodeURIComponent(orderId)}`);
     if (!raw) return null;
     const orderRaw = raw?.data ?? raw?.order ?? raw?.Order ?? raw?.value ?? raw?.result ?? raw;
-    let details = await this.getOrderDetailsByOrderIdRaw(orderId);
-    if (!details?.length && orderRaw) {
-      const nested = orderRaw?.orderDetails ?? orderRaw?.OrderDetails ?? orderRaw?.details ?? orderRaw?.Details ?? orderRaw?.items ?? orderRaw?.Items ?? raw?.orderDetails ?? raw?.OrderDetails ?? raw?.details ?? raw?.Details ?? raw?.items ?? raw?.Items;
-      details = Array.isArray(nested) ? nested : [];
-    }
+    let details = extractOrderDetailsFromOrderPayload(raw);
+    if (!details.length) details = extractOrderDetailsFromOrderPayload(orderRaw);
     const backendId = orderRaw?.orderId ?? orderRaw?.OrderId ?? orderRaw?.id ?? orderRaw?.Id ?? raw?.orderId ?? raw?.OrderId ?? raw?.id ?? raw?.Id ?? orderId;
-    if (!details?.length && backendId !== orderId) {
+    if (!details.length && backendId !== orderId) {
       const altDetails = await this.getOrderDetailsByOrderIdRaw(String(backendId));
       if (altDetails?.length) details = altDetails;
     }
@@ -1216,8 +1609,8 @@ export const ordersApi = {
         result.invoiceId = nestedInv?.id ?? nestedInv?.Id ?? nestedInv?.invoiceId ?? nestedInv?.InvoiceId;
       }
     }
-    // Asegurar invoiceId: del pedido (todas las variantes en raw/orderRaw), por lista, o por endpoint
-    if (result && (result.invoiceId == null || result.invoiceId === '')) {
+    // Asegurar invoiceId solo cuando no sea initial.
+    if (result && (result.status || '').toLowerCase() !== 'initial' && (result.invoiceId == null || result.invoiceId === '')) {
       const fromRaw =
         raw?.invoiceId ?? raw?.InvoiceId ?? raw?.Invoice_ID ?? raw?.invoice_id
         ?? raw?.data?.invoiceId ?? raw?.data?.InvoiceId ?? raw?.data?.Invoice_ID
@@ -1248,7 +1641,14 @@ export const ordersApi = {
         if (!result.podUploaded) result.podUploaded = true;
       }
       const invRoot = unwrapInvoiceResponse(invForPod);
-      if (result.status === 'pending' && (podText || (invRoot && (invRoot?.isInvoiced === true || invRoot?.IsInvoiced === true || String(invRoot?.status ?? invRoot?.Status ?? '').toLowerCase() === 'invoiced')))) {
+      if (
+        (result.status === 'initial' || result.status === 'confirmed') &&
+        (podText ||
+          (invRoot &&
+            (invRoot?.isInvoiced === true ||
+              invRoot?.IsInvoiced === true ||
+              String(invRoot?.status ?? invRoot?.Status ?? '').toLowerCase() === 'invoiced')))
+      ) {
         result.status = 'invoiced';
       }
     }
@@ -1256,15 +1656,13 @@ export const ordersApi = {
   },
 
   /**
-   * Detalles de un pedido. GET /orderdetails/orderdetails/order/{orderId}
-   * Acepta array o objeto con data/items/orderDetails/details.
+   * Detalles de un pedido desde el propio endpoint de orden por Id.
+   * Acepta array u objeto con orderDetails/details/data/items.
    */
   async getOrderDetailsByOrderIdRaw(orderId: string): Promise<any[]> {
-    const list = await safeGet<any>(`/orderdetails/orderdetails/order/${encodeURIComponent(orderId)}`);
+    const list = await safeGet<any>(`/orders/orders/${encodeURIComponent(orderId)}`);
     if (list == null) return [];
-    if (Array.isArray(list)) return list;
-    const arr = list?.orderDetails ?? list?.OrderDetails ?? list?.details ?? list?.Details ?? list?.data ?? list?.Data ?? list?.items ?? list?.Items ?? [];
-    return Array.isArray(arr) ? arr : [];
+    return extractOrderDetailsFromOrderPayload(list);
   },
 };
 

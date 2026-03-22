@@ -2,12 +2,11 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { ArrowLeft, Send, Edit, ShoppingCart, DollarSign, Package, Store as StoreIcon } from 'lucide-react';
+import { ArrowLeft, Send, ShoppingCart, DollarSign, Package } from 'lucide-react';
 import { useLanguage } from '@/shared/i18n/language-provider';
 import { useAuth } from '@/shared/auth/auth-provider';
 import { ordersApi, CreateOrderInput } from '@/shared/api/orders-api';
-import { storesApi, StoreForUI } from '@/shared/api/stores-api';
-import { getOrderReviewPayload, setOrderReviewPayload } from '@/shared/order-review-payload';
+import { getOrderReviewPayload } from '@/shared/order-review-payload';
 import { categoriesApi, CategoryForUI } from '@/shared/api/categories-api';
 import { orderItemMatchesFamily } from '@/shared/utils/order-item-matches-family';
 import { FamilySummaryCell } from '@/shared/components/family-summary-cell';
@@ -15,13 +14,6 @@ import { Button } from '@/shared/ui/button';
 import { Card, CardContent } from '@/shared/ui/card';
 import { Separator } from '@/shared/ui/separator';
 import { Badge } from '@/shared/ui/badge';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/shared/ui/select';
 
 export function OrderReview() {
   const { t } = useLanguage();
@@ -33,7 +25,6 @@ export function OrderReview() {
   const [editOrderId, setEditOrderId] = useState<string | null>(null);
   const [planogramId, setPlanogramId] = useState<string | undefined>(undefined);
   const [orderSource, setOrderSource] = useState<'planogram' | 'catalog'>('planogram');
-  const [stores, setStores] = useState<StoreForUI[]>([]);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [allCategories, setAllCategories] = useState<CategoryForUI[]>([]);
@@ -56,24 +47,11 @@ export function OrderReview() {
 
   useEffect(() => {
     if (!editOrderId) return;
-    let mounted = true;
-    (async () => {
-      const [list, order] = await Promise.all([
-        storesApi.fetchStores(),
-        ordersApi.getOrderById(editOrderId),
-      ]);
-      if (mounted) {
-        setStores(list);
-      }
-    })();
-    return () => { mounted = false; };
-  }, [editOrderId]);
-
-  const handleStoreChange = (newStoreId: string) => {
-    setStoreId(newStoreId);
-    const store = stores.find((s) => s.id === newStoreId);
-    if (store) setStoreInfo(store);
-  };
+    setSendError(
+      t('edit_disabled_message') ||
+        'La edicion de pedidos desde la PWA esta deshabilitada. Usa solo el flujo de pedido confirmado.'
+    );
+  }, [editOrderId, t]);
 
   // Filtrar solo los productos con cantidad mayor a 0 para mostrar
   const orderItems = planogramData.filter((item: any) => item.toOrder > 0);
@@ -110,21 +88,11 @@ export function OrderReview() {
     };
 
     if (editOrderId) {
-      const orderBeforeUpdate = await ordersApi.getOrderById(editOrderId);
-      const invoiceIdHint = await ordersApi.getInvoiceIdForOrder(editOrderId);
-      const updateResult = await ordersApi.updateOrder(editOrderId, orderPayload, invoiceIdHint ?? undefined);
       setSending(false);
-      if (!updateResult.ok) {
-        const msg = (updateResult.errorMessage || '').toLowerCase();
-        setSendError(
-          msg.includes('duplicate') || msg.includes('unique') || msg.includes('ya existe') || msg.includes('already exists')
-            ? t('po_duplicate')
-            : (updateResult.errorMessage || t('error_saving_order') || 'No se pudo guardar el pedido.')
-        );
-        return;
-      }
-      setSending(false);
-      router.push(`/order/${editOrderId}?confirmed=1`);
+      setSendError(
+        t('edit_disabled_message') ||
+          'La edicion de pedidos desde la PWA esta deshabilitada. Usa solo el flujo de pedido confirmado.'
+      );
       return;
     }
 
@@ -148,22 +116,7 @@ export function OrderReview() {
 
     const orderIdToUse = String(orderIdRaw);
     setSending(false);
-    router.push(`/order/${orderIdToUse}?confirmed=1`);
-  };
-
-  const handleEditOrder = () => {
-    setOrderReviewPayload({
-      storeId,
-      storeInfo,
-      planogramData,
-      editOrderId: editOrderId ?? undefined,
-      source: orderSource,
-    });
-    if (orderSource === 'catalog') {
-      router.push(`/catalog-order/${storeId}${editOrderId ? `?orderId=${editOrderId}` : ''}`);
-    } else {
-      router.push(`/planogram/${storeId}${editOrderId ? `?orderId=${editOrderId}` : ''}`);
-    }
+    router.push(`/order/${orderIdToUse}`);
   };
 
   return (
@@ -191,43 +144,6 @@ export function OrderReview() {
           <Card className="mb-4 border-slate-200 overflow-visible shadow-sm">
             <CardContent className="p-4">
               <p className="text-sm text-red-600">{sendError}</p>
-            </CardContent>
-          </Card>
-        )}
-
-        {/* Selector de tienda (solo en edición) */}
-        {editOrderId && stores.length > 0 && (
-          <Card className="mb-4 border-slate-200 overflow-visible shadow-sm">
-            <CardContent className="p-4 overflow-visible">
-              <label className="flex items-center gap-2 mb-2 text-sm font-medium text-slate-700">
-                <StoreIcon className="h-4 w-4 text-slate-500" />
-                {t('store')}
-              </label>
-              <div className="relative z-[1]">
-                <Select value={storeId} onValueChange={handleStoreChange}>
-                  <SelectTrigger className="h-11 w-full rounded-lg border-slate-200 bg-white shadow-sm hover:bg-slate-50 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400 text-slate-900">
-                    <SelectValue placeholder={t('select_store')} />
-                  </SelectTrigger>
-                  <SelectContent
-                    className="z-[100] min-w-[var(--radix-select-trigger-width)] max-h-[280px] rounded-lg border-slate-200 bg-white shadow-lg py-1"
-                    position="popper"
-                    sideOffset={4}
-                  >
-                    {stores.map((store) => (
-                      <SelectItem
-                        key={store.id}
-                        value={store.id}
-                        className="py-2.5 pl-3 pr-9 cursor-pointer rounded-md mx-1 text-left focus:bg-slate-100 data-[highlighted]:bg-slate-100"
-                      >
-                        {store.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              {storeInfo?.address && (
-                <p className="text-xs text-slate-500 mt-2 pl-0.5">{storeInfo.address}</p>
-              )}
             </CardContent>
           </Card>
         )}
@@ -361,24 +277,16 @@ export function OrderReview() {
       <div className="fixed bottom-20 left-0 right-0 bg-white border-t border-slate-200 p-4 shadow-lg">
         <div className="flex gap-3 max-w-2xl mx-auto">
           <Button
-            variant="outline"
-            onClick={handleEditOrder}
-            className="flex-1"
-          >
-            <Edit className="h-4 w-4 mr-2" />
-            {t('edit_order')}
-          </Button>
-          <Button
             onClick={handleSendOrder}
             disabled={sending || orderItems.length === 0}
-            className="flex-1 bg-indigo-600 hover:bg-indigo-700"
+            className="w-full bg-indigo-600 hover:bg-indigo-700"
           >
             {sending ? (
               <span className="flex items-center gap-2">{t('loading')}...</span>
             ) : (
               <>
                 <Send className="h-4 w-4 mr-2" />
-                {editOrderId ? t('save_changes') : t('send_order')}
+                {t('send_order')}
               </>
             )}
           </Button>
