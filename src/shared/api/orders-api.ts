@@ -64,6 +64,9 @@ async function safePost<T>(endpoint: string, body: unknown): Promise<T | null> {
 
 async function safePut<T>(endpoint: string, body: unknown): Promise<T | null> {
   try {
+    if (typeof body === 'string') {
+      return await apiClient.putBody<T>(endpoint, body);
+    }
     return await apiClient.put<T>(endpoint, body);
   } catch (error) {
     const err = error as ApiError;
@@ -735,7 +738,10 @@ function findOrderMatchingInvoiceOid(orders: OrderForUI[], oid: string): OrderFo
   });
 }
 
-/** Flujo de estados en PWA: initial -> confirmed -> invoiced; cancelled = anulado por vendedor/admin. */
+/**
+ * Backend (numérico): 1 = Created, 2 = Invoiced, 3 = Cancelled.
+ * PWA interna: initial (= created), confirmed (legacy / strings viejos), invoiced, cancelled.
+ */
 function normalizeOrderStatus(raw: any): 'initial' | 'confirmed' | 'invoiced' | 'cancelled' {
   const inner = raw?.data ?? raw?.order ?? raw?.Order ?? raw?.value ?? raw?.result ?? raw;
   const v =
@@ -746,13 +752,87 @@ function normalizeOrderStatus(raw: any): 'initial' | 'confirmed' | 'invoiced' | 
     ?? raw?.orderStatus ?? raw?.OrderStatus ?? raw?.state ?? raw?.State;
   if (v === true) return 'invoiced';
   if (v === false) return 'initial';
-  const s = String(v ?? '').trim().toLowerCase();
-  if (s === 'cancelled' || s === 'canceled' || s === 'cancelado' || s === 'anulado' || s === 'void') {
+
+  if (typeof v === 'number' && Number.isFinite(v)) {
+    if (v === 3) return 'cancelled';
+    if (v === 2) return 'invoiced';
+    if (v === 1) return 'initial';
+  }
+
+  const sTrim = String(v ?? '').trim();
+  if (/^\d+$/.test(sTrim)) {
+    const n = Number(sTrim);
+    if (n === 3) return 'cancelled';
+    if (n === 2) return 'invoiced';
+    if (n === 1) return 'initial';
+  }
+
+  const s = sTrim.toLowerCase();
+  if (
+    s === 'cancelled' ||
+    s === 'canceled' ||
+    s === 'cancelado' ||
+    s === 'anulado' ||
+    s === 'void'
+  ) {
     return 'cancelled';
   }
-  if (s === 'invoiced' || s === 'facturado' || s === 'delivered' || s === '1') return 'invoiced';
+  if (
+    s === 'invoiced' ||
+    s === 'facturado' ||
+    s === 'invoice' ||
+    s === 'billed' ||
+    s === 'facturada' ||
+    s === 'delivered'
+  ) {
+    return 'invoiced';
+  }
+  if (s === 'created' || s === 'creado' || s === 'pending' || s === 'initial' || s === 'new') {
+    return 'initial';
+  }
   if (s === 'completed' || s === 'confirmado' || s === 'confirmed') return 'confirmed';
   return 'initial';
+}
+
+/** Códigos enviados al PUT /orders/order/{id}/status (mismo contrato numérico que el backend). */
+export const ORDER_STATUS_CODE = {
+  created: 1,
+  invoiced: 2,
+  cancelled: 3,
+} as const;
+
+/**
+ * eternal-api `UpdateStatusCommand`: `Guid OrderId`, `OrderStatus NewStatus` (Created=1, Invoiced=2, Canceled=3).
+ * System.Text.Json por defecto usa camelCase en JSON → `orderId`, `newStatus`.
+ * Si `NewStatus` llega 0, suele ser: casing distinto, o enum como string (`JsonStringEnumConverter`).
+ * Probamos varias formas en secuencia hasta que una responda OK.
+ */
+function orderStatusEnumName(code: 1 | 2 | 3): 'Created' | 'Invoiced' | 'Canceled' {
+  if (code === 1) return 'Created';
+  if (code === 2) return 'Invoiced';
+  return 'Canceled'; // C# enum: Canceled (una L)
+}
+
+async function putOrderStatusUntilOk(orderId: string, statusCode: 1 | 2 | 3): Promise<boolean> {
+  const id = String(orderId).trim();
+  if (!id) return false;
+  const n = Number(statusCode);
+  if (!Number.isInteger(n) || n < 1 || n > 3) return false;
+  const name = orderStatusEnumName(statusCode);
+  const path = `/orders/order/${encodeURIComponent(id)}/status`;
+
+  const candidates = [
+    JSON.stringify({ orderId: id, newStatus: n }),
+    JSON.stringify({ OrderId: id, NewStatus: n }),
+    JSON.stringify({ orderId: id, newStatus: name }),
+    JSON.stringify({ OrderId: id, NewStatus: name }),
+  ];
+
+  for (const payload of candidates) {
+    const res = await safePut<any>(path, payload);
+    if (res !== null) return true;
+  }
+  return false;
 }
 
 function mapRawOrderToUI(raw: any, details: any[] = []): OrderForUI {
@@ -1138,8 +1218,8 @@ export const ordersApi = {
     const body: Record<string, unknown> = {
       storeId: existingOrder.storeId ?? existingOrder.StoreId,
       StoreId: existingOrder.storeId ?? existingOrder.StoreId,
-      status: 'completed',
-      Status: 'completed',
+      status: ORDER_STATUS_CODE.invoiced,
+      Status: ORDER_STATUS_CODE.invoiced,
       subtotal: existingOrder.subtotal ?? existingOrder.Subtotal,
       Subtotal: existingOrder.subtotal ?? existingOrder.Subtotal,
       tax: existingOrder.tax ?? existingOrder.Tax,
@@ -1330,22 +1410,23 @@ export const ordersApi = {
   /**
    * Actualiza el estado del pedido en backend.
    * PUT /orders/order/{id}/status
-   * Body: { orderId: "guid", isInvoiced: true }
+   * Body (Swagger eternal-api): `{ "orderId": "<uuid>", "newStatus": 1|2|3 }`
+   * 1=Creado, 2=Facturado, 3=Cancelado.
+   *
+   * `isInvoiced === false`: no hace PUT. El pedido nuevo ya está en Created(1); reenviar 1 suele
+   * provocar ArgumentOutOfRangeException en el handler si no permite transición 1→1.
+   *
+   * `isInvoiced === true`: envía newStatus = 2 (cerrar / facturado tras POD).
    */
   async updateOrderStatus(
     orderId: string | number,
     isInvoiced: boolean = true
   ): Promise<boolean> {
     const idStr = String(orderId).trim();
-    const body = {
-      orderId: idStr,
-      OrderId: idStr,
-      isInvoiced,
-      IsInvoiced: isInvoiced,
-    };
-    const id = encodeURIComponent(idStr);
-    const res = await safePut<any>(`/orders/order/${id}/status`, body);
-    return res !== null;
+    if (!isInvoiced) {
+      return true;
+    }
+    return putOrderStatusUntilOk(idStr, ORDER_STATUS_CODE.invoiced);
   },
 
   /**
@@ -1355,16 +1436,7 @@ export const ordersApi = {
   async cancelOrderBySeller(orderId: string | number): Promise<boolean> {
     const idStr = String(orderId).trim();
     if (!idStr) return false;
-    const body = {
-      orderId: idStr,
-      OrderId: idStr,
-      status: 'cancelled',
-      Status: 'Cancelled',
-      isInvoiced: false,
-      IsInvoiced: false,
-    };
-    const res = await safePut<any>(`/orders/order/${encodeURIComponent(idStr)}/status`, body);
-    return res !== null;
+    return putOrderStatusUntilOk(idStr, ORDER_STATUS_CODE.cancelled);
   },
 
   /**
@@ -1641,13 +1713,17 @@ export const ordersApi = {
         if (!result.podUploaded) result.podUploaded = true;
       }
       const invRoot = unwrapInvoiceResponse(invForPod);
+      const invSt = invRoot?.status ?? invRoot?.Status;
+      const invLooksInvoiced =
+        invRoot?.isInvoiced === true ||
+        invRoot?.IsInvoiced === true ||
+        invSt === ORDER_STATUS_CODE.invoiced ||
+        invSt === String(ORDER_STATUS_CODE.invoiced) ||
+        String(invSt ?? '').trim() === String(ORDER_STATUS_CODE.invoiced) ||
+        String(invSt ?? '').toLowerCase() === 'invoiced';
       if (
         (result.status === 'initial' || result.status === 'confirmed') &&
-        (podText ||
-          (invRoot &&
-            (invRoot?.isInvoiced === true ||
-              invRoot?.IsInvoiced === true ||
-              String(invRoot?.status ?? invRoot?.Status ?? '').toLowerCase() === 'invoiced')))
+        (podText || (invRoot && invLooksInvoiced))
       ) {
         result.status = 'invoiced';
       }

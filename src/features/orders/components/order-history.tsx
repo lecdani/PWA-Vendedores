@@ -156,7 +156,14 @@ export function OrderHistory() {
   /** Lista: solo «inicial» (todo lo no facturado) vs «facturado». */
   const isListInvoiced = (status: string | undefined) => {
     const s = (status || '').toLowerCase().trim();
-    return ['invoiced', 'facturado', 'invoice', 'billed', 'facturada'].includes(s);
+    return (
+      ['invoiced', 'facturado', 'invoice', 'billed', 'facturada'].includes(s) || s === '2'
+    );
+  };
+
+  const isListCancelled = (status: string | undefined) => {
+    const s = (status || '').toLowerCase().trim();
+    return s === 'cancelled' || s === 'canceled' || s === 'cancelado' || s === '3';
   };
 
   const filteredOrders = orders.filter((order) => {
@@ -168,20 +175,25 @@ export function OrderHistory() {
     const searchStr = (po + ' ' + name + ' ' + addr + ' ' + city + ' ' + (order.storeId || '')).toLowerCase();
     const matchesSearch = !searchQuery.trim() || searchStr.includes(searchQuery.toLowerCase());
     const invoiced = isListInvoiced(order.status);
+    const cancelled = isListCancelled(order.status);
     const matchesStatus =
       statusFilter === 'all' ||
       (statusFilter === 'invoiced' && invoiced) ||
-      (statusFilter === 'initial' && !invoiced);
+      (statusFilter === 'initial' && !invoiced && !cancelled);
     return matchesSearch && matchesStatus;
   });
 
-  const getStatusColor = (status: string) =>
-    isListInvoiced(status)
+  const getStatusColor = (status: string) => {
+    if (isListCancelled(status)) return 'bg-slate-100 text-slate-600 border-slate-200';
+    return isListInvoiced(status)
       ? 'bg-green-50 text-green-700 border-green-200'
       : 'bg-amber-50 text-amber-700 border-amber-200';
+  };
 
-  const getStatusText = (status: string) =>
-    isListInvoiced(status) ? (t('invoiced') || 'Facturado') : t('initial');
+  const getStatusText = (status: string) => {
+    if (isListCancelled(status)) return t('cancelled') || 'Cancelado';
+    return isListInvoiced(status) ? (t('invoiced') || 'Facturado') : t('initial');
+  };
 
   return (
     <div className="px-4 py-4">

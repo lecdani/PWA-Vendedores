@@ -239,6 +239,15 @@ export class ApiClient {
     });
   }
 
+  /** PUT con cuerpo JSON ya serializado (evita doble stringify y controla el payload exacto). */
+  async putBody<T>(endpoint: string, jsonBody: string, options?: RequestInit): Promise<T> {
+    return this.request<T>(endpoint, {
+      ...options,
+      method: 'PUT',
+      body: jsonBody,
+    });
+  }
+
   async patch<T>(endpoint: string, data?: any, options?: RequestInit): Promise<T> {
     return this.request<T>(endpoint, {
       ...options,
