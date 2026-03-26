@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { Store, Search, ChevronRight, MapPin, ArrowLeft } from 'lucide-react';
 import { useLanguage } from '@/shared/i18n/language-provider';
 import { Card, CardContent } from '@/shared/ui/card';
@@ -16,7 +16,12 @@ import { useAuth } from '@/shared/auth/auth-provider';
 export function SelectStore() {
   const { t } = useLanguage();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { user } = useAuth();
+  const editOrderId = String(searchParams.get('editOrderId') || '').trim();
+  const editSource = String(searchParams.get('source') || '').trim();
+  const isEditingOrder = !!editOrderId;
+
   const [searchQuery, setSearchQuery] = useState('');
   const [stores, setStores] = useState<StoreForUI[]>([]);
   const [cityNames, setCityNames] = useState<Record<string, string>>({});
@@ -85,6 +90,18 @@ export function SelectStore() {
   });
 
   const handleSelectStore = (store: StoreForUI) => {
+    if (isEditingOrder) {
+      if (editSource === 'catalog' || store.hasPlanogram === false) {
+        router.push(
+          `/catalog-order/${encodeURIComponent(store.id)}?orderId=${encodeURIComponent(editOrderId)}`
+        );
+      } else {
+        router.push(
+          `/planogram/${encodeURIComponent(store.id)}?orderId=${encodeURIComponent(editOrderId)}`
+        );
+      }
+      return;
+    }
     if (store.hasPlanogram === false) {
       router.push(`/catalog-order/${store.id}`);
     } else {
@@ -100,14 +117,16 @@ export function SelectStore() {
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => router.push('/')}
+            onClick={() => (isEditingOrder ? router.push(`/order/${encodeURIComponent(editOrderId)}`) : router.push('/'))}
             className="p-2 h-auto"
           >
             <ArrowLeft className="h-5 w-5" />
           </Button>
           <div>
             <h2 className="text-slate-900">{t('select_store')}</h2>
-            <p className="text-sm text-slate-500">{t('select_store_subtitle')}</p>
+            <p className="text-sm text-slate-500">
+              {isEditingOrder ? 'Selecciona la tienda para editar el pedido inicial.' : t('select_store_subtitle')}
+            </p>
           </div>
         </div>
 

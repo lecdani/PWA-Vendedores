@@ -6,6 +6,8 @@ import { ArrowLeft, Send, ShoppingCart, DollarSign, Package } from 'lucide-react
 import { useLanguage } from '@/shared/i18n/language-provider';
 import { useAuth } from '@/shared/auth/auth-provider';
 import { ordersApi, CreateOrderInput } from '@/shared/api/orders-api';
+import { storesApi, StoreForUI } from '@/shared/api/stores-api';
+import { assignmentsApi } from '@/shared/api/assignments-api';
 import { getOrderReviewPayload } from '@/shared/order-review-payload';
 import { categoriesApi, CategoryForUI } from '@/shared/api/categories-api';
 import { orderItemMatchesFamily } from '@/shared/utils/order-item-matches-family';
@@ -28,10 +30,46 @@ export function OrderReview() {
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [allCategories, setAllCategories] = useState<CategoryForUI[]>([]);
+  const [editableStores, setEditableStores] = useState<StoreForUI[]>([]);
 
   useEffect(() => {
     categoriesApi.fetchAll().then(setAllCategories);
   }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      if (!editOrderId) {
+        if (mounted) setEditableStores([]);
+        return;
+      }
+      const [apiStores, allAssignments] = await Promise.all([
+        storesApi.fetchStores(),
+        assignmentsApi.fetchAll(),
+      ]);
+      if (!mounted) return;
+
+      const uid = String(user?.id ?? '').trim();
+      let allowedStores = apiStores;
+      if (uid) {
+        const allowedStoreIds = new Set(
+          allAssignments
+            .filter((a) => String(a.salespersonId) === uid)
+            .map((a) => String(a.storeId))
+        );
+        allowedStores = apiStores.filter((s) => allowedStoreIds.has(String(s.id)));
+      }
+      if (storeId && !allowedStores.some((s) => String(s.id) === String(storeId))) {
+        const currentStore = apiStores.find((s) => String(s.id) === String(storeId));
+        if (currentStore) allowedStores = [currentStore, ...allowedStores];
+      }
+      setEditableStores(allowedStores);
+    })();
+
+    return () => {
+      mounted = false;
+    };
+  }, [editOrderId, user?.id, storeId]);
 
   useEffect(() => {
     const data = getOrderReviewPayload();
@@ -44,14 +82,6 @@ export function OrderReview() {
       setOrderSource(data.source ?? 'planogram');
     }
   }, []);
-
-  useEffect(() => {
-    if (!editOrderId) return;
-    setSendError(
-      t('edit_disabled_message') ||
-        'La edicion de pedidos desde la PWA esta deshabilitada. Usa solo el flujo de pedido confirmado.'
-    );
-  }, [editOrderId, t]);
 
   // Filtrar solo los productos con cantidad mayor a 0 para mostrar
   const orderItems = planogramData.filter((item: any) => item.toOrder > 0);
@@ -88,11 +118,66 @@ export function OrderReview() {
     };
 
     if (editOrderId) {
+      const detailsRaw = await ordersApi.getOrderDetailsByOrderIdRaw(editOrderId);
+      const detailsByProduct = new Map<string, Array<{ orderDetailId?: string; row?: number; col?: number }>>();
+      (detailsRaw || []).forEach((d: any) => {
+        const pid = String(d?.productId ?? d?.ProductId ?? '').trim();
+        if (!pid) return;
+        const arr = detailsByProduct.get(pid) ?? [];
+        arr.push({
+          orderDetailId: String(d?.orderDetailId ?? d?.OrderDetailId ?? d?.id ?? d?.Id ?? '').trim() || undefined,
+          row: d?.row ?? d?.Row ?? d?.xPosition ?? d?.XPosition,
+          col: d?.col ?? d?.Col ?? d?.yPosition ?? d?.YPosition,
+        });
+        detailsByProduct.set(pid, arr);
+      });
+
+      const payloadForUpdate: CreateOrderInput = {
+        ...orderPayload,
+        items: orderItems.map((item: any) => {
+          const pid = String(item.productId || '').trim();
+          const arr = detailsByProduct.get(pid) ?? [];
+          let foundIndex = arr.findIndex(
+            (r) => Number(r?.row) === Number(item?.row) && Number(r?.col) === Number(item?.col)
+          );
+          if (foundIndex < 0) foundIndex = 0;
+          const picked = foundIndex >= 0 ? arr.splice(foundIndex, 1)[0] : undefined;
+          return {
+            productId: item.productId,
+            sku: item.sku,
+            productName: item.productName,
+            quantity: item.toOrder,
+            price: item.price,
+            orderDetailId: picked?.orderDetailId,
+          };
+        }),
+      };
+
+      const upd = await ordersApi.updateOrder(editOrderId, payloadForUpdate);
+      if (!upd.ok) {
+        setSendError(upd.errorMessage || (t('error_saving_order') || 'No se pudo actualizar el pedido.'));
+        setSending(false);
+        return;
+      }
+
+      try {
+        const cellRows = orderItems
+          .filter((i: any) => i && Number(i.toOrder) > 0 && i.row != null && i.col != null)
+          .map((i: any) => ({
+            row: Number(i.row),
+            col: Number(i.col),
+            quantity: Number(i.toOrder) || 0,
+          }))
+          .filter((x: any) => Number.isFinite(x.row) && Number.isFinite(x.col) && x.quantity > 0);
+        if (cellRows.length > 0) {
+          window.localStorage.setItem(`order_planogram_cells_${editOrderId}`, JSON.stringify(cellRows));
+        }
+      } catch {
+        // ignore
+      }
+
       setSending(false);
-      setSendError(
-        t('edit_disabled_message') ||
-          'La edicion de pedidos desde la PWA esta deshabilitada. Usa solo el flujo de pedido confirmado.'
-      );
+      router.push(`/order/${editOrderId}`);
       return;
     }
 
@@ -115,6 +200,24 @@ export function OrderReview() {
     }
 
     const orderIdToUse = String(orderIdRaw);
+
+    // Guardar mapa por celda (row-col) para evitar duplicación en planogramas con productos repetidos.
+    try {
+      const cellRows = orderItems
+        .filter((i: any) => i && Number(i.toOrder) > 0 && i.row != null && i.col != null)
+        .map((i: any) => ({
+          row: Number(i.row),
+          col: Number(i.col),
+          quantity: Number(i.toOrder) || 0,
+        }))
+        .filter((x: any) => Number.isFinite(x.row) && Number.isFinite(x.col) && x.quantity > 0);
+      if (cellRows.length > 0) {
+        window.localStorage.setItem(`order_planogram_cells_${orderIdToUse}`, JSON.stringify(cellRows));
+      }
+    } catch {
+      // ignore
+    }
+
     setSending(false);
     router.push(`/order/${orderIdToUse}`);
   };
@@ -144,6 +247,32 @@ export function OrderReview() {
           <Card className="mb-4 border-slate-200 overflow-visible shadow-sm">
             <CardContent className="p-4">
               <p className="text-sm text-red-600">{sendError}</p>
+            </CardContent>
+          </Card>
+        )}
+
+        {editOrderId && (
+          <Card className="mb-4 border-slate-200">
+            <CardContent className="p-4">
+              <div className="space-y-2">
+                <label className="text-xs text-slate-600">Tienda del pedido</label>
+                <select
+                  value={storeId}
+                  onChange={(e) => {
+                    const nextId = String(e.target.value || '').trim();
+                    setStoreId(nextId);
+                    const selected = editableStores.find((s) => String(s.id) === nextId);
+                    if (selected) setStoreInfo(selected);
+                  }}
+                  className="w-full h-9 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900"
+                >
+                  {editableStores.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </CardContent>
           </Card>
         )}

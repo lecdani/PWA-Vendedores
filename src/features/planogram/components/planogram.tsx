@@ -55,11 +55,30 @@ export function Planogram({
   const [limitError, setLimitError] = useState<string | null>(null);
   const [flowError, setFlowError] = useState<string | null>(null);
   const [continuing, setContinuing] = useState(false);
-  /** En modo factura: solo estos productId pueden tener cantidad > 0 (el pedido inicial no cambia). */
+  /**
+   * En modo factura: solo estas celdas (row-col) pueden editarse (el pedido inicial no cambia).
+   * Esto evita el bug cuando un mismo producto está repetido en varias celdas.
+   */
+  const allowedCellKeysRef = useRef<Set<string>>(new Set());
+  /** Fallback legacy si el backend no devuelve row/col en detalles. */
   const allowedProductIdsRef = useRef<Set<string>>(new Set());
 
   const MAX_QTY_PER_PRODUCT_PLANOGRAM = 10;
   const isInvoiceFlow = mode === 'invoice' && !!orderId;
+
+  const cellKey = (row: number, col: number) => `${row}-${col}`;
+
+  const cellAllowed = (row: number, col: number, productId?: string): boolean => {
+    if (!isInvoiceFlow) return true;
+    const allowedCells = allowedCellKeysRef.current;
+    if (allowedCells.size > 0) return allowedCells.has(cellKey(row, col));
+    // Fallback: si no hay data por celda, seguir con el bloqueo por producto como estaba antes
+    if (!productId) return false;
+    const pid = String(productId).trim();
+    const allowedProducts = allowedProductIdsRef.current;
+    if (allowedProducts.size === 0) return false;
+    return allowedProducts.has(pid) || allowedProducts.has(String(Number(pid)));
+  };
 
   const productIdAllowed = (productId: string): boolean => {
     if (!isInvoiceFlow) return true;
@@ -176,30 +195,119 @@ export function Planogram({
 
         if (orderId && mounted) {
           const details = await ordersApi.getOrderDetailsByOrderIdRaw(orderId);
-          const qtyByProduct = new Map<string, number>();
-          const allowed = new Set<string>();
+          const qtyByCell = new Map<string, number>();
+          const qtyQueueByProduct = new Map<string, number[]>(); // fallback para evitar duplicar en todas las celdas
+          const allowedProducts = new Set<string>();
+          const allowedCells = new Set<string>();
+          let hasCellInfo = false;
+
+          // Preferir celdas guardadas en el front al crear el pedido (sin backend).
+          let fromFrontCells: Array<{ row: number; col: number; quantity: number }> = [];
+          try {
+            const raw = typeof window !== 'undefined' ? window.localStorage.getItem(`order_planogram_cells_${orderId}`) : null;
+            const parsed = raw ? JSON.parse(raw) : null;
+            if (Array.isArray(parsed)) {
+              fromFrontCells = parsed
+                .map((r: any) => ({
+                  row: Number(r?.row),
+                  col: Number(r?.col),
+                  quantity: Number(r?.quantity ?? r?.qty ?? 0),
+                }))
+                .filter((r) => Number.isFinite(r.row) && Number.isFinite(r.col) && r.quantity > 0);
+            }
+          } catch {
+            fromFrontCells = [];
+          }
+
+          if (fromFrontCells.length > 0) {
+            fromFrontCells.forEach((r) => {
+              const k = cellKey(r.row, r.col);
+              qtyByCell.set(k, (qtyByCell.get(k) ?? 0) + r.quantity);
+              allowedCells.add(k);
+            });
+            hasCellInfo = true;
+          }
+
           details.forEach((d: any) => {
             const pid = String(d?.productId ?? d?.ProductId ?? '').trim();
             const qty = Number(d?.quantity ?? d?.Quantity ?? 0);
+            // Posición de celda: el backend puede enviar row/col o xPosition/yPosition (planograma).
+            const rowRaw =
+              d?.row ??
+              d?.Row ??
+              d?.xPosition ??
+              d?.XPosition ??
+              d?.xposition ??
+              d?.XPOSITION ??
+              d?.x_pos ??
+              d?.X_Pos;
+            const colRaw =
+              d?.col ??
+              d?.Col ??
+              d?.column ??
+              d?.Column ??
+              d?.yPosition ??
+              d?.YPosition ??
+              d?.yposition ??
+              d?.YPOSITION ??
+              d?.y_pos ??
+              d?.Y_Pos;
+            const row = Number(rowRaw);
+            const col = Number(colRaw);
             if (pid) {
-              qtyByProduct.set(pid, (qtyByProduct.get(pid) ?? 0) + qty);
-              allowed.add(pid);
+              const q = qtyQueueByProduct.get(pid) ?? [];
+              if (qty > 0) q.push(qty);
+              qtyQueueByProduct.set(pid, q);
+              allowedProducts.add(pid);
+              if (Number.isFinite(row) && Number.isFinite(col)) {
+                hasCellInfo = true;
+                const k = cellKey(row, col);
+                qtyByCell.set(k, (qtyByCell.get(k) ?? 0) + qty);
+                allowedCells.add(k);
+              }
             }
           });
           if (isInvoiceFlow) {
-            allowedProductIdsRef.current = allowed;
+            allowedProductIdsRef.current = allowedProducts;
+            allowedCellKeysRef.current = hasCellInfo ? allowedCells : new Set();
           } else {
             allowedProductIdsRef.current = new Set();
+            allowedCellKeysRef.current = new Set();
           }
           const merged = grid.map((item) => {
-            const qty = item.productId
-              ? (qtyByProduct.get(item.productId) ?? qtyByProduct.get(String(Number(item.productId))) ?? 0)
-              : 0;
+            const qtyFromCell = qtyByCell.get(cellKey(item.row, item.col)) ?? 0;
+            // IMPORTANTE:
+            // En modo factura con planogramas que permiten duplicados, NO podemos inferir cantidades por productId,
+            // porque “desbloquearía” celdas duplicadas indebidamente. Solo respetamos cantidades por celda.
+            let qty = 0;
+            if (hasCellInfo) {
+              qty = qtyFromCell;
+            } else if (!isInvoiceFlow && item.productId) {
+              // En edición de pedido inicial, si el backend no trae row/col,
+              // repartir cantidades por producto entre sus celdas para no resetear a cero.
+              const pid = String(item.productId).trim();
+              const key = qtyQueueByProduct.has(pid) ? pid : String(Number(pid));
+              const queue = qtyQueueByProduct.get(key);
+              qty = queue && queue.length > 0 ? Number(queue.shift() || 0) : 0;
+            }
             return { ...item, toOrder: qty };
           });
+
+          // Bloqueo por celda usando SOLO el planograma ya mostrado:
+          // en modo factura, únicamente se pueden editar celdas que tengan cantidad inicial > 0.
+          if (isInvoiceFlow) {
+            const editableCells = new Set(
+              merged
+                .filter((i) => i.productId && Number(i.toOrder) > 0)
+                .map((i) => cellKey(i.row, i.col))
+            );
+            allowedCellKeysRef.current = editableCells;
+          }
+
           setPlanogramData(merged);
         } else {
           allowedProductIdsRef.current = new Set();
+          allowedCellKeysRef.current = new Set();
           setPlanogramData(grid);
         }
       } catch (e) {
@@ -224,7 +332,7 @@ export function Planogram({
       if (idx < 0) return prev;
       const current = prev[idx];
       if (!current.productId) return prev;
-      if (isInvoiceFlow && !productIdAllowed(current.productId)) return prev;
+      if (isInvoiceFlow && !cellAllowed(current.row, current.col, current.productId)) return prev;
 
       const next = [...prev];
       next[idx] = { ...current, toOrder: qty };
@@ -235,14 +343,14 @@ export function Planogram({
   const incQty = (row: number, col: number) => {
     const current = planogramData.find((p) => p.row === row && p.col === col);
     if (!current || !current.productId) return;
-    if (isInvoiceFlow && !productIdAllowed(current.productId)) return;
+    if (isInvoiceFlow && !cellAllowed(row, col, current.productId)) return;
     setQtyForCell(row, col, (current.toOrder || 0) + 1);
   };
 
   const decQty = (row: number, col: number) => {
     const current = planogramData.find((p) => p.row === row && p.col === col);
     if (!current || !current.productId) return;
-    if (isInvoiceFlow && !productIdAllowed(current.productId)) return;
+    if (isInvoiceFlow && !cellAllowed(row, col, current.productId)) return;
     setQtyForCell(row, col, (current.toOrder || 0) - 1);
   };
 
@@ -255,7 +363,7 @@ export function Planogram({
   const getCellStyle = (item: ProductPosition) => {
     const hasProduct = !!item.productId;
     if (!hasProduct) return 'bg-slate-400 border-slate-500'; // vacío: solo más oscuro
-    const locked = isInvoiceFlow && item.productId && !productIdAllowed(item.productId);
+    const locked = isInvoiceFlow && item.productId && !cellAllowed(item.row, item.col, item.productId);
     if (locked) return 'bg-slate-200 border-slate-300 opacity-60';
     if (item.toOrder > 0) return 'bg-indigo-50 border-indigo-300';
     return 'bg-slate-100 border-slate-200';
@@ -280,11 +388,15 @@ export function Planogram({
       const order = await ordersApi.getOrderById(orderId);
       const backendOrderId = String((order as any)?.backendOrderId ?? order?.id ?? orderId).trim();
       const rows = planogramData
-        .filter((i) => i.productId && i.toOrder > 0 && productIdAllowed(i.productId))
+        .filter((i) => i.productId && i.toOrder > 0 && cellAllowed(i.row, i.col, i.productId))
         .map((i) => ({
           productId: String(i.productId),
           quantity: i.toOrder,
           unitPrice: Number(i.price) || 0,
+          row: i.row,
+          col: i.col,
+          sku: String(i.sku || '').trim(),
+          productName: String(i.productName || '').trim(),
         }));
       if (rows.length === 0) {
         setFlowError('Indica al menos una cantidad entregada en los productos del pedido.');
@@ -292,6 +404,27 @@ export function Planogram({
         return;
       }
       if (typeof window !== 'undefined') {
+        // Guardar celdas facturadas por posición (row-col). Esto permite mostrar el planograma facturado
+        // sin agrupar por producto cuando hay productos duplicados en múltiples celdas.
+        try {
+          const deliveredCells = planogramData
+            .filter((i) => i.productId && i.toOrder > 0 && cellAllowed(i.row, i.col, i.productId))
+            .map((i) => ({
+              row: i.row,
+              col: i.col,
+              productId: String(i.productId),
+              quantity: Number(i.toOrder) || 0,
+              unitPrice: Number(i.price) || 0,
+              sku: String(i.sku || '').trim(),
+              productName: String(i.productName || '').trim(),
+            }))
+            .filter((r) => Number.isFinite(r.row) && Number.isFinite(r.col) && r.quantity > 0);
+          if (deliveredCells.length > 0) {
+            window.localStorage.setItem(`order_delivered_cells_${orderId}`, JSON.stringify(deliveredCells));
+          }
+        } catch {
+          // ignore
+        }
         window.localStorage.setItem(
           `order_delivery_confirmation_${orderId}`,
           JSON.stringify({ mode: 'invoice', source: 'planogram', items: rows })
@@ -451,7 +584,7 @@ export function Planogram({
                     </span>
 
                     <div className="mt-1 flex items-center gap-0.5">
-                      {isInvoiceFlow && !productIdAllowed(item.productId) ? (
+                      {isInvoiceFlow && !cellAllowed(item.row, item.col, item.productId) ? (
                         <span className="text-[8px] text-slate-400 px-0.5">—</span>
                       ) : (
                         <>

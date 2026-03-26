@@ -103,10 +103,11 @@ export function OrderHistory() {
               if (total <= 0 && lines.length) {
                 total = lines.reduce((s, it) => s + (Number(it.amount) || 0), 0);
               }
-              const poInv = String(inv.po || '').trim();
+              // PO ya no se usa para identificar la factura; usar InvoiceNumber.
+              const invNo = String((inv as any)?.invoiceNumber ?? (inv as any)?.InvoiceNumber ?? '').trim();
               return {
                 ...order,
-                ...(poInv ? { po: poInv } : {}),
+                ...(invNo ? { invoiceId: invNo } : {}),
                 ...(total > 0 ? { total, subtotal: total } : {}),
                 ...(units > 0 ? { totalUnits: units } : {}),
                 ...(lines.length > 0 ? { invoiceLineCount: lines.length } : {}),

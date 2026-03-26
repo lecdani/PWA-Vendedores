@@ -30,11 +30,61 @@ export function CapturePOD({ orderId }: { orderId: string }) {
   const [podUploadError, setPodUploadError] = useState<string | null>(null);
   const [podSuccessMessage, setPodSuccessMessage] = useState<string | null>(null);
   const [storeHasPlanogram, setStoreHasPlanogram] = useState<boolean>(true);
+  const [deliveredItemsPreview, setDeliveredItemsPreview] = useState<
+    Array<{ productId: string; quantity: number; unitPrice?: number }>
+  >([]);
+
+  const readDeliveredFromStorage = () => {
+    if (typeof window === 'undefined') return;
+    try {
+      const raw = window.localStorage.getItem(`order_delivery_confirmation_${orderId}`);
+      if (!raw) {
+        setDeliveredItemsPreview([]);
+        return;
+      }
+      const parsed = JSON.parse(raw);
+      const items = Array.isArray(parsed?.items) ? parsed.items : [];
+      setDeliveredItemsPreview(
+        items
+          .map((it: any) => ({
+            productId: String(it?.productId ?? '').trim(),
+            quantity: Number(it?.quantity ?? 0) || 0,
+            unitPrice: it?.unitPrice != null ? Number(it.unitPrice) : undefined,
+          }))
+          .filter((it: any) => it.productId && it.quantity > 0)
+      );
+    } catch {
+      setDeliveredItemsPreview([]);
+    }
+  };
+
+  const deliveredUnitsPreview =
+    deliveredItemsPreview.length > 0
+      ? deliveredItemsPreview.reduce((s, it) => s + (Number(it.quantity) || 0), 0)
+      : 0;
+
+  const deliveredTotalPreview =
+    deliveredItemsPreview.length > 0
+      ? deliveredItemsPreview.reduce((s, it) => {
+          const pid = String(it.productId || '').trim();
+          const qty = Number(it.quantity) || 0;
+          if (!pid || qty <= 0) return s;
+          const priceFromStorage = Number(it.unitPrice);
+          const priceFromOrder =
+            Number(
+              (orderData?.items || []).find((x: any) => String(x?.productId ?? x?.ProductId ?? '').trim() === pid)
+                ?.price
+            ) || 0;
+          const unit = Number.isFinite(priceFromStorage) && priceFromStorage > 0 ? priceFromStorage : priceFromOrder;
+          return s + qty * (unit || 0);
+        }, 0)
+      : 0;
 
   // Cargar pedido desde la API, resolver tienda y total (como en listado de pedidos)
   useEffect(() => {
     let mounted = true;
     (async () => {
+      readDeliveredFromStorage();
       setOrderLoadError(false);
       const order = await ordersApi.getOrderById(orderId);
       if (!mounted) return;
@@ -107,6 +157,13 @@ export function CapturePOD({ orderId }: { orderId: string }) {
     };
   }, [orderId]);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onFocus = () => readDeliveredFromStorage();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [orderId]);
+
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file) {
@@ -157,7 +214,15 @@ export function CapturePOD({ orderId }: { orderId: string }) {
         if (saved) {
           try {
             const parsed = JSON.parse(saved);
-            deliveredItems = Array.isArray(parsed?.items) ? parsed.items : [];
+            const rawItems = Array.isArray(parsed?.items) ? parsed.items : [];
+            // Sanitizar por compatibilidad con backend (ignorar campos extra como row/col/sku/productName)
+            deliveredItems = rawItems
+              .map((it: any) => ({
+                productId: String(it?.productId ?? '').trim(),
+                quantity: Number(it?.quantity ?? 0) || 0,
+                unitPrice: it?.unitPrice != null ? Number(it.unitPrice) : undefined,
+              }))
+              .filter((it: any) => it.productId && it.quantity > 0);
           } catch {
             deliveredItems = [];
           }
@@ -405,15 +470,25 @@ export function CapturePOD({ orderId }: { orderId: string }) {
                   )}
                   <div className="flex justify-between">
                     <span className="text-slate-500">{t('units')}:</span>
-                    <span className="text-slate-900">{orderData.totalUnits || orderData.items?.reduce((sum: number, item: any) => sum + (item.toOrder || 0), 0)}</span>
+                    <span className="text-slate-900">
+                      {deliveredItemsPreview.length > 0
+                        ? deliveredUnitsPreview
+                        : (orderData.totalUnits ||
+                            orderData.items?.reduce((sum: number, item: any) => sum + (item.toOrder || 0), 0))}
+                    </span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-500">{t('total')}:</span>
                     <span className="text-slate-900 font-semibold">
                       ${(
-                        Number(orderData.total) ||
-                        (Number(orderData.subtotal) + Number(orderData.tax) || 0) ||
-                        (orderData.items || []).reduce((s: number, i: any) => s + (i.quantity ?? i.toOrder ?? 0) * (Number(i.price) || 0), 0) + (Number(orderData.tax) || 0)
+                        (deliveredItemsPreview.length > 0
+                          ? deliveredTotalPreview
+                          : (Number(orderData.total) ||
+                              (Number(orderData.subtotal) + Number(orderData.tax) || 0) ||
+                              (orderData.items || []).reduce(
+                                (s: number, i: any) => s + (i.quantity ?? i.toOrder ?? 0) * (Number(i.price) || 0),
+                                0
+                              ) + (Number(orderData.tax) || 0)))
                       ).toFixed(2)}
                     </span>
                   </div>

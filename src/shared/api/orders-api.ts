@@ -4,6 +4,7 @@ import { productsApi } from './products-api';
 
 // Tipos ligeros para no acoplar demasiado al backend
 export interface OrderItemInput {
+  orderDetailId?: string;
   productId: string;
   sku: string;
   productName: string;
@@ -246,11 +247,11 @@ function getPodFromInvoice(inv: any): string {
     seen.add(root);
     for (const pk of podKeys) {
       const v = (root as any)[pk];
-      const str = typeof v === 'string' ? v.trim() : v != null && v !== '' ? String(v).trim() : '';
-      if (str) return str;
+  const str = typeof v === 'string' ? v.trim() : v != null && v !== '' ? String(v).trim() : '';
+  if (str) return str;
     }
     const base64 = (root as any)?.podBase64 ?? (root as any)?.PodBase64;
-    if (typeof base64 === 'string' && base64.length > 0) return `data:image/png;base64,${base64}`;
+  if (typeof base64 === 'string' && base64.length > 0) return `data:image/png;base64,${base64}`;
   }
   return '';
 }
@@ -1113,15 +1114,30 @@ export const ordersApi = {
   },
 
   /**
-   * Edicion de pedido deshabilitada por regla de negocio.
-   * Solo se permite actualizar estatus en endpoints dedicados.
+   * Edición de pedido inicial (vendedor): tienda + ítems.
+   * Endpoint: PUT /orders/orders/{id}
+   * Body mínimo: { id, storeId, items[{ orderDetailId, productId, quantity }] }
    */
   async updateOrder(orderId: string | number, input: CreateOrderInput, optionalInvoiceId?: string | number | null): Promise<{ ok: boolean; errorMessage?: string }> {
-    return {
-      ok: false,
-      errorMessage:
-        'La actualizacion de pedido/detalles ya no esta permitida. Solo se puede actualizar estatus.',
+    void optionalInvoiceId;
+    const idStr = String(orderId).trim();
+    if (!idStr) return { ok: false, errorMessage: 'Id de pedido inválido.' };
+
+    const body = {
+      id: idStr,
+      storeId: String(input.storeId || '').trim(),
+      items: (Array.isArray(input.items) ? input.items : []).map((item: any) => ({
+        orderDetailId: String(item?.orderDetailId || '').trim() || undefined,
+        productId: String(item?.productId || '').trim(),
+        quantity: Number(item?.quantity) || 0,
+      })),
     };
+
+    const res = await safePut<any>(`/orders/orders/${encodeURIComponent(idStr)}`, body);
+    if (res === null) {
+      return { ok: false, errorMessage: 'No se pudo actualizar el pedido.' };
+    }
+    return { ok: true };
   },
 
   /**
@@ -1402,7 +1418,7 @@ export const ordersApi = {
     fileName: string;
     notes?: string;
   }): Promise<boolean> {
-    return false;
+      return false;
   },
 
   // VisitLogs removidos: el sistema ahora usa Assignments (tiendas asignadas).

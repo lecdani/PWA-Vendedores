@@ -379,28 +379,48 @@ export function SalesReport() {
   const handleExportReport = () => {
     const headers = [
       'PO',
-      t('sales_invoice_date_col'),
+      t('sales_invoice_date_col') || 'Fecha factura',
+      t('invoice_id_short') || 'Factura',
       t('store') || 'Tienda',
       t('city') || 'Ciudad',
-      'Total',
-      t('products') || 'Productos',
+      t('invoice_sku') || 'SKU',
+      t('invoice_description') || 'Producto',
+      t('invoice_qty') || 'Cantidad',
+      t('invoice_unit_price') || 'Precio unitario',
+      t('invoice_amount') || 'Total línea',
     ];
-    const rows = sortedFilteredInvoices.map((inv) => {
-      const products =
-        (inv.items || [])
-          .map((line) => `${line.description || line.code} (${line.qty})`)
-          .join('; ') || '—';
+    const rows: string[][] = [];
+    sortedFilteredInvoices.forEach((inv) => {
       const ord = orders.find((o) => o.id === inv.orderId);
-      return [
-        inv.po ? `${inv.po}` : '—',
-        new Date(inv.invoiceDate || inv.orderDate).toLocaleDateString('es-MX', {
-          dateStyle: 'short',
-        }),
-        getStoreName(inv.storeId, ord?.storeName),
-        getStoreCity(inv.storeId) || '—',
-        formatCurrency(Number(inv.total) || 0),
-        products,
-      ];
+      const invoiceDate = new Date(inv.invoiceDate || inv.orderDate).toLocaleDateString('es-MX', {
+        dateStyle: 'short',
+      });
+      const po = inv.po ? `${inv.po}` : '—';
+      const invoiceNo = inv.invoiceId || '—';
+      const store = getStoreName(inv.storeId, ord?.storeName);
+      const city = getStoreCity(inv.storeId) || '—';
+      const lines = inv.items || [];
+      if (lines.length === 0) {
+        rows.push([po, invoiceDate, invoiceNo, store, city, '—', '—', '0', '0.00', '0.00']);
+        return;
+      }
+      lines.forEach((line) => {
+        const qty = Number(line.qty) || 0;
+        const unit = Number(line.price) || 0;
+        const amount = Number(line.amount) || qty * unit;
+        rows.push([
+          po,
+          invoiceDate,
+          invoiceNo,
+          store,
+          city,
+          String(line.code || '').trim() || '—',
+          String(line.description || '').trim() || '—',
+          String(qty),
+          unit.toFixed(2),
+          amount.toFixed(2),
+        ]);
+      });
     });
     const csvRows = [headers, ...rows].map((row) => row.map(escapeCsvCell).join(','));
     const BOM = '\uFEFF';

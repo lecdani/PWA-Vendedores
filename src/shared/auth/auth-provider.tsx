@@ -32,6 +32,8 @@ interface User {
   name: string;
   lastName?: string;
   phone?: string;
+  sellerCode?: string;
+  baseCityId?: string;
 }
 
 interface AuthContextType {
@@ -99,6 +101,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       let apiName: string | undefined;
       let apiLastName: string | undefined;
       let apiUserId: string | undefined;
+      let apiSellerCode: string | undefined;
+      let apiBaseCityId: string | undefined;
       try {
         const apiUser = await authApi.getCurrentUserFromApi(token, id !== email ? id : undefined, userEmail);
         roleRaw = apiUser.role;
@@ -107,6 +111,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         apiName = apiUser.name;
         apiLastName = apiUser.lastName;
         apiUserId = apiUser.id;
+        apiSellerCode = apiUser.sellerCode;
+        apiBaseCityId = apiUser.baseCityId;
       } catch {
         roleRaw = getRoleFromLoginResponse(response);
       }
@@ -135,6 +141,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         lastName: apiLastName,
         role: 'vendedor',
         phone: apiPhone,
+        sellerCode: apiSellerCode,
+        baseCityId: apiBaseCityId,
       };
       localStorage.setItem('auth_token', token);
       localStorage.setItem('auth_user', JSON.stringify(user));

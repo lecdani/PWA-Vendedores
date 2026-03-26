@@ -90,7 +90,16 @@ export const authApi = {
     token: string,
     userId: string | undefined,
     email: string
-  ): Promise<{ id?: string; role: string; isActive: boolean; phone?: string; name?: string; lastName?: string }> {
+  ): Promise<{
+    id?: string;
+    role: string;
+    isActive: boolean;
+    phone?: string;
+    name?: string;
+    lastName?: string;
+    sellerCode?: string;
+    baseCityId?: string;
+  }> {
     const rawId = (raw: Record<string, unknown>) =>
       raw?.id != null ? String(raw.id) : raw?.Id != null ? String(raw.Id) : undefined;
     const rawRole = (raw: Record<string, unknown>) =>
@@ -103,6 +112,12 @@ export const authApi = {
       String(raw?.name ?? raw?.Name ?? raw?.firstName ?? raw?.FirstName ?? '').trim() || undefined;
     const rawLastName = (raw: Record<string, unknown>) =>
       String(raw?.lastName ?? raw?.LastName ?? '').trim() || undefined;
+    const rawSellerCode = (raw: Record<string, unknown>) =>
+      String(raw?.sellerCode ?? raw?.SellerCode ?? raw?.seller_code ?? raw?.SELLER_CODE ?? '').trim() || undefined;
+    const rawBaseCityId = (raw: Record<string, unknown>) =>
+      (raw?.baseCityId ?? raw?.BaseCityId ?? raw?.base_city_id ?? raw?.BASE_CITY_ID) != null
+        ? String(raw?.baseCityId ?? raw?.BaseCityId ?? raw?.base_city_id ?? raw?.BASE_CITY_ID).trim() || undefined
+        : undefined;
 
     const mapUser = (raw: Record<string, unknown>) => ({
       id: rawId(raw),
@@ -111,6 +126,8 @@ export const authApi = {
       phone: rawPhone(raw),
       name: rawName(raw),
       lastName: rawLastName(raw),
+      sellerCode: rawSellerCode(raw),
+      baseCityId: rawBaseCityId(raw),
     });
 
     if (userId && !String(userId).includes('@')) {

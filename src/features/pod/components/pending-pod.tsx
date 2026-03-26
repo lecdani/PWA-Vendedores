@@ -144,9 +144,9 @@ export function PendingPOD() {
             const displayStoreName = cached?.name || (order.storeName && !looksLikeId(order.storeName) ? order.storeName : t('store'));
             const displayAddress = (cached?.address || order.storeAddress || '').trim();
             const displayCity = (cached?.city || '').trim();
-            const displayPo = (order.po || '').trim();
-            const titleMain = displayPo ? `${displayPo}` : displayStoreName;
-            const subtitleStore = displayPo ? displayStoreName : null;
+            const invNo = String((order as any)?.invoiceNumber ?? (order as any)?.InvoiceNumber ?? order.invoiceId ?? '').trim();
+            const titleMain = invNo ? `${invNo}` : displayStoreName;
+            const subtitleStore = invNo ? displayStoreName : null;
             const computedTotal = order.items?.length
               ? order.items.reduce((s: number, i: any) => s + (i.quantity ?? i.toOrder ?? 0) * (Number(i.price) || 0), 0)
               : 0;

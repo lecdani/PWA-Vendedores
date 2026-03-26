@@ -7,7 +7,6 @@ import {
   Store as StoreIcon, 
   Package, 
   DollarSign,
-  Download,
   Grid3x3,
   Printer,
   CheckCircle2,
@@ -15,6 +14,7 @@ import {
   ChevronDown,
   ChevronUp,
   Ban,
+  Pencil,
 } from 'lucide-react';
 import { useLanguage } from '@/shared/i18n/language-provider';
 import { useAuth } from '@/shared/auth/auth-provider';
@@ -37,6 +37,17 @@ import { Invoice } from './invoice';
 function matchesInvoicedStatus(status: string | undefined) {
   const s = (status || '').toLowerCase().trim();
   return ['invoiced', 'facturado', 'invoice', 'billed', 'facturada'].includes(s);
+}
+
+function sameFamilyId(a: string | undefined, b: string | undefined): boolean {
+  const aa = String(a || '').trim();
+  const bb = String(b || '').trim();
+  if (!aa || !bb) return false;
+  if (aa === bb) return true;
+  const an = Number(aa);
+  const bn = Number(bb);
+  if (Number.isNaN(an) || Number.isNaN(bn)) return false;
+  return an === bn;
 }
 
 export type InvoiceDisplayState = {
@@ -85,20 +96,31 @@ export function OrderDetail({ orderId }: { orderId: string }) {
   const [invoiceStoreCity, setInvoiceStoreCity] = useState('');
   const [invoiceFromApi, setInvoiceFromApi] = useState<InvoiceDisplayState | null>(null);
   const [savedDeliveryItems, setSavedDeliveryItems] = useState<
-    Array<{ productId: string; quantity: number; unitPrice?: number }>
+    Array<{ productId: string; quantity: number; unitPrice?: number; row?: number; col?: number; sku?: string; productName?: string }>
   >([]);
-  const [showInitialOrder, setShowInitialOrder] = useState(false);
+  const [showInitialOrderInvoiced, setShowInitialOrderInvoiced] = useState(false);
+  const [invoiceViewMode, setInvoiceViewMode] = useState<'product' | 'family'>('product');
+  const [invoicePrintLayout, setInvoicePrintLayout] = useState<'normal' | 'ticket'>('normal');
 
   const readDeliveryFromStorage = useCallback(() => {
     if (typeof window === 'undefined') return;
     try {
       const raw = window.localStorage.getItem(`order_delivery_confirmation_${orderId}`);
-      if (!raw) {
+      if (raw) {
+        const p = JSON.parse(raw);
+        const items = Array.isArray(p?.items) ? p.items : [];
+        setSavedDeliveryItems(items);
+        return;
+      }
+
+      // Si ya se subió POD y se limpió el confirmation, mantener las celdas facturadas (no agrupar por producto).
+      const rawCells = window.localStorage.getItem(`order_delivered_cells_${orderId}`);
+      if (!rawCells) {
         setSavedDeliveryItems([]);
         return;
       }
-      const p = JSON.parse(raw);
-      setSavedDeliveryItems(Array.isArray(p?.items) ? p.items : []);
+      const parsed = JSON.parse(rawCells);
+      setSavedDeliveryItems(Array.isArray(parsed) ? parsed : []);
     } catch {
       setSavedDeliveryItems([]);
     }
@@ -345,22 +367,24 @@ export function OrderDetail({ orderId }: { orderId: string }) {
     amount: number;
   }> = savedDeliveryItems.map((row) => {
     const pid = String(row.productId || '').trim();
-    const oi = order.items.find((x: any) => String(x.productId) === pid);
     const qty = Number(row.quantity) || 0;
-    const price = Number(row.unitPrice) > 0 ? Number(row.unitPrice) : Number(oi?.price) || 0;
+    const oi = order.items.find((x: any) => String(x.productId) === pid);
+    const price =
+      Number(row.unitPrice) > 0 ? Number(row.unitPrice) : Number(oi?.price) || 0;
     return {
       qty,
-      code: String(oi?.sku || pid || '—').trim() || '—',
-      description: String(oi?.productName || oi?.sku || '—').trim() || '—',
+      code: String(row.sku || oi?.sku || pid || '—').trim() || '—',
+      description: String(row.productName || oi?.productName || oi?.sku || '—').trim() || '—',
       price,
       amount: qty * price,
     };
   });
 
+  // Si tenemos celdas facturadas guardadas en front, preferirlas sobre la API para NO agrupar productos duplicados.
+  const hasDeliveredCellsInFront =
+    savedDeliveryItems.some((x) => x && x.row != null && x.col != null) || false;
   const effectiveInvoiceLines =
-    invoiceLinesFromApi.length > 0 ? invoiceLinesFromApi : linesFromStorageAsInvoice;
-
-  const invoiceItems = effectiveInvoiceLines;
+    hasDeliveredCellsInFront ? linesFromStorageAsInvoice : (invoiceLinesFromApi.length > 0 ? invoiceLinesFromApi : linesFromStorageAsInvoice);
 
   const toInvoiceRows = effectiveInvoiceLines.map((line, idx) => {
     const code = String(line.code || '').trim();
@@ -376,7 +400,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
         : undefined);
     return {
       key: `line-${idx}`,
-      productId: String(oi?.productId || ''),
+      productId: String(oi?.productId || (line as any)?.productId || ''),
       productName: line.description,
       sku: line.code,
       imageUrl: (oi as any)?.imageUrl as string | undefined,
@@ -399,6 +423,31 @@ export function OrderDetail({ orderId }: { orderId: string }) {
 
   const toInvoiceUnits = toInvoiceRows.reduce((s, r) => s + r.qty, 0);
   const toInvoiceTotal = toInvoiceRows.reduce((s, r) => s + r.lineTotal, 0);
+
+  const invoiceItems = toInvoiceRows.map((row) => {
+    const matched = order.items.find((item: any) => invoiceRowMatchesOrderItem(row, item));
+    const familyId = String(
+      matched?.familyId ?? matched?.FamilyId ?? matched?.categoryId ?? matched?.CategoryId ?? ''
+    ).trim();
+    const categoryName = String(matched?.category ?? '').trim().toLowerCase();
+    const family = familyId
+      ? allCategories.find((c) => sameFamilyId(String(c.id), familyId))
+      : allCategories.find((c) => String(c.name || '').trim().toLowerCase() === categoryName) || null;
+    const familyName = (family?.name || matched?.category || '').trim() || undefined;
+    const familyCode = String(family?.code || '').trim() || undefined;
+    const familySku = String(family?.sku || '').trim() || undefined;
+    return {
+      qty: row.qty,
+      code: row.sku,
+      description: row.productName,
+      price: row.price,
+      amount: row.lineTotal,
+      familyId: familyId || undefined,
+      familyName,
+      familyCode,
+      familySku,
+    };
+  });
 
   const isCancelled = (order?.status || '').toLowerCase().trim() === 'cancelled';
 
@@ -448,6 +497,9 @@ export function OrderDetail({ orderId }: { orderId: string }) {
 
   const canSellerCancelInitial =
     orderPhase === 'initial' && invoiceLinesFromApi.length === 0 && !isCancelled;
+  const canSellerEditInitial =
+    orderPhase === 'initial' && invoiceLinesFromApi.length === 0 && !isCancelled;
+  const showInitialOrderDetails = orderPhase !== 'invoiced' || showInitialOrderInvoiced;
 
   const handleCancelOrder = async () => {
     if (!canSellerCancelInitial || cancelling) return;
@@ -468,12 +520,22 @@ export function OrderDetail({ orderId }: { orderId: string }) {
     }
   };
 
-  const handleDownloadInvoice = () => {
+  const handlePrintInvoice = () => {
+    setInvoicePrintLayout('normal');
     window.print();
   };
 
-  const handlePrintInvoice = () => {
-    window.print();
+  const handlePrintTicket = () => {
+    const prevMode = invoiceViewMode;
+    setInvoiceViewMode('family');
+    setInvoicePrintLayout('ticket');
+    setTimeout(() => {
+      window.print();
+      setTimeout(() => {
+        setInvoicePrintLayout('normal');
+        setInvoiceViewMode(prevMode);
+      }, 200);
+    }, 60);
   };
 
   /** URL de la imagen POD: data/base64 o URL absoluta se devuelve tal cual; nombre de archivo (S3) se resuelve vía backend. */
@@ -487,16 +549,26 @@ export function OrderDetail({ orderId }: { orderId: string }) {
   const podImageUrl = displayPod ? buildPodImageUrl(displayPod) : '';
   const isPodPath = displayPod && !displayPod.startsWith('data:') && !displayPod.startsWith('http');
 
-  const vendorName = [user?.name, user?.lastName].filter(Boolean).join(' ') || user?.email || order.vendorNumber || '';
+  const vendorName =
+    String((user as any)?.sellerCode || '').trim() ||
+    [user?.name, user?.lastName].filter(Boolean).join(' ') ||
+    user?.email ||
+    order.vendorNumber ||
+    '';
   const invoiceStoreDisplayName = invoiceStoreName || order.storeName || '';
   const cleanAddress = (addr: string) => (addr || '').replace(/,?\s*[0-9a-f-]{36}\s*$/i, '').replace(/,?\s*\d+\s*$/, '').trim();
   const invoiceStoreDisplayAddress = cleanAddress(invoiceStoreAddress || order.storeAddress || '');
-  const displayPo = (invoiceFromApi?.po || order.po || '').trim();
-  /** PO / nº factura: solo visible en UI cuando la tienda usa planograma (flujo con factura explícita). */
-  const displayPoInUi = storeHasPlanogram ? displayPo : '';
-  const invoiceNumberDisplay = displayPo
-    ? displayPo
-    : String(invoiceFromApi?.invoiceNumber ?? order.invoiceId ?? order.id ?? '—');
+  // La factura tiene su propio correlativo (InvoiceNumber). PO ya no aplica para mostrar factura.
+  const invoiceNumberDisplay = String(
+    invoiceFromApi?.invoiceNumber ?? (invoiceFromApi as any)?.InvoiceNumber ?? order.invoiceId ?? order.id ?? '—'
+  );
+  const poDisplay = String((order as any)?.po ?? '').trim();
+  const headerMainNumber =
+    storeHasPlanogram
+      ? (orderPhase === 'initial' || orderPhase === 'cancelled'
+          ? (poDisplay || invoiceNumberDisplay)
+          : invoiceNumberDisplay)
+      : '';
   const invoiceDate = invoiceFromApi?.date
     ? (invoiceFromApi.date.includes(',') ? invoiceFromApi.date : new Date(invoiceFromApi.date).toLocaleDateString('en-US'))
     : (order.date ? new Date(order.date).toLocaleDateString('en-US') : '—');
@@ -540,6 +612,16 @@ export function OrderDetail({ orderId }: { orderId: string }) {
     router.push(`/view-planogram/${orderId}`);
   };
 
+  const handleEditInitialOrder = () => {
+    const sid = String(order.storeId || '').trim();
+    if (!sid) return;
+    if (storeHasPlanogram) {
+      router.push(`/planogram/${encodeURIComponent(sid)}?orderId=${encodeURIComponent(orderId)}`);
+      return;
+    }
+    router.push(`/catalog-order/${encodeURIComponent(sid)}?orderId=${encodeURIComponent(orderId)}`);
+  };
+
   return (
     <div className="min-h-screen bg-slate-50">
       {/* Success Confirmation Banner */}
@@ -573,24 +655,12 @@ export function OrderDetail({ orderId }: { orderId: string }) {
             </Button>
             <div className="flex-1 min-w-0">
               <h2 className="text-sm text-slate-900 font-medium">
-                {displayPoInUi ? `${displayPoInUi}` : t('order_detail')}
+                {storeHasPlanogram ? `${headerMainNumber || invoiceNumberDisplay}` : t('order_detail')}
               </h2>
               <p className="text-xs text-slate-500 truncate">{invoiceStoreDisplayName || order.storeName} · {new Date(order.date).toLocaleDateString()}</p>
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            {canSellerCancelInitial && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-8 text-xs border-amber-200 text-amber-800"
-                onClick={handleCancelOrder}
-                disabled={cancelling}
-              >
-                <Ban className="h-3.5 w-3.5 mr-1" />
-                {cancelling ? t('loading') : t('cancel_order')}
-              </Button>
-            )}
             <Badge variant="outline" className={`${getStatusColor(order.status)} flex-shrink-0`}>
               {getStatusText(order.status)}
             </Badge>
@@ -615,9 +685,9 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                 <StoreIcon className="h-5 w-5 text-indigo-600" />
               </div>
               <div className="flex-1 min-w-0">
-                {displayPoInUi ? (
+                {storeHasPlanogram ? (
                   <>
-                    <p className="text-base font-semibold text-slate-900 mb-1.5">{displayPoInUi}</p>
+                    <p className="text-base font-semibold text-slate-900 mb-1.5">{headerMainNumber || invoiceNumberDisplay}</p>
                     <p className="text-xs text-slate-500 mb-0.5">{t('store')}: {invoiceStoreDisplayName || order.storeName || '—'}</p>
                   </>
                 ) : (
@@ -829,6 +899,26 @@ export function OrderDetail({ orderId }: { orderId: string }) {
             <div className="flex items-center justify-between">
               <CardTitle className="text-sm">{t('invoice')}</CardTitle>
               <div className="flex gap-2 flex-wrap">
+                <div className="inline-flex rounded-md border border-slate-200 overflow-hidden">
+                  <button
+                    type="button"
+                    className={`px-3 py-1.5 text-xs font-medium ${
+                      invoiceViewMode === 'product' ? 'bg-slate-800 text-white' : 'bg-white text-slate-700'
+                    }`}
+                    onClick={() => setInvoiceViewMode('product')}
+                  >
+                    {t('invoice_tab_products')}
+                  </button>
+                  <button
+                    type="button"
+                    className={`px-3 py-1.5 text-xs font-medium border-l border-slate-200 ${
+                      invoiceViewMode === 'family' ? 'bg-slate-800 text-white' : 'bg-white text-slate-700'
+                    }`}
+                    onClick={() => setInvoiceViewMode('family')}
+                  >
+                    {t('invoice_tab_families')}
+                  </button>
+                </div>
                 {showInvoiceRetry && (
                   <Button
                     variant="outline"
@@ -850,10 +940,10 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={handleDownloadInvoice}
+                  onClick={handlePrintTicket}
                 >
-                  <Download className="h-4 w-4 mr-2" />
-                  {t('download')}
+                  <Printer className="h-4 w-4 mr-2" />
+                  {t('print_ticket')}
                 </Button>
               </div>
             </div>
@@ -867,12 +957,15 @@ export function OrderDetail({ orderId }: { orderId: string }) {
               storeAddress={invoiceStoreDisplayAddress}
               items={invoiceItems}
               comments={order.comments || ''}
+              viewMode={invoiceViewMode}
+              printLayout={invoicePrintLayout}
             />
           </CardContent>
         </Card>
         ) : null}
 
-        {/* Sección POD: mostrar si hay POD en pedido o en la factura cargada (pedidos viejos) */}
+        {/* Sección POD: en inicial se muestra abajo del pedido; en el resto se mantiene aquí */}
+        {orderPhase !== 'initial' && (
         <Card className="border-slate-200 overflow-hidden">
           <CardHeader className="px-4 pt-4 pb-2">
             <CardTitle className="text-sm">{t('delivery_proof') || 'Comprobante de entrega (POD)'}</CardTitle>
@@ -926,27 +1019,11 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                 {t('capture_pod')}
               </Button>
             ) : orderPhase === 'initial' ? (
-              <>
-                {order.storeId ? (
-                  storeHasPlanogram ? (
-                    <Button
-                      onClick={handleStartInvoiceFromPlanogram}
-                      className="w-full bg-blue-600 hover:bg-blue-700"
-                    >
-                      Facturar pedido (planograma + POD)
-                    </Button>
-                  ) : (
-                    <Button
-                      onClick={handleStartConfirmFromCatalog}
-                      className="w-full bg-blue-600 hover:bg-blue-700"
-                    >
-                      Confirmar pedido (catálogo + POD)
-                    </Button>
-                  )
-                ) : (
-                  <p className="text-xs text-amber-700">Falta tienda en el pedido; no se puede continuar.</p>
-                )}
-              </>
+              <p className="text-xs text-slate-500">
+                {storeHasPlanogram
+                  ? 'Revisa el pedido inicial y luego usa el botón de facturar.'
+                  : 'Revisa el pedido inicial y luego confirma el pedido.'}
+              </p>
             ) : loadingPod ? (
               <p className="text-sm text-slate-600">Cargando comprobante...</p>
             ) : (
@@ -959,24 +1036,60 @@ export function OrderDetail({ orderId }: { orderId: string }) {
             )}
           </CardContent>
         </Card>
+        )}
 
-        {/* Pedido inicial: colapsado por defecto */}
+        {/* Pedido inicial */}
         <Card className="border-amber-200 bg-amber-50/40 shadow-sm overflow-hidden">
           <CardHeader className="px-4 pt-4 pb-2">
-            <CardTitle className="text-sm text-amber-950">{t('order_initial_title')}</CardTitle>
+            <div className="flex items-center justify-between gap-2">
+              <CardTitle className="text-sm text-amber-950">{t('order_initial_title')}</CardTitle>
+              <div className="flex items-center gap-2">
+                {orderPhase === 'invoiced' && (
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1.5 text-xs text-slate-600 hover:text-slate-900 transition-colors px-1 py-0.5"
+                    onClick={() => setShowInitialOrderInvoiced((v) => !v)}
+                  >
+                    <span className="font-medium">
+                      {showInitialOrderInvoiced ? 'Ocultar pedido inicial' : 'Ver pedido inicial'}
+                    </span>
+                    {showInitialOrderInvoiced ? (
+                      <ChevronUp className="h-3.5 w-3.5" />
+                    ) : (
+                      <ChevronDown className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                )}
+                {canSellerEditInitial && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-8 border-amber-300 bg-white hover:bg-amber-100 text-amber-900"
+                    onClick={handleEditInitialOrder}
+                  >
+                    <Pencil className="h-3.5 w-3.5 mr-1" />
+                    {t('edit_order') || 'Editar pedido'}
+                  </Button>
+                )}
+                {canSellerCancelInitial && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-8 border-amber-200 bg-white text-amber-800 hover:bg-amber-100"
+                    onClick={handleCancelOrder}
+                    disabled={cancelling}
+                  >
+                    <Ban className="h-3.5 w-3.5 mr-1" />
+                    {cancelling ? t('loading') : t('cancel_order')}
+                  </Button>
+                )}
+              </div>
+            </div>
           </CardHeader>
           <CardContent className="px-4 pb-4 pt-0">
-            <Button
-              type="button"
-              variant="outline"
-              className="w-full justify-between border-amber-300 bg-white hover:bg-amber-50"
-              onClick={() => setShowInitialOrder((v) => !v)}
-            >
-              <span>{showInitialOrder ? t('hide_initial_order') : t('view_initial_order')}</span>
-              {showInitialOrder ? <ChevronUp className="h-4 w-4 shrink-0" /> : <ChevronDown className="h-4 w-4 shrink-0" />}
-            </Button>
-            {showInitialOrder ? (
-              <div className="mt-4 space-y-4">
+              {showInitialOrderDetails ? (
+              <div className="space-y-4">
                 <div className="grid grid-cols-3 gap-3">
                   <div className="text-center p-3 bg-white rounded-lg border border-slate-100">
                     <Package className="h-5 w-5 text-slate-600 mx-auto mb-1" />
@@ -1093,10 +1206,86 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                     </table>
                   </div>
                 )}
+                {orderPhase === 'initial' && (
+                  order.storeId ? (
+                    storeHasPlanogram ? (
+                      <Button
+                        onClick={handleStartInvoiceFromPlanogram}
+                        className="w-full bg-blue-600 hover:bg-blue-700"
+                      >
+                        Facturar pedido (planograma + POD)
+                      </Button>
+                    ) : (
+                      <Button
+                        onClick={handleStartConfirmFromCatalog}
+                        className="w-full bg-blue-600 hover:bg-blue-700"
+                      >
+                        Confirmar pedido (catálogo + POD)
+                      </Button>
+                    )
+                  ) : (
+                    <p className="text-xs text-amber-700">Falta tienda en el pedido; no se puede continuar.</p>
+                  )
+                )}
               </div>
-            ) : null}
+              ) : null}
           </CardContent>
         </Card>
+
+        {/* Sección POD: para pedido inicial va debajo del bloque inicial */}
+        {orderPhase === 'initial' && (
+        <Card className="border-slate-200 overflow-hidden">
+          <CardHeader className="px-4 pt-4 pb-2">
+            <CardTitle className="text-sm">{t('delivery_proof') || 'Comprobante de entrega (POD)'}</CardTitle>
+          </CardHeader>
+          <CardContent className="px-4 pb-4 pt-0">
+            {displayPod ? (
+              <div className="flex flex-col gap-3">
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 className="h-5 w-5 text-green-600 shrink-0" />
+                  <p className="text-xs text-slate-500">
+                    {t('pod_uploaded') || 'Comprobante registrado'}
+                  </p>
+                </div>
+                {isPodPath && (
+                  <p className="text-xs text-slate-500 font-mono break-all">{displayPod}</p>
+                )}
+                {podImageUrl && (
+                  <div className="relative w-full rounded-lg border border-slate-200 overflow-hidden bg-slate-50 min-h-[200px] flex items-center justify-center">
+                    {podImageError ? (
+                      <div className="flex flex-col items-center justify-center py-8 px-4 text-center">
+                        <p className="text-sm text-amber-700 mb-1">No se pudo cargar la imagen</p>
+                        <p className="text-xs text-slate-500 mb-2">Ruta: {displayPod}</p>
+                        <a href={podImageUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-indigo-600 underline break-all">
+                          Abrir enlace
+                        </a>
+                      </div>
+                    ) : (
+                      <img
+                        key={podImageUrl}
+                        src={podImageUrl}
+                        alt={t('delivery_proof') || 'Comprobante de entrega (POD)'}
+                        className="w-full max-h-[320px] object-contain"
+                        referrerPolicy="no-referrer"
+                        loading="lazy"
+                        decoding="async"
+                        onLoad={() => setPodImageError(false)}
+                        onError={() => setPodImageError(true)}
+                      />
+                    )}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <p className="text-xs text-slate-500">
+                {storeHasPlanogram
+                  ? 'Revisa el pedido inicial y luego usa el botón de facturar.'
+                  : 'Revisa el pedido inicial y luego confirma el pedido.'}
+              </p>
+            )}
+          </CardContent>
+        </Card>
+        )}
       </div>
     </div>
   );

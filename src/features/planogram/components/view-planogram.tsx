@@ -128,6 +128,38 @@ export function ViewPlanogram({ orderId }: { orderId: string }) {
       });
       const getProduct = (id: string) => productMap.get(id) ?? productMap.get(String(Number(id)));
 
+      // Preferir mapa por celda:
+      // - Primero: celdas facturadas (para planograma facturado, sin agrupar productos duplicados)
+      // - Segundo: celdas del pedido inicial (para planograma inicial)
+      // Si existe al menos una celda, NO hacer fallback a cantidades por productId.
+      let cellQty = new Map<string, number>();
+      let hasCellQty = false;
+      try {
+        const rawDelivered =
+          typeof window !== 'undefined' ? window.localStorage.getItem(`order_delivered_cells_${orderId}`) : null;
+        const rawConfirm =
+          typeof window !== 'undefined' ? window.localStorage.getItem(`order_delivery_confirmation_${orderId}`) : null;
+        const rawInitial =
+          typeof window !== 'undefined' ? window.localStorage.getItem(`order_planogram_cells_${orderId}`) : null;
+        const raw = rawDelivered || rawConfirm || rawInitial;
+        const parsed0 = raw ? JSON.parse(raw) : null;
+        const parsed = Array.isArray(parsed0?.items) ? parsed0.items : parsed0; // confirmation guarda { items: [...] }
+        if (Array.isArray(parsed)) {
+          parsed.forEach((r: any) => {
+            const row = Number(r?.row);
+            const col = Number(r?.col);
+            const q = Number(r?.quantity ?? r?.qty ?? 0);
+            if (Number.isFinite(row) && Number.isFinite(col) && q > 0) {
+              cellQty.set(`${row}-${col}`, (cellQty.get(`${row}-${col}`) ?? 0) + q);
+            }
+          });
+        }
+        hasCellQty = cellQty.size > 0;
+      } catch {
+        cellQty = new Map();
+        hasCellQty = false;
+      }
+
       const invoiceHint = apiOrder.invoiceId ?? undefined;
       const invoiceDisplay = await ordersApi.getInvoiceDisplayForOrder(orderId, invoiceHint, apiOrder);
 
@@ -200,7 +232,7 @@ export function ViewPlanogram({ orderId }: { orderId: string }) {
             productId: product?.id ?? '',
             productName: orderItem?.productName ?? product?.name ?? product?.sku ?? '',
             sku: orderItem?.sku ?? product?.sku ?? '',
-            toOrder: orderItem?.quantity ?? 0,
+            toOrder: hasCellQty ? (cellQty.get(`${row}-${col}`) ?? 0) : (orderItem?.quantity ?? 0),
             price: orderItem?.price ?? product?.currentPrice ?? 0,
             imageUrl: product ? getProductImageUrl(product) : undefined,
           });
