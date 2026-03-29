@@ -8,8 +8,6 @@ import { useAuth } from '@/shared/auth/auth-provider';
 import { ordersApi, OrderForUI } from '@/shared/api/orders-api';
 import { storesApi } from '@/shared/api/stores-api';
 import { citiesApi } from '@/shared/api/cities-api';
-import { histpricesApi } from '@/shared/api/histprices-api';
-import { productsApi } from '@/shared/api/products-api';
 import { Card, CardContent } from '@/shared/ui/card';
 import { Badge } from '@/shared/ui/badge';
 import { Button } from '@/shared/ui/button';
@@ -19,11 +17,35 @@ function looksLikeId(name: string): boolean {
   return /^[0-9a-f-]{36}$/i.test(name.trim()) || /^\d+$/.test(name.trim());
 }
 
+type InvoiceRowMetrics = {
+  order: OrderForUI;
+  invTotal: number;
+  invUnits: number;
+  invLineCount: number;
+  invDate?: string;
+  invOk: boolean;
+};
+
+function summarizeInvoiceDisplay(
+  inv: Awaited<ReturnType<typeof ordersApi.getInvoiceDisplayForOrder>>
+): Omit<InvoiceRowMetrics, 'order'> {
+  if (!inv) return { invTotal: 0, invUnits: 0, invLineCount: 0, invDate: undefined, invOk: false };
+  const lines = inv.items || [];
+  const invLineCount = lines.length;
+  const invUnits = lines.reduce((s, it) => s + (Number(it.qty) || 0), 0);
+  let invTotal = Number(inv.total) || 0;
+  if (invTotal <= 0 && invLineCount) {
+    invTotal = lines.reduce((s, it) => s + (Number(it.amount) || 0), 0);
+  }
+  const invOk = invLineCount > 0 || invTotal > 0;
+  return { invTotal, invUnits, invLineCount, invDate: inv.date, invOk };
+}
+
 export function PendingPOD() {
   const { t } = useLanguage();
   const router = useRouter();
   const { user } = useAuth();
-  const [pendingOrders, setPendingOrders] = useState<OrderForUI[]>([]);
+  const [pendingRows, setPendingRows] = useState<InvoiceRowMetrics[]>([]);
   const [loading, setLoading] = useState(true);
   const [storeCache, setStoreCache] = useState<Record<string, { name: string; address: string; city: string }>>({});
 
@@ -34,55 +56,24 @@ export function PendingPOD() {
         let all = await ordersApi.getOrdersByUser(user.id);
         const productFamilyCache = new Map<string, string>();
         const pending = all.filter((o) => {
-          const status = (o.status || '').toLowerCase();
-          return (
-            (status === 'confirmed' || status === 'completed') &&
-            o.podRequired !== false &&
-            !o.podUploaded
-          );
+          const hasInvoice = o.invoiceId != null && String(o.invoiceId).trim() !== '';
+          return hasInvoice && !o.podUploaded;
         });
-        // Mismo criterio que historial: rellenar total con precios de histprices cuando sea 0
-        const enriched = await Promise.all(
-          pending.map(async (order): Promise<OrderForUI> => {
-            if (Number(order.total) > 0) return order;
-            const items = order?.items && Array.isArray(order.items) ? order.items : [];
-            if (!items.length) return order;
+        const rows: InvoiceRowMetrics[] = await Promise.all(
+          pending.map(async (order) => {
+            let metrics = summarizeInvoiceDisplay(null);
             try {
-              const enrichedItems = await Promise.all(
-                items.map(async (item: any) => {
-                  let price = Number(item.price) || 0;
-                  if (!price) {
-                    const inlineFamilyId = String(
-                      item?.familyId ?? item?.FamilyId ?? item?.categoryId ?? item?.CategoryId ?? ''
-                    ).trim();
-                    let familyId = inlineFamilyId;
-                    if (!familyId && item?.productId) {
-                      const productId = String(item.productId).trim();
-                      familyId = productFamilyCache.get(productId) || '';
-                      if (!familyId) {
-                        const product = await productsApi.getById(productId);
-                        familyId = String(product?.familyId ?? product?.categoryId ?? '').trim();
-                        if (familyId) productFamilyCache.set(productId, familyId);
-                      }
-                    }
-                    if (familyId) {
-                      price = await histpricesApi.getLatest(familyId); // último del historial por familia
-                    }
-                  }
-                  return { ...item, price };
-                })
-              );
-              const subtotal = enrichedItems.reduce((s, i) => s + (i.quantity ?? i.toOrder ?? 0) * (i.price ?? 0), 0);
-              const total = subtotal + Number(order.tax ?? 0);
-              return { ...order, items: enrichedItems, subtotal, total };
+              const inv = await ordersApi.getInvoiceDisplayForOrder(order.id, order.invoiceId, order);
+              metrics = summarizeInvoiceDisplay(inv);
             } catch {
-              return order;
+              /* mantener invOk false */
             }
+            return { order, ...metrics };
           })
         );
-        setPendingOrders(enriched);
+        setPendingRows(rows);
       } else {
-        setPendingOrders([]);
+        setPendingRows([]);
       }
       setLoading(false);
     };
@@ -90,11 +81,11 @@ export function PendingPOD() {
   }, [user?.id]);
 
   useEffect(() => {
-    if (!pendingOrders.length) return;
-    const needStore = [...new Set(pendingOrders.map((o) => o.storeId).filter(Boolean))].filter(
+    if (!pendingRows.length) return;
+    const needStore = [...new Set(pendingRows.map((r) => r.order.storeId).filter(Boolean))].filter(
       (storeId) => {
-        const order = pendingOrders.find((o) => o.storeId === storeId);
-        return order && looksLikeId(order.storeName || '');
+        const row = pendingRows.find((r) => r.order.storeId === storeId);
+        return row && looksLikeId(row.order.storeName || '');
       }
     ) as string[];
     if (needStore.length === 0) return;
@@ -115,14 +106,14 @@ export function PendingPOD() {
       if (mounted) setStoreCache((prev) => ({ ...prev, ...next }));
     })();
     return () => { mounted = false; };
-  }, [pendingOrders]);
+  }, [pendingRows]);
 
   return (
     <div className="px-4 py-4">
       {/* Header */}
       <div className="mb-4">
         <h2 className="text-slate-900 text-lg mb-1">{t('pending_deliveries')}</h2>
-        <p className="text-sm text-slate-500">{t('pod_subtitle')}</p>
+        <p className="text-sm text-slate-500">{t('pod_pending_invoiced_subtitle')}</p>
       </div>
 
       {/* Alert */}
@@ -130,36 +121,28 @@ export function PendingPOD() {
         <AlertCircle className="h-5 w-5 text-amber-600 flex-shrink-0 mt-0.5" />
         <div>
           <p className="text-sm text-amber-900 mb-1">{t('pod_required')}</p>
-          <p className="text-xs text-amber-700">{t('pod_warning')}</p>
+          <p className="text-xs text-amber-700">{t('pod_warning_deferred')}</p>
         </div>
       </div>
 
       {/* Pending Orders List - misma info que historial: tienda, total, dirección, fecha */}
       {loading ? (
         <p className="text-sm text-slate-500 py-4">{t('loading')}...</p>
-      ) : pendingOrders.length > 0 ? (
+      ) : pendingRows.length > 0 ? (
         <div className="space-y-3">
-          {pendingOrders.map((order) => {
+          {pendingRows.map(({ order, invTotal, invUnits, invDate, invOk }) => {
             const cached = order.storeId ? storeCache[order.storeId] : null;
             const displayStoreName = cached?.name || (order.storeName && !looksLikeId(order.storeName) ? order.storeName : t('store'));
             const displayAddress = (cached?.address || order.storeAddress || '').trim();
             const displayCity = (cached?.city || '').trim();
-            const invNo = String((order as any)?.invoiceNumber ?? (order as any)?.InvoiceNumber ?? order.invoiceId ?? '').trim();
+            const invNo = String(
+              order.invoiceNumber ?? (order as any)?.InvoiceNumber ?? (order as any)?.invoiceNumber ?? ''
+            ).trim();
             const titleMain = invNo ? `${invNo}` : displayStoreName;
             const subtitleStore = invNo ? displayStoreName : null;
-            const computedTotal = order.items?.length
-              ? order.items.reduce((s: number, i: any) => s + (i.quantity ?? i.toOrder ?? 0) * (Number(i.price) || 0), 0)
-              : 0;
-            const totalDisplay =
-              Number(order.total) > 0
-                ? Number(order.total)
-                : computedTotal > 0
-                  ? computedTotal
-                  : Number(order.subtotal) > 0
-                    ? Number(order.subtotal)
-                    : 0;
-            const hasTotal = totalDisplay > 0;
-            const articlesCount = order.items?.length ?? 0;
+            const hasTotal = invOk && invTotal > 0;
+            const displayDate = invOk && invDate ? invDate : order.date;
+            const unitsLabel = invOk ? invUnits : null;
             return (
               <Card
                 key={order.id}
@@ -181,20 +164,24 @@ export function PendingPOD() {
                           </p>
                         ) : null;
                       })())}
-                      <p className="text-xs text-slate-400 mt-0.5">{new Date(order.date).toLocaleDateString()}</p>
+                      <p className="text-xs text-slate-400 mt-0.5">{new Date(displayDate).toLocaleDateString()}</p>
                       <div className="flex items-center gap-2 mt-2 flex-wrap">
                         <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200">
                           {t('waiting_pod')}
                         </Badge>
-                        <span className="text-xs text-slate-500">{order.totalUnits || articlesCount} {t('units')}</span>
+                        <span className="text-xs text-slate-500">
+                          {unitsLabel != null ? `${unitsLabel} ${t('units')}` : t('total_not_available')}
+                        </span>
                       </div>
                     </div>
                     <div className="text-right shrink-0">
                       <p className="text-xs text-slate-500 uppercase tracking-wide">{t('total')}</p>
                       <p className="text-base font-semibold text-slate-900">
-                        {hasTotal ? `$${Number(totalDisplay).toFixed(2)}` : t('total_not_available')}
+                        {hasTotal ? `$${Number(invTotal).toFixed(2)}` : t('total_not_available')}
                       </p>
-                      <p className="text-xs text-slate-500">{order.totalUnits || articlesCount} {t('units')}</p>
+                      <p className="text-xs text-slate-500">
+                        {unitsLabel != null ? `${unitsLabel} ${t('units')}` : t('total_not_available')}
+                      </p>
                     </div>
                   </div>
                   <div className="flex items-center justify-between mt-3 pt-3 border-t border-slate-100">

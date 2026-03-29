@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { Search, Filter, ChevronRight } from 'lucide-react';
+import { Search, Filter, ChevronRight, Check } from 'lucide-react';
 import { useLanguage } from '@/shared/i18n/language-provider';
 import { useAuth } from '@/shared/auth/auth-provider';
 import { ordersApi, OrderForUI } from '@/shared/api/orders-api';
@@ -107,7 +107,7 @@ export function OrderHistory() {
               const invNo = String((inv as any)?.invoiceNumber ?? (inv as any)?.InvoiceNumber ?? '').trim();
               return {
                 ...order,
-                ...(invNo ? { invoiceId: invNo } : {}),
+                ...(invNo ? { invoiceNumber: invNo } : {}),
                 ...(total > 0 ? { total, subtotal: total } : {}),
                 ...(units > 0 ? { totalUnits: units } : {}),
                 ...(lines.length > 0 ? { invoiceLineCount: lines.length } : {}),
@@ -162,6 +162,11 @@ export function OrderHistory() {
     );
   };
 
+  const isOrderInvoicedForList = (o: OrderForUI) => {
+    if (o.invoiceId != null && String(o.invoiceId).trim() !== '') return true;
+    return isListInvoiced(o.status);
+  };
+
   const isListCancelled = (status: string | undefined) => {
     const s = (status || '').toLowerCase().trim();
     return s === 'cancelled' || s === 'canceled' || s === 'cancelado' || s === '3';
@@ -175,7 +180,7 @@ export function OrderHistory() {
     const po = (order.po || '').trim();
     const searchStr = (po + ' ' + name + ' ' + addr + ' ' + city + ' ' + (order.storeId || '')).toLowerCase();
     const matchesSearch = !searchQuery.trim() || searchStr.includes(searchQuery.toLowerCase());
-    const invoiced = isListInvoiced(order.status);
+    const invoiced = isOrderInvoicedForList(order);
     const cancelled = isListCancelled(order.status);
     const matchesStatus =
       statusFilter === 'all' ||
@@ -184,16 +189,16 @@ export function OrderHistory() {
     return matchesSearch && matchesStatus;
   });
 
-  const getStatusColor = (status: string) => {
-    if (isListCancelled(status)) return 'bg-slate-100 text-slate-600 border-slate-200';
-    return isListInvoiced(status)
+  const getStatusColor = (order: OrderForUI) => {
+    if (isListCancelled(order.status)) return 'bg-slate-100 text-slate-600 border-slate-200';
+    return isOrderInvoicedForList(order)
       ? 'bg-green-50 text-green-700 border-green-200'
       : 'bg-amber-50 text-amber-700 border-amber-200';
   };
 
-  const getStatusText = (status: string) => {
-    if (isListCancelled(status)) return t('cancelled') || 'Cancelado';
-    return isListInvoiced(status) ? (t('invoiced') || 'Facturado') : t('initial');
+  const getStatusText = (order: OrderForUI) => {
+    if (isListCancelled(order.status)) return t('cancelled') || 'Cancelado';
+    return isOrderInvoicedForList(order) ? (t('invoiced') || 'Facturado') : t('initial');
   };
 
   return (
@@ -288,9 +293,15 @@ export function OrderHistory() {
                       })())}
                       <p className="text-xs text-slate-400 mt-0.5">{new Date(order.date).toLocaleDateString()}</p>
                       <div className="flex items-center gap-2 mt-2 flex-wrap">
-                        <Badge variant="outline" className={getStatusColor(order.status)}>
-                          {getStatusText(order.status)}
+                        <Badge variant="outline" className={getStatusColor(order)}>
+                          {getStatusText(order)}
                         </Badge>
+                        {isOrderInvoicedForList(order) && order.podUploaded ? (
+                          <span className="inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-800">
+                            <Check className="h-3.5 w-3.5 shrink-0" strokeWidth={2.5} aria-hidden />
+                            {t('pod')}
+                          </span>
+                        ) : null}
                         <span className="text-xs text-slate-500">{articlesCount} {t('articles')}</span>
                       </div>
                     </div>

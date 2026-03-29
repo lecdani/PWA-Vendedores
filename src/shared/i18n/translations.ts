@@ -39,7 +39,10 @@ export const translations = {
     'pod': 'POD',
     'pod_required': 'Se requiere Proof of Delivery',
     'pod_subtitle': 'Pedidos que requieren comprobante',
+    'pod_pending_invoiced_subtitle': 'Solo pedidos ya facturados a los que aún falta el comprobante (POD). Puedes cargarlo cuando lo tengas.',
     'pod_warning': 'Carga el comprobante de entrega firmado para finalizar el pedido',
+    'pod_warning_deferred': 'La facturación puede hacerse antes; el POD no tiene que ser al momento: súbelo cuando tengas el documento.',
+    'pod_invoice_required_first': 'Este pedido aún no tiene factura. Debe facturarse primero; después podrás cargar el POD aquí.',
     'waiting_pod': 'Esperando POD',
     'capture_pod': 'Capturar POD',
     'no_pending_pod': 'No hay entregas pendientes',
@@ -66,8 +69,11 @@ export const translations = {
     'pod_not_uploaded': 'No has cargado el comprobante de entrega',
     'pod_uploaded': 'Comprobante de entrega cargado',
     'pod_registered_no_preview': 'El comprobante fue registrado correctamente.',
+    'pod_detail_upload_hint': 'Puedes cargar el comprobante aquí (igual que en el menú POD) cuando lo tengas.',
     'pod_already_invoiced': 'Este pedido ya está facturado.',
     'pod_complete_catalog': 'El comprobante y el pedido ya están registrados.',
+    'invoiced_with_pod': 'Facturado · con POD',
+    'invoiced_missing_pod': 'Facturado · falta POD',
     
     // Store Selection
     'select_store': 'Seleccionar Tienda',
@@ -202,6 +208,7 @@ export const translations = {
     // Navigation
     'home': 'Inicio',
     'orders': 'Pedidos',
+    'tab_pod': 'POD',
     'stats': 'Reportes',
     'see_all': 'Ver todas',
     'order_id': 'ID de Pedido',
@@ -323,7 +330,10 @@ export const translations = {
     'pod': 'POD',
     'pod_required': 'Proof of Delivery required',
     'pod_subtitle': 'Orders requiring proof',
+    'pod_pending_invoiced_subtitle': 'Only invoiced orders still missing proof of delivery (POD). You can upload it whenever you have the document.',
     'pod_warning': 'Upload the signed delivery receipt to finalize the order',
+    'pod_warning_deferred': 'Invoicing can happen first; the POD does not have to be immediate—upload it when you have the document.',
+    'pod_invoice_required_first': 'This order has no invoice yet. It must be invoiced first; then you can upload the POD here.',
     'waiting_pod': 'Waiting POD',
     'capture_pod': 'Capture POD',
     'no_pending_pod': 'No pending deliveries',
@@ -350,8 +360,11 @@ export const translations = {
     'pod_not_uploaded': 'You have not uploaded the proof of delivery',
     'pod_uploaded': 'Proof of delivery uploaded',
     'pod_registered_no_preview': 'The proof of delivery was registered successfully.',
+    'pod_detail_upload_hint': 'You can upload the proof here (same as the POD tab) whenever you have it.',
     'pod_already_invoiced': 'This order is already invoiced.',
     'pod_complete_catalog': 'Proof of delivery and order are already registered.',
+    'invoiced_with_pod': 'Invoiced · POD OK',
+    'invoiced_missing_pod': 'Invoiced · POD pending',
     
     // Store Selection
     'select_store': 'Select Store',
@@ -487,6 +500,7 @@ export const translations = {
     // Navigation
     'home': 'Home',
     'orders': 'Orders',
+    'tab_pod': 'POD',
     'stats': 'Reports',
     'see_all': 'View all',
     'order_id': 'Order ID',

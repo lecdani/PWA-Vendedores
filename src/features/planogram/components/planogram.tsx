@@ -380,7 +380,7 @@ export function Planogram({
     router.push('/order-review');
   };
 
-  const handleContinueToPodAndInvoice = async () => {
+  const handleInvoiceFromPlanogram = async () => {
     if (!orderId) return;
     setFlowError(null);
     setContinuing(true);
@@ -403,9 +403,12 @@ export function Planogram({
         setContinuing(false);
         return;
       }
+      const deliveredItems = rows.map((r) => ({
+        productId: r.productId,
+        quantity: r.quantity,
+        unitPrice: r.unitPrice,
+      }));
       if (typeof window !== 'undefined') {
-        // Guardar celdas facturadas por posición (row-col). Esto permite mostrar el planograma facturado
-        // sin agrupar por producto cuando hay productos duplicados en múltiples celdas.
         try {
           const deliveredCells = planogramData
             .filter((i) => i.productId && i.toOrder > 0 && cellAllowed(i.row, i.col, i.productId))
@@ -436,7 +439,14 @@ export function Planogram({
         setContinuing(false);
         return;
       }
-      router.push(`/capture-pod/${orderId}`);
+      const invoiceId = await ordersApi.ensureInvoiceForOrder(backendOrderId, deliveredItems);
+      if (invoiceId == null) {
+        setFlowError('No se pudo crear la factura. Revisa la conexión o los datos del pedido.');
+        setContinuing(false);
+        return;
+      }
+      await ordersApi.updateOrderStatus(backendOrderId, true);
+      router.push(`/order/${orderId}`);
     } catch {
       setFlowError('Error al continuar. Revisa la conexión.');
     } finally {
@@ -491,7 +501,7 @@ export function Planogram({
               <h2 className="text-slate-900 text-sm">{storeInfo?.name ?? t('product_organization')}</h2>
               <p className="text-xs text-slate-500">
                 {isInvoiceFlow
-                  ? 'Facturar: ajusta cantidades entregadas (solo productos del pedido). Luego POD.'
+                  ? 'Facturar: ajusta cantidades entregadas. Se genera la factura sin POD; el comprobante puedes cargarlo después.'
                   : (planogramName ?? t('planogram'))}
               </p>
             </div>
@@ -677,12 +687,12 @@ export function Planogram({
         <div className="flex gap-3 max-w-2xl mx-auto">
           {isInvoiceFlow ? (
             <Button
-              onClick={handleContinueToPodAndInvoice}
+              onClick={handleInvoiceFromPlanogram}
               className="flex-1 bg-indigo-600 hover:bg-indigo-700"
               disabled={totalToOrder === 0 || continuing}
             >
               <Send className="h-4 w-4 mr-2" />
-              {continuing ? 'Procesando…' : 'Continuar a POD y facturar'}
+              {continuing ? 'Procesando…' : 'Generar factura'}
             </Button>
           ) : (
             <Button

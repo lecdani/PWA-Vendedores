@@ -39,6 +39,19 @@ function matchesInvoicedStatus(status: string | undefined) {
   return ['invoiced', 'facturado', 'invoice', 'billed', 'facturada'].includes(s);
 }
 
+/** Alineado con `normalizeOrderStatus` en orders-api (incl. `3` por si el estado llega sin normalizar). */
+function matchesCancelledStatus(status: string | undefined) {
+  const s = String(status ?? '').trim().toLowerCase();
+  return (
+    s === 'cancelled' ||
+    s === 'canceled' ||
+    s === 'cancelado' ||
+    s === 'anulado' ||
+    s === 'void' ||
+    s === '3'
+  );
+}
+
 function sameFamilyId(a: string | undefined, b: string | undefined): boolean {
   const aa = String(a || '').trim();
   const bb = String(b || '').trim();
@@ -147,7 +160,12 @@ export function OrderDetail({ orderId }: { orderId: string }) {
     return () => window.removeEventListener('focus', onFocus);
   }, [readDeliveryFromStorage]);
 
-  const displayPod = (order?.podImageUrl || order?.podFileName || (invoiceFromApi?.pod || '').trim()) || '';
+  /** Solo rutas no vacías; evita `podUploaded` en true sin archivo y espacios en URL. */
+  const displayPod =
+    String(order?.podImageUrl ?? '').trim() ||
+    String(order?.podFileName ?? '').trim() ||
+    String(invoiceFromApi?.pod ?? '').trim() ||
+    '';
 
   useEffect(() => {
     if (searchParams.get('confirmed') === '1') {
@@ -290,15 +308,23 @@ export function OrderDetail({ orderId }: { orderId: string }) {
 
   // Sincronizar POD de la factura al pedido (la factura devuelve orderId y pod)
   useEffect(() => {
-    if (!order || !invoiceFromApi?.pod) return;
-    const pod = (invoiceFromApi.pod || '').trim();
+    if (!order) return;
+    const pod = String(invoiceFromApi?.pod ?? '').trim();
     if (!pod || (order.podImageUrl === pod && order.podFileName === pod)) return;
     setOrder((prev) => (prev ? { ...prev, podImageUrl: pod, podFileName: pod, podUploaded: true } : prev));
   }, [order?.id, invoiceFromApi?.pod, order?.podImageUrl, order?.podFileName]);
 
   // Fallback: si no hay POD, cargar factura (devuelve orderId y pod); usa order.invoiceId o resuelve por orderId
   useEffect(() => {
-    if (!order || order.podImageUrl || order.podFileName || invoiceFromApi?.pod) return;
+    const hasPath =
+      String(order?.podImageUrl ?? '').trim() ||
+      String(order?.podFileName ?? '').trim() ||
+      String(invoiceFromApi?.pod ?? '').trim();
+    if (!order || hasPath) return;
+    /** `loadOrder` ya trajo la factura sin POD: no otro GET ni dejar `loadingPod` en true bloqueando el CTA. */
+    if (invoiceFromApi != null && !String(invoiceFromApi?.pod ?? '').trim()) {
+      return;
+    }
     let cancelled = false;
     setLoadingPod(true);
     ordersApi.getInvoiceDisplayForOrder(orderId, order.invoiceId ?? undefined, order).then((display) => {
@@ -306,9 +332,13 @@ export function OrderDetail({ orderId }: { orderId: string }) {
       setLoadingPod(false);
       if (!display) return;
       setInvoiceFromApi((prev) => mergeInvoiceDisplay(prev, display));
-      if (display.pod) setOrder((prev) => (prev ? { ...prev, podImageUrl: display.pod, podFileName: display.pod, podUploaded: true } : prev));
+      const p = String(display.pod ?? '').trim();
+      if (p) setOrder((prev) => (prev ? { ...prev, podImageUrl: p, podFileName: p, podUploaded: true } : prev));
     });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      setLoadingPod(false);
+    };
   }, [orderId, order?.id, order?.invoiceId, order?.podImageUrl, order?.podFileName, invoiceFromApi?.pod]);
 
   useEffect(() => {
@@ -449,7 +479,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
     };
   });
 
-  const isCancelled = (order?.status || '').toLowerCase().trim() === 'cancelled';
+  const isCancelled = matchesCancelledStatus(order?.status);
 
   /** Fase UI: prioriza líneas de la API como «facturado» aunque el status del pedido venga mal */
   const orderPhase = (() => {
@@ -464,6 +494,21 @@ export function OrderDetail({ orderId }: { orderId: string }) {
     if (order.invoiceId != null && String(order.invoiceId).trim() !== '') return 'confirmed';
     return 'initial';
   })();
+
+  const hasInvoiceId = order.invoiceId != null && String(order.invoiceId).trim() !== '';
+  /** Factura ya cargada en pantalla (aunque el pedido aún no traiga `invoiceId` en el primer GET). */
+  const hasInvoiceData =
+    hasInvoiceId || (invoiceFromApi?.items?.length ?? 0) > 0;
+  /**
+   * CTA subir POD: no usar solo `podUploaded` (el backend a veces lo envía sin archivo).
+   * Misma idea que menú POD: hay factura y no hay ruta de comprobante.
+   */
+  const showMissingPodUploadCta =
+    !displayPod &&
+    !loadingPod &&
+    orderPhase !== 'initial' &&
+    orderPhase !== 'cancelled' &&
+    hasInvoiceData;
 
   const showBilledOrderBlock = orderPhase !== 'initial' && orderPhase !== 'cancelled';
   const showInvoiceSection = orderPhase !== 'initial' && orderPhase !== 'cancelled';
@@ -480,7 +525,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
   /** Flujo: initial -> confirmed -> invoiced. */
   const getStatusColor = (status: string) => {
     const s = (status || '').toLowerCase();
-    if (s === 'cancelled') return 'bg-slate-100 text-slate-600 border-slate-200';
+    if (matchesCancelledStatus(status)) return 'bg-slate-100 text-slate-600 border-slate-200';
     if (matchesInvoicedStatus(status)) return 'bg-green-50 text-green-700 border-green-200';
     if (s === 'confirmed' || ['completed', 'complete', 'confirmado'].includes(s)) return 'bg-blue-50 text-blue-700 border-blue-200';
     return 'bg-amber-50 text-amber-700 border-amber-200';
@@ -488,7 +533,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
 
   const getStatusText = (status: string) => {
     const s = (status || '').toLowerCase();
-    if (s === 'cancelled') return t('cancelled') || 'Cancelado';
+    if (matchesCancelledStatus(status)) return t('cancelled') || 'Cancelado';
     if (matchesInvoicedStatus(status))
       return storeHasPlanogram ? t('invoiced') || 'Facturado' : t('status_delivered');
     if (s === 'confirmed' || ['completed', 'complete', 'confirmado'].includes(s)) return t('confirmed');
@@ -594,14 +639,14 @@ export function OrderDetail({ orderId }: { orderId: string }) {
     router.push(`/capture-pod/${orderId}`);
   };
 
-  /** Pedido inicial → planograma bloqueado: solo cantidades de líneas del pedido; cantidades van a factura + POD. */
+  /** Pedido inicial → planograma bloqueado: cantidades del pedido; al facturar se crea la factura (POD aparte). */
   const handleStartInvoiceFromPlanogram = () => {
     const sid = String(order.storeId || '').trim();
     if (!sid) return;
     router.push(`/planogram/${encodeURIComponent(sid)}?orderId=${encodeURIComponent(orderId)}&mode=invoice`);
   };
 
-  /** Pedido inicial (catálogo / sin planograma): confirmar con catálogo bloqueado + POD obligatorio (sin UI de factura). */
+  /** Pedido inicial (catálogo / sin planograma): facturar con cantidades; POD opcional después. */
   const handleStartConfirmFromCatalog = () => {
     const sid = String(order.storeId || '').trim();
     if (!sid) return;
@@ -964,8 +1009,8 @@ export function OrderDetail({ orderId }: { orderId: string }) {
         </Card>
         ) : null}
 
-        {/* Sección POD: en inicial se muestra abajo del pedido; en el resto se mantiene aquí */}
-        {orderPhase !== 'initial' && (
+        {/* Sección POD: en inicial se muestra abajo del pedido; cancelados no aplican POD */}
+        {orderPhase !== 'initial' && orderPhase !== 'cancelled' && (
         <Card className="border-slate-200 overflow-hidden">
           <CardHeader className="px-4 pt-4 pb-2">
             <CardTitle className="text-sm">{t('delivery_proof') || 'Comprobante de entrega (POD)'}</CardTitle>
@@ -1010,22 +1055,22 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                   </div>
                 )}
               </div>
-            ) : orderPhase === 'confirmed' ? (
-              <Button
-                onClick={handleCapturePOD}
-                className="w-full bg-amber-600 hover:bg-amber-700"
-              >
-                <Camera className="h-4 w-4 mr-2" />
-                {t('capture_pod')}
-              </Button>
-            ) : orderPhase === 'initial' ? (
-              <p className="text-xs text-slate-500">
-                {storeHasPlanogram
-                  ? 'Revisa el pedido inicial y luego usa el botón de facturar.'
-                  : 'Revisa el pedido inicial y luego confirma el pedido.'}
-              </p>
             ) : loadingPod ? (
               <p className="text-sm text-slate-600">Cargando comprobante...</p>
+            ) : showMissingPodUploadCta ? (
+              <div className="space-y-3">
+                <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+                  <p className="text-xs text-amber-900 font-medium">{t('waiting_pod')}</p>
+                  <p className="text-xs text-amber-800 mt-1">{t('pod_detail_upload_hint')}</p>
+                </div>
+                <Button
+                  onClick={handleCapturePOD}
+                  className="w-full bg-amber-600 hover:bg-amber-700"
+                >
+                  <Camera className="h-4 w-4 mr-2" />
+                  {t('capture_pod')}
+                </Button>
+              </div>
             ) : (
               <p className="text-xs text-slate-500">
                 {storeHasPlanogram
@@ -1213,14 +1258,14 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                         onClick={handleStartInvoiceFromPlanogram}
                         className="w-full bg-blue-600 hover:bg-blue-700"
                       >
-                        Facturar pedido (planograma + POD)
+                        Facturar pedido (planograma)
                       </Button>
                     ) : (
                       <Button
                         onClick={handleStartConfirmFromCatalog}
                         className="w-full bg-blue-600 hover:bg-blue-700"
                       >
-                        Confirmar pedido (catálogo + POD)
+                        Facturar pedido (catálogo)
                       </Button>
                     )
                   ) : (

@@ -2,7 +2,7 @@
 
 import { usePathname, useRouter } from 'next/navigation';
 import Image from 'next/image';
-import { Home, ShoppingCart, BarChart3, User, LogOut } from 'lucide-react';
+import { Home, ShoppingCart, BarChart3, User, LogOut, FileCheck } from 'lucide-react';
 import { LanguageSelector } from '@/shared/i18n/language-selector';
 import { useLanguage } from '@/shared/i18n/language-provider';
 import { useAuth } from '@/shared/auth/auth-provider';
@@ -16,7 +16,7 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
   const getActiveTab = () => {
     if (pathname === '/') return 'home';
     if (pathname?.includes('/history') || pathname?.includes('/order')) return 'orders';
-    if (pathname?.includes('/pending-pod')) return 'orders';
+    if (pathname?.includes('/pending-pod')) return 'pod';
     if (pathname?.includes('/sales-report')) return 'reports';
     if (pathname?.includes('/profile')) return 'profile';
     return 'home';
@@ -27,6 +27,7 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
   const menuItems = [
     { id: 'home', label: t('home'), icon: Home, path: '/', action: null },
     { id: 'orders', label: t('orders'), icon: ShoppingCart, path: '/history', action: null },
+    { id: 'pod', label: t('tab_pod'), icon: FileCheck, path: '/pending-pod', action: null },
     { id: 'reports', label: t('reports'), icon: BarChart3, path: '/sales-report', action: null },
     { id: 'profile', label: t('profile'), icon: User, path: '/profile', action: null },
     { id: 'logout', label: t('logout'), icon: LogOut, path: null, action: logout },
@@ -89,7 +90,7 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
           boxShadow: '0 -4px 6px -1px rgba(0, 0, 0, 0.1), 0 -2px 4px -1px rgba(0, 0, 0, 0.06)',
           height: '64px',
           display: 'grid',
-          gridTemplateColumns: 'repeat(5, 1fr)'
+          gridTemplateColumns: 'repeat(6, 1fr)'
         }}
       >
         {menuItems.map((item) => {

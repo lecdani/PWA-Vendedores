@@ -3,6 +3,8 @@ import { apiClient } from './api-client';
 export interface CategoryForUI {
   id: string;
   name: string;
+  /** Nombre corto (UI). */
+  shortName?: string;
   code?: string;
   sku?: string;
   volume?: number;
@@ -12,12 +14,14 @@ export interface CategoryForUI {
 function toCategory(raw: any): CategoryForUI {
   const id = String(raw?.id ?? raw?.Id ?? raw?.name ?? raw?.Name ?? '').trim() || `temp-${Math.random().toString(36).slice(2, 10)}`;
   const name = String(raw?.name ?? raw?.Name ?? '').trim() || 'Familia';
-  const code = String(raw?.code ?? raw?.Code ?? '').trim() || undefined;
+  const shortNameRaw = String(raw?.shortName ?? raw?.ShortName ?? '').trim();
+  const shortName = shortNameRaw || undefined;
+  const code = String(raw?.familyCode ?? raw?.FamilyCode ?? raw?.code ?? raw?.Code ?? '').trim() || undefined;
   const sku = String(raw?.sku ?? raw?.Sku ?? '').trim() || undefined;
   const volumeRaw = Number(raw?.volume ?? raw?.Volume ?? 0);
   const volume = Number.isFinite(volumeRaw) && volumeRaw > 0 ? volumeRaw : undefined;
   const unit = String(raw?.unit ?? raw?.Unit ?? '').trim() || undefined;
-  return { id, name, code, sku, volume, unit };
+  return { id, name, shortName, code, sku, volume, unit };
 }
 
 /** Lista todas las familias registradas. GET /families/families */

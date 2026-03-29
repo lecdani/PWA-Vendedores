@@ -249,7 +249,7 @@ export function CatalogOrder({
     router.push('/order-review');
   };
 
-  const handleConfirmToPodNavarro = async () => {
+  const handleInvoiceFromCatalog = async () => {
     if (!orderId) return;
     setFlowError(null);
     setContinuing(true);
@@ -280,7 +280,14 @@ export function CatalogOrder({
         setContinuing(false);
         return;
       }
-      router.push(`/capture-pod/${orderId}`);
+      const invoiceId = await ordersApi.ensureInvoiceForOrder(backendOrderId, rows);
+      if (invoiceId == null) {
+        setFlowError('No se pudo crear la factura. Revisa la conexión o los datos del pedido.');
+        setContinuing(false);
+        return;
+      }
+      await ordersApi.updateOrderStatus(backendOrderId, true);
+      router.push(`/order/${orderId}`);
     } catch {
       setFlowError('Error al continuar.');
     } finally {
@@ -334,7 +341,7 @@ export function CatalogOrder({
             <h2 className="text-slate-900 text-sm">{storeInfo?.name ?? t('product_catalog')}</h2>
             <p className="text-xs text-slate-500">
               {isConfirmFlow
-                ? 'Confirmar: solo puedes ajustar cantidades de los productos del pedido. Luego POD obligatorio.'
+                ? 'Facturar: ajusta cantidades del pedido. Se crea la factura sin POD; el comprobante puedes subirlo después (menú POD).'
                 : t('catalog_order_subtitle')}
             </p>
           </div>
@@ -541,12 +548,12 @@ export function CatalogOrder({
         <div className="flex gap-3 max-w-2xl mx-auto">
           {isConfirmFlow ? (
             <Button
-              onClick={handleConfirmToPodNavarro}
+              onClick={handleInvoiceFromCatalog}
               className="flex-1 bg-indigo-600 hover:bg-indigo-700"
               disabled={totalToOrder === 0 || continuing}
             >
               <Send className="h-4 w-4 mr-2" />
-              {continuing ? 'Procesando…' : 'Continuar a POD (confirmar)'}
+              {continuing ? 'Procesando…' : 'Generar factura'}
             </Button>
           ) : (
             <Button

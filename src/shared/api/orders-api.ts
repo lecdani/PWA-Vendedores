@@ -78,6 +78,16 @@ async function safePut<T>(endpoint: string, body: unknown): Promise<T | null> {
   }
 }
 
+async function safePatch<T>(endpoint: string, body: unknown): Promise<T | null> {
+  try {
+    return await apiClient.patch<T>(endpoint, body);
+  } catch (error) {
+    const err = error as ApiError;
+    console.error('[orders-api] PATCH', endpoint, 'failed:', (err as any)?.message ?? err);
+    return null;
+  }
+}
+
 async function safeDelete<T>(endpoint: string): Promise<T | null> {
   try {
     return await apiClient.delete<T>(endpoint);
@@ -256,6 +266,35 @@ function getPodFromInvoice(inv: any): string {
   if (typeof base64 === 'string' && base64.length > 0) return `data:image/png;base64,${base64}`;
   }
   return '';
+}
+
+/** FK POD en factura: si tiene valor distinto de vacío/0, se considera vinculado. */
+function getPodIdFromInvoice(inv: any): string {
+  if (inv == null) return '';
+  const layers = peelInvoiceLayers(inv);
+  const seen = new Set<any>();
+  for (const root of layers) {
+    if (root == null || typeof root !== 'object' || seen.has(root)) continue;
+    seen.add(root);
+    const v =
+      (root as any).podId ??
+      (root as any).PodId ??
+      (root as any).pod_id ??
+      (root as any).POD_ID ??
+      (root as any).podID;
+    if (v == null || v === '') continue;
+    const s = String(v).trim();
+    if (!s || s === '0' || /^null$/i.test(s) || /^undefined$/i.test(s)) continue;
+    return s;
+  }
+  return '';
+}
+
+/** Hay comprobante en factura: archivo/ruta en JSON o `podId` persistido. */
+export function invoiceHasPodEvidence(inv: any): boolean {
+  if (!inv) return false;
+  if (getPodIdFromInvoice(inv)) return true;
+  return !!getPodFromInvoice(inv)?.trim();
 }
 
 /** PO en payload de factura (el backend puede devolverlo solo en la factura). */
@@ -611,6 +650,8 @@ export interface OrderForUI {
   comments?: string;
   /** Id de la factura en el backend (para POD). */
   invoiceId?: number | string;
+  /** Nº humano de factura (solo UI; no reemplaza `invoiceId`). */
+  invoiceNumber?: string;
   /** Id del vendedor asignado al pedido. */
   salespersonId?: string;
   /** Código PO (Purchase Order), único. */
@@ -983,9 +1024,8 @@ export const ordersApi = {
   },
 
   /**
-   * Factura en BD solo cuando va COMPLETA (Unit of Work): cabecera + ítems + POD en un solo POST.
-   * - Con `podFileName`: POST /invoice/invoices una vez con todo (no antes, no sin POD).
-   * - Sin `podFileName`: no crea nada; solo devuelve id si ya existe factura para el pedido (lectura).
+   * Crea o reutiliza factura para el pedido. El POD es opcional en el POST; si la factura ya existe,
+   * se puede adjuntar el archivo con `uploadPODForInvoice` (PATCH) o pasando `podFileName` aquí.
    */
   async ensureInvoiceForOrder(
     orderId: string | number,
@@ -996,28 +1036,31 @@ export const ordersApi = {
     if (!orderIdStr) return null;
 
     const podFileName = String(options?.podFileName ?? '').trim();
-    const withPod = !!podFileName;
+    const notes = String(options?.notes ?? '').trim();
 
     const existingRaw = await this.getInvoiceIdForOrder(orderIdStr);
     const existingStr =
       existingRaw != null && String(existingRaw).trim() !== '' ? String(existingRaw).trim() : '';
 
-    /** Nunca persistir factura incompleta: sin POD no hay POST. */
-    if (!withPod) {
-      return existingStr ? existingRaw : null;
-    }
-
     if (existingStr) {
-      const inv = await getInvoiceById(existingStr);
-      if (inv && getPodFromInvoice(inv)) return existingRaw;
+      if (podFileName) {
+        const inv = await getInvoiceById(existingStr);
+        if (!invoiceHasPodEvidence(inv)) {
+          const patched = await this.uploadPODForInvoice({
+            invoiceId: existingStr,
+            fileName: podFileName,
+            notes: notes || undefined,
+          });
+          if (!patched) return null;
+        }
+      }
+      return existingRaw;
     }
 
     const order = await this.getOrderById(orderIdStr);
     if (!order) return null;
 
-    /** Id de factura: nuevo UUID o reintento con registro huérfano (sin POD) listado por orderId. */
-    const invoiceGuid =
-      existingStr ? existingStr : generateUuidV4();
+    const invoiceGuid = generateUuidV4();
 
     const mappedItems =
       Array.isArray(deliveredItems) && deliveredItems.length > 0
@@ -1026,7 +1069,6 @@ export const ordersApi = {
             const qty = Number(it.quantity) || 0;
             const price = Number(it.unitPrice) || 0;
             const subtotal = qty * price;
-            /** Contrato API: invoiceDetailId, invoiceId, productId, quantity, subtotal (+ PascalCase .NET). */
             return {
               invoiceDetailId,
               InvoiceDetailId: invoiceDetailId,
@@ -1042,7 +1084,6 @@ export const ordersApi = {
           })
         : [];
 
-    /** Factura completa = al menos una línea + POD; si no, no tocar BD. */
     if (mappedItems.length === 0) {
       return null;
     }
@@ -1072,14 +1113,16 @@ export const ordersApi = {
       CreatedAt: new Date().toISOString(),
       items: mappedItems,
       Items: mappedItems,
-      pod: podFileName,
-      Pod: podFileName,
     };
 
-    const n = String(options?.notes ?? '').trim();
-    if (n) {
-      body.notes = n;
-      body.Notes = n;
+    if (podFileName) {
+      body.pod = podFileName;
+      body.Pod = podFileName;
+    }
+
+    if (notes) {
+      body.notes = notes;
+      body.Notes = notes;
     }
 
     const created = await safePost<any>('/invoice/invoices', body);
@@ -1400,14 +1443,23 @@ export const ordersApi = {
   },
 
   /**
-   * Obsoleto: el API no expone PATCH .../pod. Usar ensureInvoiceForOrder(orderId, items, { podFileName }).
+   * Asigna imagen POD a la factura (tras POST /images/upload).
+   * PATCH /invoice/invoices/{id}/pod — el cuerpo debe ser un JSON **string** (nombre/clave del archivo), no un objeto.
    */
-  async uploadPODForInvoice(_params: {
+  async uploadPODForInvoice(params: {
     invoiceId: number | string;
     fileName: string;
     notes?: string;
   }): Promise<boolean> {
-      return false;
+    const id = String(params.invoiceId).trim();
+    const fileName = String(params.fileName ?? '').trim();
+    if (!id || !fileName) return false;
+    void params.notes;
+    const res = await safePatch<unknown>(
+      `/invoice/invoices/${encodeURIComponent(id)}/pod`,
+      fileName
+    );
+    return res !== null && res !== undefined;
   },
 
   // VisitLogs removidos: el sistema ahora usa Assignments (tiendas asignadas).
@@ -1588,9 +1640,19 @@ export const ordersApi = {
         ) {
           next = { ...next, invoiceId: invId };
         }
-        const podFromInv = getPodFromInvoice(inv);
-        if (podFromInv) {
-          next = { ...next, podImageUrl: next.podImageUrl || podFromInv, podFileName: next.podFileName || podFromInv, podUploaded: true };
+        const hasPod = invoiceHasPodEvidence(inv);
+        next = { ...next, podUploaded: hasPod };
+        const invNoHuman =
+          inv?.invoiceNumber ??
+          inv?.InvoiceNumber ??
+          unwrapInvoiceResponse(inv)?.invoiceNumber ??
+          unwrapInvoiceResponse(inv)?.InvoiceNumber;
+        if (invNoHuman != null && String(invNoHuman).trim() !== '') {
+          next = { ...next, invoiceNumber: String(invNoHuman).trim() };
+        }
+        if (hasPod) {
+          const podFromInv = getPodFromInvoice(inv);
+          next = { ...next, podImageUrl: next.podImageUrl || podFromInv, podFileName: next.podFileName || podFromInv };
         }
         if (Number(next.total) <= 0) {
           let invTotal = Number(inv?.total ?? inv?.Total ?? inv?.amount ?? inv?.Amount ?? inv?.totalAmount ?? inv?.TotalAmount ?? inv?.grandTotal ?? inv?.GrandTotal ?? 0);
@@ -1622,9 +1684,11 @@ export const ordersApi = {
       await Promise.all(
         conFacturaSinPod.map(async (idx) => {
           const invRaw = await getInvoiceById(String(result[idx].invoiceId!));
-          const pod = getPodFromInvoice(invRaw);
-          if (pod) {
+          if (invoiceHasPodEvidence(invRaw)) {
+            const pod = getPodFromInvoice(invRaw);
             result[idx] = { ...result[idx], podImageUrl: pod, podFileName: pod, podUploaded: true };
+          } else {
+            result[idx] = { ...result[idx], podUploaded: false };
           }
         })
       );
@@ -1676,11 +1740,11 @@ export const ordersApi = {
     // POD desde factura anidada en la respuesta del pedido (si el backend la incluye)
     const nestedInv = orderRaw?.invoice ?? orderRaw?.Invoice ?? orderRaw?.InvoiceData ?? raw?.invoice ?? raw?.Invoice ?? raw?.InvoiceData;
     if (nestedInv && typeof nestedInv === 'object') {
+      result.podUploaded = invoiceHasPodEvidence(nestedInv);
       const podText = getPodFromInvoice(nestedInv);
       if (podText) {
         result.podImageUrl = result.podImageUrl || podText;
         result.podFileName = result.podFileName || podText;
-        if (!result.podUploaded) result.podUploaded = true;
       }
       if ((result.invoiceId == null || result.invoiceId === '') && (nestedInv?.id ?? nestedInv?.Id ?? nestedInv?.invoiceId ?? nestedInv?.InvoiceId)) {
         result.invoiceId = nestedInv?.id ?? nestedInv?.Id ?? nestedInv?.invoiceId ?? nestedInv?.InvoiceId;
@@ -1711,11 +1775,11 @@ export const ordersApi = {
       invForPod = await this.getInvoiceForOrder(orderId);
     }
     if (invForPod) {
+      result.podUploaded = invoiceHasPodEvidence(invForPod);
       const podText = getPodFromInvoice(invForPod);
       if (podText) {
         result.podImageUrl = result.podImageUrl || podText;
         result.podFileName = result.podFileName || podText;
-        if (!result.podUploaded) result.podUploaded = true;
       }
       const invRoot = unwrapInvoiceResponse(invForPod);
       const invSt = invRoot?.status ?? invRoot?.Status;

@@ -8,8 +8,6 @@ import { useLanguage } from '@/shared/i18n/language-provider';
 import { useAuth } from '@/shared/auth/auth-provider';
 import { ordersApi } from '@/shared/api/orders-api';
 import { storesApi } from '@/shared/api/stores-api';
-import { histpricesApi } from '@/shared/api/histprices-api';
-import { productsApi } from '@/shared/api/products-api';
 import { uploadImage } from '@/shared/api/images-api';
 import { Button } from '@/shared/ui/button';
 import { Card, CardContent } from '@/shared/ui/card';
@@ -29,10 +27,16 @@ export function CapturePOD({ orderId }: { orderId: string }) {
   const [orderLoadError, setOrderLoadError] = useState(false);
   const [podUploadError, setPodUploadError] = useState<string | null>(null);
   const [podSuccessMessage, setPodSuccessMessage] = useState<string | null>(null);
-  const [storeHasPlanogram, setStoreHasPlanogram] = useState<boolean>(true);
   const [deliveredItemsPreview, setDeliveredItemsPreview] = useState<
     Array<{ productId: string; quantity: number; unitPrice?: number }>
   >([]);
+  const [invoiceSummary, setInvoiceSummary] = useState<{
+    invoiceNumber: string;
+    total: number;
+    units: number;
+    date: string;
+    ok: boolean;
+  } | null>(null);
 
   const readDeliveredFromStorage = () => {
     if (typeof window === 'undefined') return;
@@ -80,7 +84,7 @@ export function CapturePOD({ orderId }: { orderId: string }) {
         }, 0)
       : 0;
 
-  // Cargar pedido desde la API, resolver tienda y total (como en listado de pedidos)
+  // Cargar pedido, factura (totales/unidades) y nombre de tienda
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -90,35 +94,32 @@ export function CapturePOD({ orderId }: { orderId: string }) {
       if (!mounted) return;
       if (!order) {
         setOrderData(null);
+        setInvoiceSummary(null);
         setOrderLoadError(true);
         return;
       }
-      let orderToUse = order;
-      // Enriquecer ítems con precio (y nombre si falta) como en detalle del pedido
-      const needsPrice = orderToUse.items?.some((i: any) => i.productId && !Number(i.price));
-      const needsProductName = orderToUse.items?.some((i: any) => i.productId && !(i.productName || i.sku || '').trim());
-      if ((needsPrice || needsProductName) && orderToUse.items?.length) {
-        const enrichedItems = await Promise.all(
-          orderToUse.items.map(async (item: any) => {
-            let productName = (item.productName || item.sku || '').trim();
-            let price = Number(item.price) || 0;
-            if (item.productId) {
-              if (!price) {
-                const product = await productsApi.getById(item.productId);
-                const familyId = String(
-                  product?.familyId ?? product?.categoryId ?? ''
-                ).trim();
-                price = familyId ? await histpricesApi.getLatest(familyId) : 0;
-              }
-              if (!productName) {
-                const product = await productsApi.getById(item.productId);
-                if (product) productName = product.name || product.code || product.sku || '';
-              }
-            }
-            return { ...item, productName: productName || item.productName, price };
-          })
-        );
-        orderToUse = { ...orderToUse, items: enrichedItems };
+      const orderToUse = order;
+      setInvoiceSummary(null);
+      let invOk = false;
+      let invTotal = 0;
+      let invUnits = 0;
+      let invDate = '';
+      let invNumber = '';
+      try {
+        const inv = await ordersApi.getInvoiceDisplayForOrder(orderId, orderToUse.invoiceId, orderToUse);
+        if (inv) {
+          const lines = inv.items || [];
+          invUnits = lines.reduce((s, it) => s + (Number(it.qty) || 0), 0);
+          invTotal = Number(inv.total) || 0;
+          if (invTotal <= 0 && lines.length) {
+            invTotal = lines.reduce((s, it) => s + (Number(it.amount) || 0), 0);
+          }
+          invOk = lines.length > 0 || invTotal > 0;
+          invDate = inv.date || '';
+          invNumber = String(inv.invoiceNumber || '').trim();
+        }
+      } catch {
+        /* sin factura legible */
       }
       const name = (orderToUse.storeName || '').trim();
       const looksLikeId = !name || name === orderToUse.storeId || /^[0-9a-f-]{36}$/i.test(name) || /^\d+$/.test(name);
@@ -127,28 +128,21 @@ export function CapturePOD({ orderId }: { orderId: string }) {
         const store = await storesApi.fetchStoreById(orderToUse.storeId);
         if (store) {
           if (store?.name) storeNameResolved = store.name;
-          setStoreHasPlanogram(store.hasPlanogram !== false);
         }
       } else if (name) {
         storeNameResolved = name;
       }
-      // Total: orden → factura → subtotal → suma de ítems (como en listado de pedidos)
-      let totalToShow = Number(orderToUse.total) || Number(orderToUse.subtotal) || 0;
-      if (totalToShow <= 0) {
-        totalToShow = await ordersApi.getInvoiceTotalForOrder(orderId) || 0;
-      }
-      if (totalToShow <= 0 && orderToUse.items?.length) {
-        const fromItems = orderToUse.items.reduce((s: number, i: any) => s + (i.quantity ?? i.toOrder ?? 0) * (Number(i.price) || 0), 0);
-        if (fromItems > 0) totalToShow = fromItems + (Number(orderToUse.tax) || 0);
-      }
-      if (totalToShow <= 0 && Number(orderToUse.subtotal) > 0) {
-        totalToShow = Number(orderToUse.subtotal) + (Number(orderToUse.tax) || 0);
-      }
       if (mounted) {
+        setInvoiceSummary({
+          invoiceNumber: invNumber,
+          total: invTotal,
+          units: invUnits,
+          date: invDate,
+          ok: invOk,
+        });
         setOrderData({
           ...orderToUse,
           storeNameResolved: storeNameResolved ?? orderToUse.storeName,
-          total: totalToShow,
         });
       }
     })();
@@ -186,8 +180,6 @@ export function CapturePOD({ orderId }: { orderId: string }) {
   };
 
   const handleSubmit = async () => {
-    const status = String(orderData?.status || '').toLowerCase();
-
     if (!podImage || !podFile) {
       setPodUploadError(t('pod_image_required') || 'Debes agregar una foto o imagen del comprobante de entrega.');
       return;
@@ -199,46 +191,14 @@ export function CapturePOD({ orderId }: { orderId: string }) {
 
     try {
       const backendOrderId = orderData?.backendOrderId ?? orderData?.id ?? orderId;
-      if (status === 'initial' || status === 'pending') {
-        const confirmed = await ordersApi.updateOrderStatus(backendOrderId, false);
-        if (!confirmed) {
-          setPodUploadError('No se pudo confirmar el pedido para facturacion.');
-          setUploading(false);
-          return;
-        }
-      }
-
-      let deliveredItems: Array<{ productId: string; quantity: number; unitPrice?: number }> = [];
-      if (typeof window !== 'undefined') {
-        const saved = window.localStorage.getItem(`order_delivery_confirmation_${orderId}`);
-        if (saved) {
-          try {
-            const parsed = JSON.parse(saved);
-            const rawItems = Array.isArray(parsed?.items) ? parsed.items : [];
-            // Sanitizar por compatibilidad con backend (ignorar campos extra como row/col/sku/productName)
-            deliveredItems = rawItems
-              .map((it: any) => ({
-                productId: String(it?.productId ?? '').trim(),
-                quantity: Number(it?.quantity ?? 0) || 0,
-                unitPrice: it?.unitPrice != null ? Number(it.unitPrice) : undefined,
-              }))
-              .filter((it: any) => it.productId && it.quantity > 0);
-          } catch {
-            deliveredItems = [];
-          }
-        }
-      }
-
-      /** Catálogo / sin planograma: mismo POST de factura que planograma; si no hay localStorage, usar líneas del pedido. */
-      if (deliveredItems.length === 0 && orderData?.items?.length) {
-        deliveredItems = orderData.items
-          .map((it: any) => {
-            const productId = String(it.productId ?? it.ProductId ?? '').trim();
-            const quantity = Number(it.quantity ?? it.toOrder ?? it.Quantity ?? 0) || 0;
-            const unitPrice = Number(it.price ?? it.unitPrice ?? 0) || 0;
-            return { productId, quantity, unitPrice };
-          })
-          .filter((it) => it.productId && it.quantity > 0);
+      const invoiceIdRaw = orderData?.invoiceId ?? (orderData as any)?.InvoiceId;
+      if (invoiceIdRaw == null || String(invoiceIdRaw).trim() === '') {
+        setPodUploadError(
+          t('pod_invoice_required_first') ||
+            'Este pedido aún no tiene factura. La facturación debe realizarse antes; luego podrás cargar el POD.'
+        );
+        setUploading(false);
+        return;
       }
 
       const { fileName } = await uploadImage(podFile);
@@ -248,27 +208,20 @@ export function CapturePOD({ orderId }: { orderId: string }) {
         return;
       }
 
-      if (!deliveredItems.length) {
+      const patched = await ordersApi.uploadPODForInvoice({
+        invoiceId: String(invoiceIdRaw).trim(),
+        fileName: fileName.trim(),
+        notes: notes || undefined,
+      });
+      if (!patched) {
         setPodUploadError(
-          storeHasPlanogram
-            ? 'Faltan las cantidades de facturación. Vuelve al planograma y usa «Continuar a POD y facturar».'
-            : t('pod_catalog_missing_lines')
+          t('pod_upload_failed') ||
+            'No se pudo asociar el comprobante a la factura. Revisa la conexión o inténtalo de nuevo.'
         );
         setUploading(false);
         return;
       }
 
-      const invoiceId = await ordersApi.ensureInvoiceForOrder(backendOrderId, deliveredItems, {
-        podFileName: fileName,
-        notes: notes || undefined,
-      });
-      if (invoiceId == null) {
-        setPodUploadError(
-          'No se pudo crear la factura con POD. Revisa la conexión o los datos del pedido.'
-        );
-        setUploading(false);
-        return;
-      }
       const statusOk = await ordersApi.updateOrderStatus(backendOrderId, true);
       if (!statusOk) {
         setPodUploadError(
@@ -468,28 +421,46 @@ export function CapturePOD({ orderId }: { orderId: string }) {
                       <span className="text-slate-900">{new Date(orderData.deliveryDate).toLocaleDateString()}</span>
                     </div>
                   )}
+                  {invoiceSummary?.ok && invoiceSummary.invoiceNumber ? (
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">{t('invoice_id_short')}:</span>
+                      <span className="text-slate-900">{invoiceSummary.invoiceNumber}</span>
+                    </div>
+                  ) : null}
+                  {invoiceSummary?.ok && invoiceSummary.date ? (
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">{t('invoice_date_row')}:</span>
+                      <span className="text-slate-900">{new Date(invoiceSummary.date).toLocaleDateString()}</span>
+                    </div>
+                  ) : null}
                   <div className="flex justify-between">
                     <span className="text-slate-500">{t('units')}:</span>
                     <span className="text-slate-900">
-                      {deliveredItemsPreview.length > 0
-                        ? deliveredUnitsPreview
-                        : (orderData.totalUnits ||
-                            orderData.items?.reduce((sum: number, item: any) => sum + (item.toOrder || 0), 0))}
+                      {invoiceSummary?.ok
+                        ? invoiceSummary.units
+                        : deliveredItemsPreview.length > 0
+                          ? deliveredUnitsPreview
+                          : (orderData.totalUnits ||
+                              orderData.items?.reduce((sum: number, item: any) => sum + (item.toOrder || 0), 0))}
                     </span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-500">{t('total')}:</span>
                     <span className="text-slate-900 font-semibold">
-                      ${(
-                        (deliveredItemsPreview.length > 0
-                          ? deliveredTotalPreview
-                          : (Number(orderData.total) ||
-                              (Number(orderData.subtotal) + Number(orderData.tax) || 0) ||
-                              (orderData.items || []).reduce(
-                                (s: number, i: any) => s + (i.quantity ?? i.toOrder ?? 0) * (Number(i.price) || 0),
-                                0
-                              ) + (Number(orderData.tax) || 0)))
-                      ).toFixed(2)}
+                      {invoiceSummary?.ok ? (
+                        `$${Number(invoiceSummary.total).toFixed(2)}`
+                      ) : (
+                        `$${(
+                          deliveredItemsPreview.length > 0
+                            ? deliveredTotalPreview
+                            : (Number(orderData.total) ||
+                                (Number(orderData.subtotal) + Number(orderData.tax) || 0) ||
+                                (orderData.items || []).reduce(
+                                  (s: number, i: any) => s + (i.quantity ?? i.toOrder ?? 0) * (Number(i.price) || 0),
+                                  0
+                                ) + (Number(orderData.tax) || 0))
+                        ).toFixed(2)}`
+                      )}
                     </span>
                   </div>
                 </>
