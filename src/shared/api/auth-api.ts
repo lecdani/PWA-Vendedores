@@ -99,6 +99,7 @@ export const authApi = {
     lastName?: string;
     sellerCode?: string;
     baseCityId?: string;
+    salesRouteId?: string;
   }> {
     const rawId = (raw: Record<string, unknown>) =>
       raw?.id != null ? String(raw.id) : raw?.Id != null ? String(raw.Id) : undefined;
@@ -118,6 +119,16 @@ export const authApi = {
       (raw?.baseCityId ?? raw?.BaseCityId ?? raw?.base_city_id ?? raw?.BASE_CITY_ID) != null
         ? String(raw?.baseCityId ?? raw?.BaseCityId ?? raw?.base_city_id ?? raw?.BASE_CITY_ID).trim() || undefined
         : undefined;
+    const rawSalesRouteId = (raw: Record<string, unknown>) => {
+      const v =
+        raw?.salesRouteId ??
+        raw?.SalesRouteId ??
+        raw?.sales_route_id ??
+        raw?.Sales_Route_Id ??
+        (raw?.salesRoute as Record<string, unknown> | undefined)?.id ??
+        (raw?.SalesRoute as Record<string, unknown> | undefined)?.Id;
+      return v != null && String(v).trim() !== '' ? String(v).trim() : undefined;
+    };
 
     const mapUser = (raw: Record<string, unknown>) => ({
       id: rawId(raw),
@@ -128,6 +139,7 @@ export const authApi = {
       lastName: rawLastName(raw),
       sellerCode: rawSellerCode(raw),
       baseCityId: rawBaseCityId(raw),
+      salesRouteId: rawSalesRouteId(raw),
     });
 
     if (userId && !String(userId).includes('@')) {

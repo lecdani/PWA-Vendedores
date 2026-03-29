@@ -16,6 +16,7 @@ import { Button } from '@/shared/ui/button';
 import { Card, CardContent } from '@/shared/ui/card';
 import { Separator } from '@/shared/ui/separator';
 import { Badge } from '@/shared/ui/badge';
+import { assignmentBelongsToSeller } from '@/shared/utils/assignment-match';
 
 export function OrderReview() {
   const { t } = useLanguage();
@@ -49,13 +50,11 @@ export function OrderReview() {
       ]);
       if (!mounted) return;
 
-      const uid = String(user?.id ?? '').trim();
+      const u = user;
       let allowedStores = apiStores;
-      if (uid) {
+      if (u && (String(u.id).trim() || String(u.salesRouteId ?? '').trim())) {
         const allowedStoreIds = new Set(
-          allAssignments
-            .filter((a) => String(a.salespersonId) === uid)
-            .map((a) => String(a.storeId))
+          allAssignments.filter((a) => assignmentBelongsToSeller(a, u)).map((a) => String(a.storeId))
         );
         allowedStores = apiStores.filter((s) => allowedStoreIds.has(String(s.id)));
       }
@@ -69,7 +68,7 @@ export function OrderReview() {
     return () => {
       mounted = false;
     };
-  }, [editOrderId, user?.id, storeId]);
+  }, [editOrderId, user?.id, user?.salesRouteId, storeId]);
 
   useEffect(() => {
     const data = getOrderReviewPayload();
@@ -103,6 +102,7 @@ export function OrderReview() {
       storeName: storeInfo?.name || storeId,
       storeAddress: storeInfo ? `${storeInfo.address || ''}${storeInfo.city ? `, ${storeInfo.city}` : ''}` : '',
       salespersonId: user?.id,
+      salesRouteId: user?.salesRouteId,
       vendorNumber: '2F318',
       planogramId: orderSource === 'planogram' ? planogramId : undefined,
       items: orderItems.map((item: any) => ({

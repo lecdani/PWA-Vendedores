@@ -2,7 +2,10 @@ import { apiClient, ApiError } from './api-client';
 
 export interface AssignmentForUI {
   id: string;
-  salespersonId: string;
+  /** Legacy: asignación directa al vendedor. */
+  salespersonId?: string;
+  /** Modelo ER: asignación ruta + tienda. */
+  salesRouteId?: string;
   storeId: string;
 }
 
@@ -22,10 +25,30 @@ function normalizeList(res: any): any[] {
 
 function toAssignment(raw: any): AssignmentForUI | null {
   const id = String(raw?.id ?? raw?.Id ?? raw?.assignmentId ?? raw?.AssignmentId ?? '').trim();
-  const salespersonId = String(raw?.salespersonId ?? raw?.SalespersonId ?? raw?.userId ?? raw?.UserId ?? '').trim();
+  const salespersonId = String(
+    raw?.salespersonId ?? raw?.SalespersonId ?? raw?.userId ?? raw?.UserId ?? ''
+  ).trim();
+  const salesRouteId = String(
+    raw?.routeId ??
+      raw?.RouteId ??
+      raw?.route_id ??
+      raw?.Route_Id ??
+      raw?.salesRouteId ??
+      raw?.SalesRouteId ??
+      raw?.sales_route_id ??
+      raw?.Sales_Route_Id ??
+      ''
+  ).trim();
   const storeId = String(raw?.storeId ?? raw?.StoreId ?? '').trim();
-  if (!salespersonId || !storeId) return null;
-  return { id: id || `${salespersonId}::${storeId}`, salespersonId, storeId };
+  if (!storeId || (!salespersonId && !salesRouteId)) return null;
+  const syntheticId =
+    id || (salesRouteId ? `${salesRouteId}::${storeId}` : salespersonId ? `${salespersonId}::${storeId}` : storeId);
+  return {
+    id: syntheticId,
+    salespersonId: salespersonId || undefined,
+    salesRouteId: salesRouteId || undefined,
+    storeId,
+  };
 }
 
 export const assignmentsApi = {

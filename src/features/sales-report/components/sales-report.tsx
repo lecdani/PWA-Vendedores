@@ -21,6 +21,7 @@ import { ordersApi, OrderForUI, InvoiceReportRow } from '@/shared/api/orders-api
 import { storesApi } from '@/shared/api/stores-api';
 import { citiesApi } from '@/shared/api/cities-api';
 import { assignmentsApi } from '@/shared/api/assignments-api';
+import { assignmentBelongsToSeller } from '@/shared/utils/assignment-match';
 import { Button } from '@/shared/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/shared/ui/card';
 import { Badge } from '@/shared/ui/badge';
@@ -219,22 +220,20 @@ export function SalesReport() {
   useEffect(() => {
     let mounted = true;
     (async () => {
-      const uid = String(user?.id ?? '').trim();
-      if (!uid) {
+      const u = user;
+      if (!u || (!String(u.id).trim() && !String(u.salesRouteId ?? '').trim())) {
         if (mounted) setAssignedStoresCount(0);
         return;
       }
       const all = await assignmentsApi.fetchAll();
       if (!mounted) return;
-      const ids = new Set(
-        all.filter((a) => String(a.salespersonId) === uid).map((a) => String(a.storeId))
-      );
+      const ids = new Set(all.filter((a) => assignmentBelongsToSeller(a, u)).map((a) => String(a.storeId)));
       setAssignedStoresCount(ids.size);
     })();
     return () => {
       mounted = false;
     };
-  }, [user?.id]);
+  }, [user?.id, user?.salesRouteId]);
 
   const getStoreName = (storeId: string, fallback?: string) =>
     storeCache[storeId] || (orders.find((o) => o.storeId === storeId)?.storeName) || fallback || storeId;

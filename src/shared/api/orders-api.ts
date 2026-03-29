@@ -29,6 +29,8 @@ export interface CreateOrderInput {
   storeName?: string;
   storeAddress?: string;
   salespersonId?: string;
+  /** FK SALES_ROUTE en ORDER (según modelo ER). */
+  salesRouteId?: string;
   vendorNumber?: string;
   /** Código PO (Purchase Order), requerido y único en el sistema. */
   po?: string;
@@ -914,7 +916,6 @@ export const ordersApi = {
   async createOrder(input: CreateOrderInput): Promise<CreatedOrderResult | null> {
     // Unit of Work: crear cabecera + detalles en un solo request
     const generatedOrderId = generateUuidV4();
-    const poTrimmed = (input.po ?? '').trim();
     const mappedItems = input.items.map((item) => {
       const detailId = generateUuidV4();
       return {
@@ -937,18 +938,6 @@ export const ordersApi = {
       items: mappedItems,
       Items: mappedItems,
     };
-    if (poTrimmed) {
-      payload.po = poTrimmed;
-      payload.Po = poTrimmed;
-    }
-    if ((input.planogramId ?? '').trim()) {
-      const pid = String(input.planogramId).trim();
-      payload.planogramId = pid;
-      payload.PlanogramId = pid;
-      payload.planogram_id = pid;
-      payload.PLANOGRAM_ID = pid;
-    }
-
     let createdOrder: any;
     try {
       createdOrder = await apiClient.post<any>('/orders/orders', payload);

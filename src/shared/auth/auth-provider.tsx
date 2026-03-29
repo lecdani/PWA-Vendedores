@@ -34,6 +34,7 @@ interface User {
   phone?: string;
   sellerCode?: string;
   baseCityId?: string;
+  salesRouteId?: string;
 }
 
 interface AuthContextType {
@@ -103,6 +104,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       let apiUserId: string | undefined;
       let apiSellerCode: string | undefined;
       let apiBaseCityId: string | undefined;
+      let apiSalesRouteId: string | undefined;
       try {
         const apiUser = await authApi.getCurrentUserFromApi(token, id !== email ? id : undefined, userEmail);
         roleRaw = apiUser.role;
@@ -113,6 +115,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         apiUserId = apiUser.id;
         apiSellerCode = apiUser.sellerCode;
         apiBaseCityId = apiUser.baseCityId;
+        apiSalesRouteId = apiUser.salesRouteId;
       } catch {
         roleRaw = getRoleFromLoginResponse(response);
       }
@@ -143,6 +146,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         phone: apiPhone,
         sellerCode: apiSellerCode,
         baseCityId: apiBaseCityId,
+        salesRouteId: apiSalesRouteId,
       };
       localStorage.setItem('auth_token', token);
       localStorage.setItem('auth_user', JSON.stringify(user));

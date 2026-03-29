@@ -12,6 +12,7 @@ import { storesApi, StoreForUI } from '@/shared/api/stores-api';
 import { citiesApi } from '@/shared/api/cities-api';
 import { assignmentsApi } from '@/shared/api/assignments-api';
 import { useAuth } from '@/shared/auth/auth-provider';
+import { assignmentBelongsToSeller } from '@/shared/utils/assignment-match';
 
 export function SelectStore() {
   const { t } = useLanguage();
@@ -38,12 +39,10 @@ export function SelectStore() {
         assignmentsApi.fetchAll(),
       ]);
       if (!mounted) return;
-      const uid = String(user?.id ?? '').trim();
-      if (uid) {
+      const u = user;
+      if (u && (String(u.id).trim() || String(u.salesRouteId ?? '').trim())) {
         const allowedStoreIds = new Set(
-          allAssignments
-            .filter((a) => String(a.salespersonId) === uid)
-            .map((a) => String(a.storeId))
+          allAssignments.filter((a) => assignmentBelongsToSeller(a, u)).map((a) => String(a.storeId))
         );
         setStores(apiStores.filter((s) => allowedStoreIds.has(String(s.id))));
       } else {
@@ -54,7 +53,7 @@ export function SelectStore() {
     return () => {
       mounted = false;
     };
-  }, [user?.id]);
+  }, [user?.id, user?.salesRouteId]);
 
   useEffect(() => {
     const ids = stores
