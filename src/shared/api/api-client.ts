@@ -21,6 +21,8 @@ export interface ApiError {
 
 export class ApiClient {
   private baseUrl: string;
+  private static readonly OFFLINE_HINT_KEY = 'app_offline_hint';
+  private static readonly OFFLINE_HINT_TTL_MS = 8000;
 
   constructor(baseUrl: string = API_BASE_URL) {
     this.baseUrl = baseUrl;
@@ -31,6 +33,46 @@ export class ApiClient {
     options: RequestInit = {}
   ): Promise<T> {
     const url = `${this.baseUrl}${endpoint}`;
+    const method = String(options.method ?? 'GET').toUpperCase();
+    const isGet = method === 'GET';
+
+    // Evita intentos de red innecesarios cuando el navegador ya reporta offline.
+    if (typeof window !== 'undefined' && !navigator.onLine) {
+      window.dispatchEvent(new CustomEvent('app-network-status', { detail: { online: false } }));
+      throw {
+        message: 'Error de conexión. Verifica tu conexión a internet.',
+        status: 0,
+      } as ApiError;
+    }
+    // Si ya detectamos fallo de red recientemente, evita nuevos GET largos,
+    // pero solo por una ventana corta para no quedar "pegado" en offline.
+    if (
+      typeof window !== 'undefined' &&
+      isGet &&
+      window.sessionStorage.getItem(ApiClient.OFFLINE_HINT_KEY) === '1'
+    ) {
+      window.dispatchEvent(new CustomEvent('app-network-status', { detail: { online: false } }));
+      // valor legacy ('1') puede quedar persistido; limpiarlo para reintentar.
+      window.sessionStorage.removeItem(ApiClient.OFFLINE_HINT_KEY);
+    }
+    if (typeof window !== 'undefined' && isGet) {
+      const rawHint = window.sessionStorage.getItem(ApiClient.OFFLINE_HINT_KEY);
+      if (rawHint) {
+        const now = Date.now();
+        const ts = Number(rawHint);
+        const validTs = Number.isFinite(ts) && ts > 0;
+        const shouldFastFail = validTs && now - ts < ApiClient.OFFLINE_HINT_TTL_MS;
+        if (shouldFastFail) {
+          window.dispatchEvent(new CustomEvent('app-network-status', { detail: { online: false } }));
+          throw {
+            message: 'Error de conexión. Verifica tu conexión a internet.',
+            status: 0,
+          } as ApiError;
+        }
+        // Hint expirado: permitir reintento online normal.
+        window.sessionStorage.removeItem(ApiClient.OFFLINE_HINT_KEY);
+      }
+    }
     
     const defaultHeaders: HeadersInit = {
       'Content-Type': 'application/json',
@@ -45,8 +87,18 @@ export class ApiClient {
       defaultHeaders['Authorization'] = `Bearer ${token}`;
     }
 
+    const controller = new AbortController();
+    if (options.signal) {
+      if (options.signal.aborted) controller.abort();
+      else options.signal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
+    const timeoutMs = isGet ? 3500 : 12000;
+    const timeoutId = typeof window !== 'undefined' ? window.setTimeout(() => controller.abort(), timeoutMs) : null;
+
     const config: RequestInit = {
       ...options,
+      method,
+      signal: controller.signal,
       headers: {
         ...defaultHeaders,
         ...options.headers,
@@ -55,6 +107,11 @@ export class ApiClient {
 
     try {
       const response = await fetch(url, config);
+      if (typeof window !== 'undefined') {
+        window.sessionStorage.removeItem(ApiClient.OFFLINE_HINT_KEY);
+        const browserOnline = typeof navigator === 'undefined' ? true : navigator.onLine;
+        window.dispatchEvent(new CustomEvent('app-network-status', { detail: { online: browserOnline } }));
+      }
       
       // Intentar parsear la respuesta siempre
       let data: any;
@@ -151,10 +208,16 @@ export class ApiClient {
       if (error && typeof error === 'object' && 'message' in error && 'status' in error) {
         throw error as ApiError;
       }
+      if (typeof window !== 'undefined') {
+        window.sessionStorage.setItem(ApiClient.OFFLINE_HINT_KEY, String(Date.now()));
+        window.dispatchEvent(new CustomEvent('app-network-status', { detail: { online: false } }));
+      }
       throw {
         message: 'Error de conexión. Verifica tu conexión a internet.',
         status: 0,
       } as ApiError;
+    } finally {
+      if (timeoutId != null) window.clearTimeout(timeoutId);
     }
   }
 

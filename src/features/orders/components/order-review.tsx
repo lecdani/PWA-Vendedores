@@ -6,6 +6,7 @@ import { ArrowLeft, Send, ShoppingCart, DollarSign, Package } from 'lucide-react
 import { useLanguage } from '@/shared/i18n/language-provider';
 import { useAuth } from '@/shared/auth/auth-provider';
 import { ordersApi, CreateOrderInput } from '@/shared/api/orders-api';
+import { createOrderResilient, updateOrderResilient } from '@/shared/offline/offline-orders';
 import { storesApi, StoreForUI } from '@/shared/api/stores-api';
 import { assignmentsApi } from '@/shared/api/assignments-api';
 import { getOrderReviewPayload } from '@/shared/order-review-payload';
@@ -32,6 +33,19 @@ export function OrderReview() {
   const [sendError, setSendError] = useState<string | null>(null);
   const [allCategories, setAllCategories] = useState<CategoryForUI[]>([]);
   const [editableStores, setEditableStores] = useState<StoreForUI[]>([]);
+  const [productImageError, setProductImageError] = useState<Record<string, boolean>>({});
+  const hasRecentOfflineHint = () => {
+    if (typeof window === 'undefined') return false;
+    try {
+      const raw = window.sessionStorage.getItem('app_offline_hint');
+      if (!raw) return false;
+      const ts = Number(raw);
+      if (Number.isFinite(ts) && ts > 0) return Date.now() - ts < 10_000;
+      return raw === '1';
+    } catch {
+      return false;
+    }
+  };
 
   useEffect(() => {
     categoriesApi.fetchAll().then(setAllCategories);
@@ -118,7 +132,11 @@ export function OrderReview() {
     };
 
     if (editOrderId) {
-      const detailsRaw = await ordersApi.getOrderDetailsByOrderIdRaw(editOrderId);
+      const shouldSkipDetailFetch =
+        (typeof navigator !== 'undefined' && !navigator.onLine) || hasRecentOfflineHint();
+      const detailsRaw = shouldSkipDetailFetch
+        ? []
+        : await ordersApi.getOrderDetailsByOrderIdRaw(editOrderId);
       const detailsByProduct = new Map<string, Array<{ orderDetailId?: string; row?: number; col?: number }>>();
       (detailsRaw || []).forEach((d: any) => {
         const pid = String(d?.productId ?? d?.ProductId ?? '').trim();
@@ -153,7 +171,7 @@ export function OrderReview() {
         }),
       };
 
-      const upd = await ordersApi.updateOrder(editOrderId, payloadForUpdate);
+      const upd = await updateOrderResilient(editOrderId, payloadForUpdate);
       if (!upd.ok) {
         setSendError(upd.errorMessage || (t('error_saving_order') || 'No se pudo actualizar el pedido.'));
         setSending(false);
@@ -181,7 +199,7 @@ export function OrderReview() {
       return;
     }
 
-    const apiResult = await ordersApi.createOrder(orderPayload);
+    const apiResult = await createOrderResilient(orderPayload);
     const orderIdRaw = apiResult?.orderId;
     if (apiResult?.errorMessage) {
       const msg = apiResult.errorMessage.toLowerCase();
@@ -314,8 +332,20 @@ export function OrderReview() {
             {orderItems.map((item: any, index: number) => (
               <div key={item.productId ? `${item.productId}-${index}` : index} className="p-4">
                 <div className="flex items-start justify-between gap-3">
-                  {item.imageUrl ? (
-                    <img src={item.imageUrl} alt="" className="w-10 h-10 rounded object-cover flex-shrink-0" />
+                  {item.imageUrl && !productImageError[String(item.productId ?? index)] ? (
+                    <img
+                      src={item.imageUrl}
+                      alt=""
+                      className="w-10 h-10 rounded object-cover flex-shrink-0"
+                      onError={() => {
+                        if (typeof navigator !== 'undefined' && !navigator.onLine) {
+                          setProductImageError((prev) => ({
+                            ...prev,
+                            [String(item.productId ?? index)]: true,
+                          }));
+                        }
+                      }}
+                    />
                   ) : (
                     <div className="w-10 h-10 rounded bg-slate-200 flex items-center justify-center flex-shrink-0">
                       <Package className="h-5 w-5 text-slate-500" />

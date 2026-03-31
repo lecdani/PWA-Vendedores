@@ -1,4 +1,5 @@
 import { apiClient, ApiError } from './api-client';
+import { cacheGet, cacheSet } from '@/shared/offline/offline-cache';
 
 export interface AssignmentForUI {
   id: string;
@@ -51,16 +52,27 @@ function toAssignment(raw: any): AssignmentForUI | null {
   };
 }
 
+function isExpectedOfflineError(error: unknown): boolean {
+  const err = error as ApiError;
+  const message = String(err?.message ?? error ?? '').toLowerCase();
+  return Number((err as any)?.status ?? 0) === 0 || message.includes('error de conexión') || message.includes('network');
+}
+
 export const assignmentsApi = {
   async fetchAll(): Promise<AssignmentForUI[]> {
     try {
       const res = await apiClient.get<any>('/assignments/assignments');
       const list = normalizeList(res);
-      return list.map(toAssignment).filter((a): a is AssignmentForUI => a != null);
+      const mapped = list.map(toAssignment).filter((a): a is AssignmentForUI => a != null);
+      await cacheSet('assignments.all', mapped);
+      return mapped;
     } catch (error) {
       const err = error as ApiError;
-      console.error('[assignments-api] GET /assignments/assignments failed:', err.message || err);
-      return [];
+      if (!isExpectedOfflineError(error)) {
+        console.warn('[assignments-api] GET /assignments/assignments failed:', err.message || err);
+      }
+      const cached = await cacheGet<AssignmentForUI[]>('assignments.all');
+      return cached ?? [];
     }
   },
 };

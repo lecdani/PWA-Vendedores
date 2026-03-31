@@ -42,6 +42,19 @@ export function OrderHistory() {
   const [orders, setOrders] = useState<OrderForUI[]>([]);
   const [loading, setLoading] = useState(true);
   const [storeCache, setStoreCache] = useState<Record<string, { name: string; address: string; city: string }>>({});
+  const [refreshTick, setRefreshTick] = useState(0);
+
+  useEffect(() => {
+    const triggerRefresh = () => setRefreshTick((v) => v + 1);
+    const onOnline = () => triggerRefresh();
+    const onDataRefresh = () => triggerRefresh();
+    window.addEventListener('online', onOnline);
+    window.addEventListener('app-data-refresh', onDataRefresh as EventListener);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('app-data-refresh', onDataRefresh as EventListener);
+    };
+  }, []);
 
   useEffect(() => {
     const load = async () => {
@@ -124,7 +137,7 @@ export function OrderHistory() {
       setLoading(false);
     };
     load();
-  }, [user?.id]);
+  }, [user?.id, refreshTick]);
 
   useEffect(() => {
     if (!orders.length) return;

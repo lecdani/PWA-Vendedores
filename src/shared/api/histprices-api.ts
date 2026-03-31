@@ -1,8 +1,32 @@
 import { apiClient, ApiError } from './api-client';
+import { cacheGet, cacheSet } from '@/shared/offline/offline-cache';
 
 /** Precio vigente de un producto (solo lectura en PWA) */
 export interface LatestPriceResult {
   price: number;
+}
+
+const HISTPRICE_CACHE_KEY_PREFIX = 'histprices.latest.';
+const OFFLINE_HINT_KEY = 'app_offline_hint';
+
+function getCachedLatestPriceKey(familyId: string): string {
+  return `${HISTPRICE_CACHE_KEY_PREFIX}${familyId}`;
+}
+
+function getOfflineHintAgeMs(): number | null {
+  if (typeof window === 'undefined') return null;
+  const raw = window.sessionStorage.getItem(OFFLINE_HINT_KEY);
+  if (!raw) return null;
+  const ts = Number(raw);
+  if (!Number.isFinite(ts) || ts <= 0) return null;
+  return Date.now() - ts;
+}
+
+function shouldSkipNetworkForHistprices(): boolean {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) return true;
+  const hintAge = getOfflineHintAgeMs();
+  // Si hubo fallos de red muy recientes, evitamos más requests para no congelar UI.
+  return hintAge != null && hintAge >= 0 && hintAge < 10_000;
 }
 
 async function safeGet<T>(endpoint: string): Promise<T | null> {
@@ -12,8 +36,11 @@ async function safeGet<T>(endpoint: string): Promise<T | null> {
     const err = error as ApiError;
     const msg = String(err?.message || '');
     const isNotFound = err?.status === 404 || /not found|no encontrado/i.test(msg);
+    const isOffline =
+      Number((err as any)?.status ?? 0) === 0 ||
+      /error de conexión|network/i.test(msg);
     // Cuando no existe histórico de precio devolvemos 0 sin ruido en consola.
-    if (!isNotFound) {
+    if (!isNotFound && !isOffline) {
       console.error(`[histprices-api] GET ${endpoint} failed:`, err.message || err);
     }
     return null;
@@ -63,6 +90,12 @@ export const histpricesApi = {
   async getLatest(familyId: string): Promise<number> {
     const key = String(familyId ?? '').trim();
     if (!key) return 0;
+    const cacheKey = getCachedLatestPriceKey(key);
+
+    if (shouldSkipNetworkForHistprices()) {
+      const cachedPrice = await cacheGet<number>(cacheKey);
+      return Number.isFinite(Number(cachedPrice)) ? Number(cachedPrice) : 0;
+    }
 
     let cached = latestPriceCache.get(key);
     if (!cached) {
@@ -71,7 +104,14 @@ export const histpricesApi = {
           `/histprices/histprices/latest/${encodeURIComponent(key)}`
         );
         const last = takeLatestFromResponse(res);
-        return last != null ? parsePrice(last) : 0;
+        const price = last != null ? parsePrice(last) : 0;
+        if (price > 0) {
+          await cacheSet<number>(cacheKey, price);
+        } else {
+          const fallback = await cacheGet<number>(cacheKey);
+          if (Number.isFinite(Number(fallback))) return Number(fallback);
+        }
+        return price;
       })();
       latestPriceCache.set(key, cached);
     }

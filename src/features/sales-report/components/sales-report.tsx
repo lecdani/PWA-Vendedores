@@ -71,6 +71,19 @@ export function SalesReport() {
   const [selectedStore, setSelectedStore] = useState('all');
   const [assignedStoresCount, setAssignedStoresCount] = useState(0);
   const reportRef = useRef<HTMLDivElement>(null);
+  const [refreshTick, setRefreshTick] = useState(0);
+
+  useEffect(() => {
+    const triggerRefresh = () => setRefreshTick((v) => v + 1);
+    const onOnline = () => triggerRefresh();
+    const onDataRefresh = () => triggerRefresh();
+    window.addEventListener('online', onOnline);
+    window.addEventListener('app-data-refresh', onDataRefresh as EventListener);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('app-data-refresh', onDataRefresh as EventListener);
+    };
+  }, []);
 
   /** Tiendas distintas con pedido del vendedor en el mes calendario actual. */
   const storesVisitedThisMonthCount = useMemo(() => {
@@ -183,7 +196,7 @@ export function SalesReport() {
     return () => {
       mounted = false;
     };
-  }, [user?.id]);
+  }, [user?.id, refreshTick]);
 
   useEffect(() => {
     const storeIds = [

@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect, useRef, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import Image from 'next/image';
 import { Home, ShoppingCart, BarChart3, User, LogOut, FileCheck } from 'lucide-react';
@@ -12,6 +13,123 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const { t } = useLanguage();
   const { user, logout } = useAuth();
+  const [isOnline, setIsOnline] = useState(true);
+  const [modalMessage, setModalMessage] = useState<string | null>(null);
+  const [modalTone, setModalTone] = useState<'info' | 'success' | 'warn'>('info');
+  const modalTimerRef = useRef<number | null>(null);
+  const reloadTimerRef = useRef<number | null>(null);
+  const pendingSyncNoticeRef = useRef(false);
+  /** Una sola recarga por ciclo reconexión → sync (evita varios `done` seguidos). */
+  const reconnectReloadScheduledRef = useRef(false);
+
+  useEffect(() => {
+    const STICKY_OFFLINE_KEY = 'app_ui_offline_sticky';
+    const hasStickyOffline = () => {
+      if (typeof window === 'undefined') return false;
+      return window.sessionStorage.getItem(STICKY_OFFLINE_KEY) === '1';
+    };
+    const setStickyOffline = (value: boolean) => {
+      if (typeof window === 'undefined') return;
+      if (value) window.sessionStorage.setItem(STICKY_OFFLINE_KEY, '1');
+      else window.sessionStorage.removeItem(STICKY_OFFLINE_KEY);
+    };
+    const computeOnline = () => {
+      if (typeof navigator === 'undefined') return true;
+      if (!navigator.onLine) return false;
+      if (hasStickyOffline()) return false;
+      return true;
+    };
+
+    let wasOnline = computeOnline();
+    setIsOnline(wasOnline);
+    const setOnlineState = (next: boolean) => {
+      if (next === wasOnline) return;
+      const goingOnline = !wasOnline && next;
+      wasOnline = next;
+      setIsOnline(next);
+      window.dispatchEvent(
+        new CustomEvent(next ? 'app-connection-restored' : 'app-connection-lost')
+      );
+      if (goingOnline) {
+        pendingSyncNoticeRef.current = true;
+        reconnectReloadScheduledRef.current = false;
+        setModalTone('info');
+        setModalMessage('Conexion restablecida. Sincronizando cambios pendientes...');
+        if (modalTimerRef.current != null) window.clearTimeout(modalTimerRef.current);
+        modalTimerRef.current = window.setTimeout(() => setModalMessage(null), 8000);
+      }
+    };
+
+    const onOnline = () => {
+      setStickyOffline(false);
+      setOnlineState(true);
+    };
+    const onOffline = () => {
+      setStickyOffline(true);
+      pendingSyncNoticeRef.current = false;
+      reconnectReloadScheduledRef.current = false;
+      setOnlineState(false);
+    };
+    const onAppNetworkStatus = (event: Event) => {
+      const customEvent = event as CustomEvent<{ online?: boolean }>;
+      const online = customEvent.detail?.online;
+      // Si API confirma conectividad real, levantar sticky y reflejar online.
+      if (online === true) {
+        if (typeof navigator === 'undefined' || navigator.onLine) {
+          setStickyOffline(false);
+          setOnlineState(true);
+        }
+        return;
+      }
+      if (online === false) {
+        setStickyOffline(true);
+        setOnlineState(false);
+      }
+    };
+
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    window.addEventListener('app-network-status', onAppNetworkStatus as EventListener);
+    const onOfflineSync = (event: Event) => {
+      const customEvent = event as CustomEvent<{
+        phase?: 'syncing' | 'done';
+        summary?: { processed?: number; succeeded?: number; failed?: number };
+      }>;
+      if (customEvent.detail?.phase !== 'done') return;
+      if (!pendingSyncNoticeRef.current) return;
+      const summary = customEvent.detail.summary;
+      if (!summary) return;
+      pendingSyncNoticeRef.current = false;
+      if ((summary.processed ?? 0) <= 0) {
+        setModalTone('success');
+        setModalMessage('Conexion restablecida. No hay cambios pendientes por sincronizar.');
+      } else if ((summary.succeeded ?? 0) > 0) {
+        setModalTone('success');
+        setModalMessage('Sincronizacion completada. Tus datos ya estan actualizados.');
+        if (!reconnectReloadScheduledRef.current) {
+          reconnectReloadScheduledRef.current = true;
+          if (reloadTimerRef.current != null) window.clearTimeout(reloadTimerRef.current);
+          reloadTimerRef.current = window.setTimeout(() => {
+            window.location.reload();
+          }, 1300);
+        }
+      } else {
+        setModalTone('warn');
+        setModalMessage('No se pudieron sincronizar algunos cambios. Reintentaremos automaticamente.');
+      }
+      if (modalTimerRef.current != null) window.clearTimeout(modalTimerRef.current);
+      modalTimerRef.current = window.setTimeout(() => setModalMessage(null), 3600);
+    };
+    window.addEventListener('app-offline-sync', onOfflineSync as EventListener);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+      window.removeEventListener('app-network-status', onAppNetworkStatus as EventListener);
+      window.removeEventListener('app-offline-sync', onOfflineSync as EventListener);
+      if (modalTimerRef.current != null) window.clearTimeout(modalTimerRef.current);
+      if (reloadTimerRef.current != null) window.clearTimeout(reloadTimerRef.current);
+    };
+  }, []);
 
   const getActiveTab = () => {
     if (pathname === '/') return 'home';
@@ -23,6 +141,7 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
   };
 
   const activeTab = getActiveTab();
+  const isLoginRoute = pathname === '/login';
 
   const menuItems = [
     { id: 'home', label: t('home'), icon: Home, path: '/', action: null },
@@ -54,7 +173,7 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
                   alt="ETERNAL"
                   width={36}
                   height={36}
-                  className="object-contain w-full h-full p-1"
+                  className="object-contain w-auto h-auto p-1 max-w-full max-h-full"
                 />
               </div>
               <div>
@@ -66,6 +185,16 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
             </div>
             
             <div className="flex items-center gap-2">
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-slate-700">
+                <span
+                  className={`inline-block h-2.5 w-2.5 rounded-full ${
+                    isOnline ? 'bg-emerald-500' : 'bg-slate-500'
+                  }`}
+                  title={isOnline ? 'Online' : 'Offline'}
+                  aria-label={isOnline ? 'Online' : 'Offline'}
+                />
+                <span>{isOnline ? 'Online' : 'Offline'}</span>
+              </span>
               <LanguageSelector />
             </div>
           </div>
@@ -76,6 +205,21 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
       <main className="flex-1 overflow-y-auto">
         {children}
       </main>
+      {!isLoginRoute && modalMessage ? (
+        <div className="fixed inset-0 z-[2147483647] flex items-center justify-center bg-black/25 px-4">
+          <div
+            className={`w-full max-w-sm rounded-xl border p-4 shadow-xl ${
+              modalTone === 'success'
+                ? 'bg-emerald-50 border-emerald-200'
+                : modalTone === 'warn'
+                ? 'bg-amber-50 border-amber-200'
+                : 'bg-white border-slate-200'
+            }`}
+          >
+            <p className="text-sm text-slate-900">{modalMessage}</p>
+          </div>
+        </div>
+      ) : null}
 
       {/* Bottom Navigation Bar - Fijo en la parte inferior con estilo oscuro */}
       <nav 

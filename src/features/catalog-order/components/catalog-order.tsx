@@ -11,6 +11,10 @@ import { productsApi, getProductImageUrl, ProductForUI } from '@/shared/api/prod
 import { categoriesApi, CategoryForUI } from '@/shared/api/categories-api';
 import { histpricesApi } from '@/shared/api/histprices-api';
 import { ordersApi } from '@/shared/api/orders-api';
+import {
+  ensureInvoiceForOrderResilient,
+  updateOrderStatusResilient,
+} from '@/shared/offline/offline-orders';
 import { storesApi } from '@/shared/api/stores-api';
 import { setOrderReviewPayload } from '@/shared/order-review-payload';
 
@@ -36,6 +40,23 @@ interface ProductWithQty extends ProductForUI {
   categoryName: string;
 }
 
+function resolveUnitPrice(product: any, histprice?: number): number {
+  const preferred = Number(histprice);
+  if (Number.isFinite(preferred) && preferred > 0) return preferred;
+  const candidates = [
+    product?.currentPrice,
+    product?.price,
+    product?.unitPrice,
+    product?.salePrice,
+    product?.listPrice,
+  ];
+  for (const raw of candidates) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return 0;
+}
+
 export function CatalogOrder({
   storeId,
   orderId,
@@ -59,6 +80,7 @@ export function CatalogOrder({
   const [flowError, setFlowError] = useState<string | null>(null);
   const [continuing, setContinuing] = useState(false);
   const allowedProductIdsRef = useRef<Set<string>>(new Set());
+  const [productImageError, setProductImageError] = useState<Record<string, boolean>>({});
 
   const isConfirmFlow = mode === 'confirm' && !!orderId;
 
@@ -117,7 +139,7 @@ export function CatalogOrder({
 
         let withQty: ProductWithQty[] = activeProducts.map((p) => {
           const familyId = String(p.familyId ?? p.categoryId ?? '').trim();
-          const price = (familyId ? priceMap.get(familyId) : undefined) ?? p.currentPrice ?? 0;
+          const price = resolveUnitPrice(p, familyId ? priceMap.get(familyId) : undefined);
           return {
             ...p,
             toOrder: 0,
@@ -274,19 +296,19 @@ export function CatalogOrder({
           JSON.stringify({ mode: 'confirm_catalog', source: 'catalog', items: rows })
         );
       }
-      const ok = await ordersApi.updateOrderStatus(backendOrderId, false);
+      const ok = await updateOrderStatusResilient(backendOrderId, false);
       if (!ok) {
         setFlowError('No se pudo confirmar el pedido.');
         setContinuing(false);
         return;
       }
-      const invoiceId = await ordersApi.ensureInvoiceForOrder(backendOrderId, rows);
+      const invoiceId = await ensureInvoiceForOrderResilient(backendOrderId, rows);
       if (invoiceId == null) {
         setFlowError('No se pudo crear la factura. Revisa la conexión o los datos del pedido.');
         setContinuing(false);
         return;
       }
-      await ordersApi.updateOrderStatus(backendOrderId, true);
+      await updateOrderStatusResilient(backendOrderId, true);
       router.push(`/order/${orderId}`);
     } catch {
       setFlowError('Error al continuar.');
@@ -414,8 +436,8 @@ export function CatalogOrder({
             <p className="text-sm text-indigo-900">{totalToOrder}</p>
           </div>
           <div className="bg-green-50 rounded-lg p-2 text-center">
-            <p className="text-xs text-green-600 mb-0.5">{t('total')}</p>
-            <p className="text-sm text-green-900">${totalValue.toFixed(2)}</p>
+            <p className="text-[11px] text-green-700 leading-tight">Subtotal: ${totalValue.toFixed(2)}</p>
+            <p className="text-[11px] text-green-700 leading-tight">Total: ${totalValue.toFixed(2)}</p>
           </div>
         </div>
 
@@ -465,11 +487,19 @@ export function CatalogOrder({
                 }`}
               >
                 <div className="flex items-center justify-center gap-1 w-full mb-0.5">
-                  {product.imageUrl ? (
+                  {product.imageUrl && !productImageError[String(product.id)] ? (
                     <img
                       src={product.imageUrl}
                       alt=""
                       className="w-5 h-5 rounded object-cover flex-shrink-0"
+                      onError={() => {
+                        if (typeof navigator !== 'undefined' && !navigator.onLine) {
+                          setProductImageError((prev) => ({
+                            ...prev,
+                            [String(product.id)]: true,
+                          }));
+                        }
+                      }}
                     />
                   ) : (
                     <div className="w-5 h-5 rounded bg-slate-200 flex items-center justify-center flex-shrink-0">

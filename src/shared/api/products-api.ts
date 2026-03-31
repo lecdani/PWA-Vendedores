@@ -1,4 +1,5 @@
 import { apiClient, ApiError, getBackendAssetUrl } from './api-client';
+import { cacheGet, cacheSet } from '@/shared/offline/offline-cache';
 
 /** Producto para la PWA (solo lectura desde API) */
 export interface ProductForUI {
@@ -47,6 +48,12 @@ function toProduct(raw: any): ProductForUI {
   };
 }
 
+function isExpectedOfflineError(error: unknown): boolean {
+  const err = error as ApiError;
+  const message = String(err?.message ?? error ?? '').toLowerCase();
+  return Number((err as any)?.status ?? 0) === 0 || message.includes('error de conexión') || message.includes('network');
+}
+
 // Cache en memoria para productos individuales (por id)
 const productCache = new Map<string, Promise<ProductForUI | null>>();
 
@@ -70,6 +77,7 @@ export const productsApi = {
       const res = await apiClient.get<any>('/products/products');
       const list = Array.isArray(res) ? res : res?.data ?? res?.items ?? [];
       const products = (list as any[]).map(toProduct);
+      await cacheSet('products.all', products);
       // Pre-cargar cache básica por id para evitar peticiones repetidas posteriores
       products.forEach((p) => {
         const key = String(p.id).trim();
@@ -80,8 +88,18 @@ export const productsApi = {
       return products;
     } catch (error) {
       const err = error as ApiError;
-      console.error('[products-api] GET /products/products failed:', err.message || err);
-      return [];
+      if (!isExpectedOfflineError(error)) {
+        console.warn('[products-api] GET /products/products failed:', err.message || err);
+      }
+      const cached = await cacheGet<ProductForUI[]>('products.all');
+      const products = cached ?? [];
+      products.forEach((p) => {
+        const key = String(p.id).trim();
+        if (key && !productCache.has(key)) {
+          productCache.set(key, Promise.resolve(p));
+        }
+      });
+      return products;
     }
   },
 

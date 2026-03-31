@@ -13,6 +13,8 @@ import { citiesApi } from '@/shared/api/cities-api';
 import { assignmentsApi } from '@/shared/api/assignments-api';
 import { useAuth } from '@/shared/auth/auth-provider';
 import { assignmentBelongsToSeller } from '@/shared/utils/assignment-match';
+import { cacheGet } from '@/shared/offline/offline-cache';
+import type { AssignmentForUI } from '@/shared/api/assignments-api';
 
 export function SelectStore() {
   const { t } = useLanguage();
@@ -28,19 +30,42 @@ export function SelectStore() {
   const [cityNames, setCityNames] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [usingLocalData, setUsingLocalData] = useState(false);
 
   useEffect(() => {
     let mounted = true;
     (async () => {
       setLoading(true);
       setError(null);
-      const [apiStores, allAssignments] = await Promise.all([
-        storesApi.fetchStores(),
-        assignmentsApi.fetchAll(),
-      ]);
+      let cameFromCache = false;
+      let apiStores: StoreForUI[] = [];
+      let allAssignments: AssignmentForUI[] = [];
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        apiStores = (await cacheGet<StoreForUI[]>('stores.active')) ?? [];
+        allAssignments = (await cacheGet<AssignmentForUI[]>('assignments.all')) ?? [];
+        cameFromCache = true;
+      } else {
+        [apiStores, allAssignments] = await Promise.all([
+          storesApi.fetchStores(),
+          assignmentsApi.fetchAll(),
+        ]);
+      }
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        cameFromCache = true;
+      } else if (apiStores.length === 0) {
+        const cachedStores = await cacheGet<StoreForUI[]>('stores.active');
+        if ((cachedStores?.length ?? 0) > 0) cameFromCache = true;
+      }
       if (!mounted) return;
+      setUsingLocalData(cameFromCache);
       const u = user;
       if (u && (String(u.id).trim() || String(u.salesRouteId ?? '').trim())) {
+        // Si no hay asignaciones disponibles (ej. primer arranque sin sync), no bloquear listado completo.
+        if (allAssignments.length === 0) {
+          setStores(apiStores);
+          setLoading(false);
+          return;
+        }
         const allowedStoreIds = new Set(
           allAssignments.filter((a) => assignmentBelongsToSeller(a, u)).map((a) => String(a.storeId))
         );
@@ -149,9 +174,16 @@ export function SelectStore() {
         ) : error ? (
           <p className="text-xs text-red-600 mb-3">{error}</p>
         ) : (
-          <p className="text-xs text-slate-500 mb-3">
-            {filteredStores.length} {t('stores_found')}
-          </p>
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <p className="text-xs text-slate-500">
+              {filteredStores.length} {t('stores_found')}
+            </p>
+            {usingLocalData ? (
+              <Badge variant="outline" className="text-[10px] bg-amber-50 text-amber-700 border-amber-200">
+                Datos locales
+              </Badge>
+            ) : null}
+          </div>
         )}
 
         <div className="space-y-3">

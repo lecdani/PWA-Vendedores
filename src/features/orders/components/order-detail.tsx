@@ -19,6 +19,7 @@ import {
 import { useLanguage } from '@/shared/i18n/language-provider';
 import { useAuth } from '@/shared/auth/auth-provider';
 import { ordersApi, OrderForUI } from '@/shared/api/orders-api';
+import { cancelOrderResilient, isQueuedOfflineInvoiceId } from '@/shared/offline/offline-orders';
 import { storesApi } from '@/shared/api/stores-api';
 import { citiesApi } from '@/shared/api/cities-api';
 import { histpricesApi } from '@/shared/api/histprices-api';
@@ -142,6 +143,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
   const [loadingPod, setLoadingPod] = useState(false);
   const [orderLoadDone, setOrderLoadDone] = useState(false);
   const [podImageError, setPodImageError] = useState(false);
+  const [productImageError, setProductImageError] = useState<Record<string, boolean>>({});
   const [allCategories, setAllCategories] = useState<CategoryForUI[]>([]);
   const [storeHasPlanogram, setStoreHasPlanogram] = useState(true);
 
@@ -491,7 +493,9 @@ export function OrderDetail({ orderId }: { orderId: string }) {
     }
     const s = (order?.status || '').toLowerCase().trim();
     if (['confirmed', 'completed', 'complete', 'confirmado', 'cerrado', 'closed'].includes(s)) return 'confirmed';
-    if (order.invoiceId != null && String(order.invoiceId).trim() !== '') return 'confirmed';
+    const invRaw = order.invoiceId != null ? String(order.invoiceId).trim() : '';
+    // Placeholder de factura offline: no es confirmación real; debe poder cancelarse como pedido inicial.
+    if (invRaw !== '' && !isQueuedOfflineInvoiceId(invRaw)) return 'confirmed';
     return 'initial';
   })();
 
@@ -551,11 +555,11 @@ export function OrderDetail({ orderId }: { orderId: string }) {
     if (typeof window !== 'undefined' && !window.confirm(t('cancel_order_confirm'))) return;
     setCancelling(true);
     try {
-      const ok = await ordersApi.cancelOrderBySeller(orderId);
+      const ok = await cancelOrderResilient(orderId);
       if (ok) {
-        const refreshed = await ordersApi.getOrderById(orderId);
-        if (refreshed) setOrder(refreshed);
-        else setOrder((prev) => (prev ? { ...prev, status: 'cancelled' } : prev));
+        // Reflejar cancelación en caliente; en online va directo al backend.
+        setOrder((prev) => (prev ? { ...prev, status: 'cancelled' } : prev));
+        window.dispatchEvent(new CustomEvent('app-data-refresh'));
         router.push('/history');
       } else {
         alert(t('cancel_order_failed'));
@@ -868,8 +872,20 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                       {toInvoiceRows.map((row) => (
                         <div key={row.key} className="p-3">
                           <div className="flex items-start justify-between gap-3">
-                            {row.imageUrl ? (
-                              <img src={row.imageUrl} alt="" className="w-10 h-10 rounded object-cover flex-shrink-0" />
+                            {row.imageUrl && !productImageError[String(row.key)] ? (
+                              <img
+                                src={row.imageUrl}
+                                alt=""
+                                className="w-10 h-10 rounded object-cover flex-shrink-0"
+                                onError={() => {
+                                  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+                                    setProductImageError((prev) => ({
+                                      ...prev,
+                                      [String(row.key)]: true,
+                                    }));
+                                  }
+                                }}
+                              />
                             ) : (
                               <div className="w-10 h-10 rounded bg-slate-200 flex items-center justify-center flex-shrink-0">
                                 <Package className="h-5 w-5 text-slate-500" />
@@ -1187,8 +1203,20 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                       return (
                         <div key={index} className="p-3">
                           <div className="flex items-start justify-between gap-3">
-                            {imgUrl ? (
-                              <img src={imgUrl} alt="" className="w-10 h-10 rounded object-cover flex-shrink-0" />
+                            {imgUrl && !productImageError[String(item.productId ?? index)] ? (
+                              <img
+                                src={imgUrl}
+                                alt=""
+                                className="w-10 h-10 rounded object-cover flex-shrink-0"
+                                onError={() => {
+                                  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+                                    setProductImageError((prev) => ({
+                                      ...prev,
+                                      [String(item.productId ?? index)]: true,
+                                    }));
+                                  }
+                                }}
+                              />
                             ) : (
                               <div className="w-10 h-10 rounded bg-slate-200 flex items-center justify-center flex-shrink-0">
                                 <Package className="h-5 w-5 text-slate-500" />

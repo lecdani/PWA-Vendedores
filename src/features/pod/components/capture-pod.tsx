@@ -9,6 +9,11 @@ import { useAuth } from '@/shared/auth/auth-provider';
 import { ordersApi } from '@/shared/api/orders-api';
 import { storesApi } from '@/shared/api/stores-api';
 import { uploadImage } from '@/shared/api/images-api';
+import {
+  isQueuedOfflineInvoiceId,
+  queuePodUploadOffline,
+  updateOrderStatusResilient,
+} from '@/shared/offline/offline-orders';
 import { Button } from '@/shared/ui/button';
 import { Card, CardContent } from '@/shared/ui/card';
 import { Label } from '@/shared/ui/label';
@@ -37,6 +42,19 @@ export function CapturePOD({ orderId }: { orderId: string }) {
     date: string;
     ok: boolean;
   } | null>(null);
+
+  const isConnectivityError = (error: unknown): boolean => {
+    const status = Number((error as any)?.status ?? 0);
+    const message = String((error as any)?.message ?? error ?? '').toLowerCase();
+    if (status === 0) return true;
+    return (
+      message.includes('error de conexión') ||
+      message.includes('conexion') ||
+      message.includes('network') ||
+      message.includes('failed to fetch') ||
+      message.includes('timeout')
+    );
+  };
 
   const readDeliveredFromStorage = () => {
     if (typeof window === 'undefined') return;
@@ -191,8 +209,25 @@ export function CapturePOD({ orderId }: { orderId: string }) {
 
     try {
       const backendOrderId = orderData?.backendOrderId ?? orderData?.id ?? orderId;
-      const invoiceIdRaw = orderData?.invoiceId ?? (orderData as any)?.InvoiceId;
-      if (invoiceIdRaw == null || String(invoiceIdRaw).trim() === '') {
+      const rawInvoiceId =
+        orderData?.invoiceId ?? (orderData as any)?.InvoiceId ?? (orderData as any)?.invoice_id;
+      let invStr = rawInvoiceId != null ? String(rawInvoiceId).trim() : '';
+      if (
+        invStr === '' &&
+        typeof navigator !== 'undefined' &&
+        !navigator.onLine &&
+        typeof window !== 'undefined'
+      ) {
+        try {
+          const delivery = window.localStorage.getItem(`order_delivery_confirmation_${orderId}`);
+          if (delivery) {
+            invStr = `queued-invoice-${String(backendOrderId)}`;
+          }
+        } catch {
+          /* noop */
+        }
+      }
+      if (invStr === '') {
         setPodUploadError(
           t('pod_invoice_required_first') ||
             'Este pedido aún no tiene factura. La facturación debe realizarse antes; luego podrás cargar el POD.'
@@ -201,19 +236,112 @@ export function CapturePOD({ orderId }: { orderId: string }) {
         return;
       }
 
-      const { fileName } = await uploadImage(podFile);
-      if (!fileName?.trim()) {
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        await queuePodUploadOffline({
+          file: podFile,
+          invoiceId: invStr,
+          orderId: String(backendOrderId),
+          notes: notes || undefined,
+        });
+        setPodSuccessMessage(
+          t('pod_success') ||
+            'Comprobante guardado sin conexión. Se sincronizará automáticamente.'
+        );
+        await new Promise((resolve) => setTimeout(resolve, 1300));
+        router.push(`/order/${orderId}`);
+        return;
+      }
+
+      let fileName = '';
+      try {
+        const uploaded = await uploadImage(podFile);
+        fileName = String(uploaded?.fileName ?? '').trim();
+      } catch (error) {
+        if (isConnectivityError(error)) {
+          await queuePodUploadOffline({
+            file: podFile,
+            invoiceId: invStr,
+            orderId: String(backendOrderId),
+            notes: notes || undefined,
+          });
+          setPodSuccessMessage(
+            t('pod_success') ||
+              'Comprobante guardado sin conexión. Se sincronizará automáticamente.'
+          );
+          await new Promise((resolve) => setTimeout(resolve, 1300));
+          router.push(`/order/${orderId}`);
+          return;
+        }
+        throw error;
+      }
+      if (!fileName) {
         setPodUploadError(t('pod_upload_failed') || 'No se pudo subir la imagen.');
         setUploading(false);
         return;
       }
 
-      const patched = await ordersApi.uploadPODForInvoice({
-        invoiceId: String(invoiceIdRaw).trim(),
-        fileName: fileName.trim(),
-        notes: notes || undefined,
-      });
+      let invoiceIdForApi = invStr;
+      if (isQueuedOfflineInvoiceId(invoiceIdForApi)) {
+        const resolved = await ordersApi.getInvoiceIdForOrder(String(backendOrderId));
+        if (resolved != null && !isQueuedOfflineInvoiceId(String(resolved))) {
+          invoiceIdForApi = String(resolved);
+        } else {
+          await queuePodUploadOffline({
+            file: podFile,
+            invoiceId: invStr,
+            orderId: String(backendOrderId),
+            notes: notes || undefined,
+          });
+          setPodSuccessMessage(
+            t('pod_success') ||
+              'Comprobante guardado; la factura está pendiente de sincronizar. Se subirá el POD al reconectar.'
+          );
+          await new Promise((resolve) => setTimeout(resolve, 1300));
+          router.push(`/order/${orderId}`);
+          return;
+        }
+      }
+      let patched = false;
+      try {
+        patched = await ordersApi.uploadPODForInvoice({
+          invoiceId: invoiceIdForApi,
+          fileName,
+          notes: notes || undefined,
+        });
+      } catch (err) {
+        if (isConnectivityError(err)) {
+          await queuePodUploadOffline({
+            file: podFile,
+            invoiceId: invStr,
+            orderId: String(backendOrderId),
+            notes: notes || undefined,
+          });
+          setPodSuccessMessage(
+            t('pod_success') ||
+              'Comprobante guardado sin conexión. Se sincronizará automáticamente.'
+          );
+          await new Promise((resolve) => setTimeout(resolve, 1300));
+          router.push(`/order/${orderId}`);
+          return;
+        }
+        throw err;
+      }
       if (!patched) {
+        if (typeof navigator !== 'undefined' && !navigator.onLine) {
+          await queuePodUploadOffline({
+            file: podFile,
+            invoiceId: invStr,
+            orderId: String(backendOrderId),
+            notes: notes || undefined,
+          });
+          setPodSuccessMessage(
+            t('pod_success') ||
+              'Comprobante guardado sin conexión. Se sincronizará automáticamente.'
+          );
+          await new Promise((resolve) => setTimeout(resolve, 1300));
+          router.push(`/order/${orderId}`);
+          return;
+        }
         setPodUploadError(
           t('pod_upload_failed') ||
             'No se pudo asociar el comprobante a la factura. Revisa la conexión o inténtalo de nuevo.'
@@ -222,7 +350,7 @@ export function CapturePOD({ orderId }: { orderId: string }) {
         return;
       }
 
-      const statusOk = await ordersApi.updateOrderStatus(backendOrderId, true);
+      const statusOk = await updateOrderStatusResilient(backendOrderId, true);
       if (!statusOk) {
         setPodUploadError(
           t('pod_upload_failed') ||
@@ -363,14 +491,23 @@ export function CapturePOD({ orderId }: { orderId: string }) {
               </div>
             ) : (
               <div className="relative">
-                <div className="relative w-full aspect-video rounded-lg border border-slate-200 overflow-hidden">
-                  <Image 
-                    src={podImage} 
-                    alt="POD" 
-                    fill
-                    className="object-contain"
-                    unoptimized
-                  />
+                <div className="relative w-full aspect-video rounded-lg border border-slate-200 overflow-hidden bg-slate-50">
+                  {podImage.startsWith('data:') ? (
+                    // eslint-disable-next-line @next/next/no-img-element -- data URL local; next/image falla en algunos entornos sin red
+                    <img
+                      src={podImage}
+                      alt="POD"
+                      className="absolute inset-0 h-full w-full object-contain"
+                    />
+                  ) : (
+                    <Image
+                      src={podImage}
+                      alt="POD"
+                      fill
+                      className="object-contain"
+                      unoptimized
+                    />
+                  )}
                 </div>
                 <Button
                   variant="destructive"
@@ -387,7 +524,6 @@ export function CapturePOD({ orderId }: { orderId: string }) {
               ref={fileInputRef}
               type="file"
               accept="image/*"
-              capture="environment"
               onChange={handleFileSelect}
               className="hidden"
             />

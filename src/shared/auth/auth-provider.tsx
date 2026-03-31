@@ -3,6 +3,7 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
 import { authApi } from '@/shared/api/auth-api';
+import { ordersApi } from '@/shared/api/orders-api';
 import type { ApiError } from '@/shared/api/api-client';
 
 /** Obtiene el rol del usuario: del body o del payload del JWT (igual que Sistema Web Admin) */
@@ -151,6 +152,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       localStorage.setItem('auth_token', token);
       localStorage.setItem('auth_user', JSON.stringify(user));
       setUser(user);
+      try {
+        // Al iniciar sesión, resetear estado offline local para evitar datos fantasma.
+        const offlineMod = await import('@/shared/offline/offline-db');
+        await offlineMod.offlineDb.transaction(
+          'rw',
+          offlineMod.offlineDb.offlineJobs,
+          offlineMod.offlineDb.localOrders,
+          offlineMod.offlineDb.idMap,
+          offlineMod.offlineDb.podMedia,
+          offlineMod.offlineDb.appCache,
+          async () => {
+            await offlineMod.offlineDb.offlineJobs.clear();
+            await offlineMod.offlineDb.localOrders.clear();
+            await offlineMod.offlineDb.idMap.clear();
+            await offlineMod.offlineDb.podMedia.clear();
+            await offlineMod.offlineDb.appCache.clear();
+          }
+        );
+        await ordersApi.refreshOrdersCacheForUser(user.id);
+      } catch {
+        // Si falla refresh de cache, no bloquear login.
+      }
       return { success: true };
     } catch (error) {
       const apiError = error as ApiError;

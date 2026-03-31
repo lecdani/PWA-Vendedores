@@ -26,6 +26,19 @@ export function Dashboard() {
 
   const [orders, setOrders] = useState<OrderForUI[] | null>(null);
   const [loadingMetrics, setLoadingMetrics] = useState<boolean>(true);
+  const [refreshTick, setRefreshTick] = useState(0);
+
+  useEffect(() => {
+    const triggerRefresh = () => setRefreshTick((v) => v + 1);
+    const onOnline = () => triggerRefresh();
+    const onDataRefresh = () => triggerRefresh();
+    window.addEventListener('online', onOnline);
+    window.addEventListener('app-data-refresh', onDataRefresh as EventListener);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('app-data-refresh', onDataRefresh as EventListener);
+    };
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -46,7 +59,7 @@ export function Dashboard() {
     return () => {
       mounted = false;
     };
-  }, [user?.id]);
+  }, [user?.id, refreshTick]);
 
   const allOrders = orders ?? [];
   const now = new Date();

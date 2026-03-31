@@ -1,4 +1,6 @@
 import { apiClient } from './api-client';
+import { cacheGet, cacheSet } from '@/shared/offline/offline-cache';
+import type { ApiError } from './api-client';
 
 export interface CategoryForUI {
   id: string;
@@ -24,16 +26,27 @@ function toCategory(raw: any): CategoryForUI {
   return { id, name, shortName, code, sku, volume, unit };
 }
 
+function isExpectedOfflineError(error: unknown): boolean {
+  const err = error as ApiError;
+  const message = String(err?.message ?? error ?? '').toLowerCase();
+  return Number((err as any)?.status ?? 0) === 0 || message.includes('error de conexión') || message.includes('network');
+}
+
 /** Lista todas las familias registradas. GET /families/families */
 export const categoriesApi = {
   async fetchAll(): Promise<CategoryForUI[]> {
     try {
       const res = await apiClient.get<any>('/families/families');
       const list = Array.isArray(res) ? res : res?.data ?? res?.items ?? [];
-      return (list as any[]).map(toCategory);
+      const mapped = (list as any[]).map(toCategory);
+      await cacheSet('families.all', mapped);
+      return mapped;
     } catch (err) {
-      console.warn('[categories-api] fetchAll failed:', err);
-      return [];
+      if (!isExpectedOfflineError(err)) {
+        console.warn('[categories-api] fetchAll failed:', err);
+      }
+      const cached = await cacheGet<CategoryForUI[]>('families.all');
+      return cached ?? [];
     }
   },
 };

@@ -1,4 +1,5 @@
 import { apiClient, ApiError } from './api-client';
+import { cacheGet, cacheSet } from '@/shared/offline/offline-cache';
 
 /** Distribución: posición (fila/col) de un producto en un planograma. PWA solo lectura. */
 export interface DistributionForUI {
@@ -47,13 +48,22 @@ function normalizeDistributionList(res: any): any[] {
   return Array.isArray(list) ? list : [];
 }
 
+function isExpectedOfflineError(error: unknown): boolean {
+  const err = error as ApiError;
+  const message = String(err?.message ?? error ?? '').toLowerCase();
+  return Number((err as any)?.status ?? 0) === 0 || message.includes('error de conexión') || message.includes('network');
+}
+
 export const distributionsApi = {
   /** Lista distribuciones de un planograma. GET /distributions/distributions/planogram/{id} */
   async getByPlanogram(planogramId: string): Promise<DistributionForUI[]> {
+    const key = `distributions.planogram.${String(planogramId).trim()}`;
     try {
       const res = await apiClient.get<any>(`/distributions/distributions/planogram/${encodeURIComponent(planogramId)}`);
       const items = normalizeDistributionList(res);
-      return items.map((item: any) => toDistribution(item));
+      const mapped = items.map((item: any) => toDistribution(item));
+      await cacheSet(key, mapped);
+      return mapped;
     } catch (error) {
       const err = error as ApiError;
       const message = String(err?.message || err || '');
@@ -65,19 +75,26 @@ export const distributionsApi = {
           const allItems = normalizeDistributionList(allRes).map((item: any) =>
             toDistribution(item)
           );
-          return allItems.filter(
+          const filtered = allItems.filter(
             (d) => String(d.planogramId).trim() === String(planogramId).trim()
           );
+          await cacheSet(key, filtered);
+          return filtered;
         } catch (fallbackError) {
           const fbErr = fallbackError as ApiError;
-          console.error(
-            '[distributions-api] Fallback list/filter failed:',
-            fbErr.message || fbErr
-          );
+          if (!isExpectedOfflineError(fallbackError)) {
+            console.warn(
+              '[distributions-api] Fallback list/filter failed:',
+              fbErr.message || fbErr
+            );
+          }
         }
       }
-      console.error('[distributions-api] GET by planogram failed:', message);
-      throw err;
+      if (!isExpectedOfflineError(error)) {
+        console.warn('[distributions-api] GET by planogram failed:', message);
+      }
+      const cached = await cacheGet<DistributionForUI[]>(key);
+      return cached ?? [];
     }
   },
 };

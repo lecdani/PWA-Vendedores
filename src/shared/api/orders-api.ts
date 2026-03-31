@@ -1,6 +1,525 @@
 import { apiClient, ApiError, API_BASE_URL } from './api-client';
 import { histpricesApi } from './histprices-api';
 import { productsApi } from './products-api';
+import { cacheGet, cacheSet } from '@/shared/offline/offline-cache';
+
+async function getOfflineDbIfBrowser() {
+  if (typeof window === 'undefined') return null;
+  const mod = await import('@/shared/offline/offline-db');
+  return mod.offlineDb;
+}
+
+function isExpectedOfflineError(error: unknown): boolean {
+  const err = error as ApiError;
+  const message = String(err?.message ?? error ?? '').toLowerCase();
+  return Number((err as any)?.status ?? 0) === 0 || message.includes('error de conexión') || message.includes('network');
+}
+
+function userOrdersCacheKey(userId: string): string {
+  return `orders.byUser.${String(userId).trim()}`;
+}
+
+function orderByIdCacheKey(orderId: string): string {
+  return `orders.byId.${String(orderId).trim()}`;
+}
+
+/** Ids recién creados en API que aún no salen en GET listado: no purgar de caché hasta que el servidor los liste. */
+const ORDERS_PENDING_LIST_SYNC_KEY = 'orders.meta.pendingListSync';
+
+async function addPendingListSyncOrderId(orderId: string): Promise<void> {
+  const id = String(orderId).trim();
+  if (!id || typeof window === 'undefined') return;
+  const cur = (await cacheGet<string[]>(ORDERS_PENDING_LIST_SYNC_KEY)) ?? [];
+  if (cur.some((x) => String(x).trim() === id)) return;
+  await cacheSet(ORDERS_PENDING_LIST_SYNC_KEY, [...cur, id]);
+}
+
+async function removePendingListSyncOrderId(orderId: string): Promise<void> {
+  const id = String(orderId).trim();
+  if (!id || typeof window === 'undefined') return;
+  const cur = (await cacheGet<string[]>(ORDERS_PENDING_LIST_SYNC_KEY)) ?? [];
+  const next = cur.filter((x) => String(x).trim() !== id);
+  if (next.length !== cur.length) await cacheSet(ORDERS_PENDING_LIST_SYNC_KEY, next);
+}
+
+/** Cuando el listado del servidor ya incluye el id, deja de tratarlo como “pendiente de listado”. */
+async function clearPendingIdsConfirmedOnServer(serverIds: string[]): Promise<void> {
+  if (typeof window === 'undefined') return;
+  const set = new Set(serverIds.map((x) => String(x).trim()).filter(Boolean));
+  const cur = (await cacheGet<string[]>(ORDERS_PENDING_LIST_SYNC_KEY)) ?? [];
+  const next = cur.filter((p) => !set.has(String(p).trim()));
+  if (next.length !== cur.length) await cacheSet(ORDERS_PENDING_LIST_SYNC_KEY, next);
+}
+
+function salespersonIdMatchesCacheUser(orderSp: string, userId: string): boolean {
+  const sp = String(orderSp ?? '').trim();
+  const uid = String(userId ?? '').trim();
+  if (!sp || !uid) return false;
+  if (sp === uid) return true;
+  if (sp.toLowerCase() === uid.toLowerCase()) return true;
+  if (/^\d+$/.test(sp) && /^\d+$/.test(uid) && Number(sp) === Number(uid)) return true;
+  return false;
+}
+
+/** Pedidos en orders.byId.* que pertenecen al vendedor (historial offline si falta fila en orders.byUser). */
+async function listCachedOrdersFromByIdForSalesperson(userId: string): Promise<OrderForUI[]> {
+  const db = await getOfflineDbIfBrowser();
+  const uid = String(userId).trim();
+  if (!db || !uid) return [];
+  const rows = await db.appCache.where('key').startsWith('orders.byId.').toArray();
+  const seen = new Set<string>();
+  const out: OrderForUI[] = [];
+  for (const row of rows) {
+    const v = row.value as OrderForUI | undefined;
+    if (!v || typeof v !== 'object') continue;
+    const oid = String(v.id ?? '').trim();
+    if (!oid || isTempLocalOrderId(oid)) continue;
+    const sp = String(v.salespersonId ?? '').trim();
+    if (!salespersonIdMatchesCacheUser(sp, uid)) continue;
+    if (seen.has(oid)) continue;
+    seen.add(oid);
+    out.push(v);
+  }
+  return out;
+}
+
+async function cacheOrder(order: OrderForUI): Promise<void> {
+  const id = String(order.id ?? '').trim();
+  if (id) await cacheSet(orderByIdCacheKey(id), order);
+  const backendId = String(order.backendOrderId ?? '').trim();
+  if (backendId) await cacheSet(orderByIdCacheKey(backendId), order);
+}
+
+/** Igualdad de ids de pedido entre URL, caché y backend (GUID mayúsc/minús, número vs string). */
+export function orderCacheIdsMatch(a: string, b: string): boolean {
+  const x = String(a ?? '').trim();
+  const y = String(b ?? '').trim();
+  if (!x || !y) return false;
+  if (x === y) return true;
+  if (x.toLowerCase() === y.toLowerCase()) return true;
+  const nx = Number(x);
+  const ny = Number(y);
+  if (!Number.isNaN(nx) && !Number.isNaN(ny) && nx === ny) return true;
+  return false;
+}
+
+/**
+ * Pedido en IndexedDB (clave exacta o escaneo orders.byId.*) para detalle/editar/cancelar sin red.
+ */
+async function resolveOrderFromOfflineCaches(orderId: string): Promise<OrderForUI | null> {
+  const wanted = String(orderId ?? '').trim();
+  if (!wanted || typeof window === 'undefined') return null;
+  const direct = await cacheGet<OrderForUI>(orderByIdCacheKey(wanted));
+  if (direct) return direct;
+  const db = await getOfflineDbIfBrowser();
+  if (!db) return null;
+  const rows = await db.appCache.where('key').startsWith('orders.byId.').toArray();
+  for (const row of rows) {
+    const v = row.value as OrderForUI | undefined;
+    if (!v || typeof v !== 'object') continue;
+    const oid = String(v.id ?? '').trim();
+    if (!oid || isTempLocalOrderId(oid)) continue;
+    const bid = String(v.backendOrderId ?? '').trim();
+    if (orderCacheIdsMatch(oid, wanted) || (bid && orderCacheIdsMatch(bid, wanted))) {
+      return v;
+    }
+  }
+  return null;
+}
+
+/**
+ * Id vendedor para caché offline: prioriza auth_user (misma fuente que OrderHistory con user.id)
+ * para que orders.byUser.* y salespersonId no queden desalineados si el input llega vacío o distinto.
+ */
+function resolveCachedSalespersonId(input: CreateOrderInput): string {
+  let fromAuth = '';
+  if (typeof window !== 'undefined') {
+    try {
+      const raw = window.localStorage.getItem('auth_user');
+      if (raw) fromAuth = String(JSON.parse(raw)?.id ?? '').trim();
+    } catch {
+      /* ignore */
+    }
+  }
+  const fromInput = String(input.salespersonId ?? '').trim();
+  return fromAuth || fromInput;
+}
+
+/** Pedido recién creado en API → mismo shape que UI para detalle/historial sin red (cancelar / editar en cola). */
+function buildOrderForUIFromCreateInput(
+  input: CreateOrderInput,
+  remoteOrderId: string | number,
+  invoiceId?: string | number | null,
+  resolvedSalespersonId?: string
+): OrderForUI {
+  const rid = String(remoteOrderId).trim();
+  const items = (input.items || []).map((it) => ({
+    productId: String(it.productId || ''),
+    productName: String(it.productName || ''),
+    sku: String(it.sku || ''),
+    quantity: Number(it.quantity) || 0,
+    toOrder: Number(it.quantity) || 0,
+    price: Number(it.price) || 0,
+    ...(it.orderDetailId ? { orderDetailId: it.orderDetailId } : {}),
+  }));
+  const subtotal = Number(input.subtotal) || 0;
+  const tax = Number(input.tax) || 0;
+  const total = Number(input.total) || subtotal + tax;
+  const now = new Date().toISOString();
+  const inv =
+    invoiceId != null && String(invoiceId).trim() !== '' ? String(invoiceId).trim() : undefined;
+  const sp = String(resolvedSalespersonId ?? input.salespersonId ?? '').trim() || undefined;
+  return {
+    id: rid,
+    backendOrderId: rid,
+    storeId: String(input.storeId || ''),
+    storeName: String(input.storeName || input.storeId || '—'),
+    storeAddress: input.storeAddress || '',
+    date: now,
+    status: 'initial',
+    items,
+    totalUnits: items.reduce((s, i) => s + (i.quantity ?? i.toOrder ?? 0), 0),
+    subtotal,
+    tax,
+    total,
+    podRequired: true,
+    podUploaded: false,
+    salespersonId: sp,
+    po: input.po,
+    planogramId: input.planogramId,
+    ...(inv ? { invoiceId: inv } : {}),
+  };
+}
+
+async function persistCreatedOrderToOfflineCaches(
+  input: CreateOrderInput,
+  created: { orderId: string | number; invoiceId?: string | number }
+): Promise<void> {
+  if (typeof window === 'undefined') return;
+  const oid = String(created.orderId ?? '').trim();
+  if (!oid) return;
+  const sp = resolveCachedSalespersonId(input);
+  const order = buildOrderForUIFromCreateInput(input, oid, created.invoiceId, sp);
+  await cacheOrder(order);
+  await addPendingListSyncOrderId(oid);
+  const uid = sp;
+  if (uid) {
+    const key = userOrdersCacheKey(uid);
+    const existing = (await cacheGet<OrderForUI[]>(key)) ?? [];
+    const next = mergeOrdersUnique([order], existing);
+    await cacheSet(key, next);
+  }
+}
+
+/** Tras PUT pedido online: refrescar IndexedDB para detalle/historial offline. */
+async function persistUpdatedOrderToOfflineCaches(orderId: string | number, input: CreateOrderInput): Promise<void> {
+  if (typeof window === 'undefined') return;
+  const idStr = String(orderId).trim();
+  if (!idStr || isTempLocalOrderId(idStr)) return;
+  const sp = resolveCachedSalespersonId(input);
+  const next = buildOrderForUIFromCreateInput(input, idStr, undefined, sp);
+  const existing = await cacheGet<OrderForUI>(orderByIdCacheKey(idStr));
+  const merged: OrderForUI = {
+    ...(existing ?? next),
+    ...next,
+    id: idStr,
+    backendOrderId: idStr,
+    invoiceId: existing?.invoiceId ?? next.invoiceId,
+    invoiceNumber: existing?.invoiceNumber,
+    podImageUrl: existing?.podImageUrl,
+    podFileName: existing?.podFileName,
+    podUploaded: existing?.podUploaded,
+    date: existing?.date ?? next.date,
+    status: existing?.status ?? next.status,
+    salespersonId: next.salespersonId ?? existing?.salespersonId,
+  };
+  await cacheOrder(merged);
+  const uid = sp;
+  if (uid) {
+    const key = userOrdersCacheKey(uid);
+    const list = (await cacheGet<OrderForUI[]>(key)) ?? [];
+    const rest = list.filter(
+      (o) => String(o.id) !== idStr && String(o.backendOrderId ?? '') !== idStr
+    );
+    await cacheSet(key, mergeOrdersUnique([merged], rest));
+  }
+}
+
+async function markCancelledInBrowserCaches(orderId: string): Promise<void> {
+  const id = String(orderId || '').trim();
+  if (!id || typeof window === 'undefined') return;
+  const db = await getOfflineDbIfBrowser();
+  if (!db) return;
+
+  const byIdKey = orderByIdCacheKey(id);
+  const row = await db.appCache.get(byIdKey);
+  if (row?.value) {
+    await db.appCache.put({
+      ...row,
+      value: { ...(row.value as any), status: 'cancelled' },
+      updatedAt: Date.now(),
+    });
+  }
+
+  const userRows = await db.appCache.where('key').startsWith('orders.byUser.').toArray();
+  for (const userRow of userRows) {
+    const list = Array.isArray(userRow.value) ? (userRow.value as any[]) : [];
+    let changed = false;
+    const next = list.map((o) => {
+      const oid = String(o?.id ?? '').trim();
+      const bid = String(o?.backendOrderId ?? '').trim();
+      if (oid === id || bid === id) {
+        changed = true;
+        return { ...o, status: 'cancelled' };
+      }
+      return o;
+    });
+    if (changed) {
+      await db.appCache.put({ ...userRow, value: next, updatedAt: Date.now() });
+    }
+  }
+}
+
+async function applyCancellationOverridesFromCache(orders: OrderForUI[]): Promise<OrderForUI[]> {
+  if (typeof window === 'undefined' || orders.length === 0) return orders;
+  const out = [...orders];
+  for (let i = 0; i < out.length; i++) {
+    const o = out[i];
+    const ids = [String(o.id ?? '').trim(), String(o.backendOrderId ?? '').trim()].filter(Boolean);
+    let isCancelled = false;
+    for (const id of ids) {
+      const cached = await cacheGet<OrderForUI>(orderByIdCacheKey(id));
+      if (String(cached?.status ?? '').toLowerCase() === 'cancelled') {
+        isCancelled = true;
+        break;
+      }
+    }
+    if (isCancelled) out[i] = { ...o, status: 'cancelled' };
+  }
+  return out;
+}
+
+function mergeOrdersUnique(primary: OrderForUI[], secondary: OrderForUI[]): OrderForUI[] {
+  const out = [...primary];
+  const seen = new Set(
+    out.flatMap((o) => [String(o.id || '').trim(), String(o.backendOrderId ?? '').trim()]).filter(Boolean)
+  );
+  for (const o of secondary) {
+    const keys = [String(o.id || '').trim(), String(o.backendOrderId ?? '').trim()].filter(Boolean);
+    if (keys.some((k) => seen.has(k))) continue;
+    out.push(o);
+    keys.forEach((k) => seen.add(k));
+  }
+  return out;
+}
+
+/** true en SSR o cuando el navegador reporta conexión (no usar caché de lista como fuente de verdad). */
+function browserReportsOnline(): boolean {
+  return typeof window === 'undefined' || (typeof navigator !== 'undefined' && navigator.onLine);
+}
+
+/** Ids de borradores solo en IndexedDB hasta sincronizar (no existen aún en el API). */
+function isTempLocalOrderId(orderId: string): boolean {
+  return String(orderId ?? '').startsWith('local-order-');
+}
+
+/**
+ * Si hay un POD en cola offline (POD_UPLOAD_FILE + podMedia), enriquece el pedido para que la UI muestre la imagen sin red.
+ */
+async function mergeOfflinePendingPodIntoOrder(
+  order: OrderForUI | null,
+  orderIdRequested: string
+): Promise<OrderForUI | null> {
+  if (!order || typeof window === 'undefined') return order;
+  const db = await getOfflineDbIfBrowser();
+  if (!db) return order;
+
+  const ids = new Set<string>();
+  const add = (v: unknown) => {
+    const s = String(v ?? '').trim();
+    if (s) ids.add(s);
+  };
+  add(orderIdRequested);
+  add(order.id);
+  add(order.backendOrderId);
+
+  const mapKeys = [String(orderIdRequested).trim(), String(order.id ?? '').trim(), String(order.backendOrderId ?? '').trim()].filter(
+    Boolean
+  );
+  for (const k of mapKeys) {
+    const m = await db.idMap.get(`order:${k}`);
+    if (m?.value) add(m.value);
+  }
+
+  const remotes = new Set([...ids].filter((x) => x && !isTempLocalOrderId(x)));
+  if (remotes.size > 0) {
+    const allMap = await db.idMap.toArray();
+    for (const row of allMap) {
+      if (!row.key.startsWith('order:')) continue;
+      if (remotes.has(String(row.value ?? '').trim())) add(row.key.slice('order:'.length));
+    }
+  }
+
+  const podJobs = await db.offlineJobs.where('type').equals('POD_UPLOAD_FILE').toArray();
+  const active = podJobs.filter(
+    (j) => j.status === 'pending' || j.status === 'failed' || j.status === 'processing'
+  );
+  const match = active
+    .filter((j) => {
+      const oid = String((j.payload as { orderId?: string })?.orderId ?? '').trim();
+      return oid && ids.has(oid);
+    })
+    .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))[0];
+  if (!match) return order;
+  const mediaId = String((match.payload as { mediaId?: string })?.mediaId ?? '').trim();
+  if (!mediaId) return order;
+  const media = await db.podMedia.get(mediaId);
+  const dataUrl = media?.dataUrl?.trim();
+  if (!dataUrl) return order;
+
+  return {
+    ...order,
+    podUploaded: true,
+    podImageUrl: dataUrl,
+    podFileName: media.fileName || order.podFileName,
+  };
+}
+
+/**
+ * Alinea caché con el listado del servidor: quita pedidos que ya no existen (admin).
+ * No elimina ids en `orders.meta.pendingListSync` (recién creados aún no listados).
+ */
+async function reconcileOfflineStoresAgainstRemoteIdSet(
+  userId: string,
+  remoteIds: Set<string>
+): Promise<boolean> {
+  const uid = String(userId || '').trim();
+  if (!uid || typeof window === 'undefined') return false;
+  const db = await getOfflineDbIfBrowser();
+  if (!db) return false;
+  const pendingArr = (await cacheGet<string[]>(ORDERS_PENDING_LIST_SYNC_KEY)) ?? [];
+  const pending = new Set(pendingArr.map((x) => String(x).trim()).filter(Boolean));
+  let changed = false;
+
+  const drafts = await db.localOrders.where('userId').equals(uid).toArray();
+  for (const row of drafts) {
+    const data = row.data as OrderForUI | undefined;
+    const lBackend = String(data?.backendOrderId ?? '').trim();
+    const lid = String(row.id ?? '').trim();
+    const map = await db.idMap.get(`order:${lid}`);
+    const mapped = String(map?.value ?? '').trim();
+    const eff = lBackend || mapped;
+    if (!eff || isTempLocalOrderId(eff)) continue;
+    if (!remoteIds.has(eff) && !pending.has(eff)) {
+      await purgeOrderFromOfflineClient(eff);
+      changed = true;
+    }
+  }
+
+  const jobs = await db.offlineJobs.toArray();
+  for (const job of jobs) {
+    const jid = job.id;
+    if (jid == null) continue;
+    const p: any = job.payload ?? {};
+    let drop = false;
+    if (job.type === 'CREATE_ORDER') {
+      const loc = String(p.localOrderId ?? '').trim();
+      if (loc) {
+        const m = await db.idMap.get(`order:${loc}`);
+        const r = String(m?.value ?? '').trim();
+        if (r && !isTempLocalOrderId(r) && !remoteIds.has(r) && !pending.has(r)) drop = true;
+      }
+    } else {
+      const oid = String(p.orderId ?? '').trim();
+      if (oid && !isTempLocalOrderId(oid) && !remoteIds.has(oid) && !pending.has(oid)) drop = true;
+      else if (oid && isTempLocalOrderId(oid)) {
+        const m = await db.idMap.get(`order:${oid}`);
+        const r = String(m?.value ?? '').trim();
+        if (r && !remoteIds.has(r) && !pending.has(r)) drop = true;
+      }
+    }
+    if (drop) {
+      await db.offlineJobs.delete(jid);
+      changed = true;
+    }
+  }
+
+  const byIdRows = await db.appCache.where('key').startsWith('orders.byId.').toArray();
+  for (const row of byIdRows) {
+    const idPart = row.key.replace(/^orders\.byId\./, '').trim();
+    if (!idPart || isTempLocalOrderId(idPart)) continue;
+    if (!remoteIds.has(idPart) && !pending.has(idPart)) {
+      await db.appCache.delete(row.key);
+      changed = true;
+    }
+  }
+
+  const userRow = await db.appCache.get(userOrdersCacheKey(uid));
+  if (userRow?.value && Array.isArray(userRow.value)) {
+    const list = userRow.value as OrderForUI[];
+    const next = list.filter((o) => {
+      const bid = String(o?.backendOrderId ?? '').trim();
+      const oid = String(o?.id ?? '').trim();
+      const remote = bid || (oid && !isTempLocalOrderId(oid) ? oid : '');
+      if (!remote) return true;
+      return remoteIds.has(remote) || pending.has(remote);
+    });
+    if (next.length !== list.length) {
+      await db.appCache.put({ ...userRow, value: next, updatedAt: Date.now() });
+      changed = true;
+    }
+  }
+
+  return changed;
+}
+
+/** Quita borrador, idMap y cachés cuando el pedido ya no está en el servidor (borrado en admin). */
+async function purgeOrderFromOfflineClient(remoteOrLocalId: string): Promise<void> {
+  const id = String(remoteOrLocalId || '').trim();
+  if (!id || typeof window === 'undefined') return;
+  await removePendingListSyncOrderId(id);
+  const db = await getOfflineDbIfBrowser();
+  if (!db) return;
+
+  await db.localOrders.delete(id);
+  await db.idMap.delete(`order:${id}`);
+  await db.appCache.delete(orderByIdCacheKey(id));
+
+  const allMaps = await db.idMap.toArray();
+  for (const row of allMaps) {
+    if (!row.key.startsWith('order:')) continue;
+    if (String(row.value) !== id) continue;
+    const localKey = row.key.slice('order:'.length);
+    await db.idMap.delete(row.key);
+    await db.localOrders.delete(localKey);
+    await db.appCache.delete(orderByIdCacheKey(localKey));
+  }
+
+  const userRows = await db.appCache.where('key').startsWith('orders.byUser.').toArray();
+  for (const userRow of userRows) {
+    const list = Array.isArray(userRow.value) ? (userRow.value as OrderForUI[]) : [];
+    const next = list.filter((o) => {
+      const oid = String(o?.id ?? '').trim();
+      const bid = String(o?.backendOrderId ?? '').trim();
+      return oid !== id && bid !== id;
+    });
+    if (next.length !== list.length) {
+      await db.appCache.put({ ...userRow, value: next, updatedAt: Date.now() });
+    }
+  }
+}
+
+/** Lista de pedidos en caché + todas las entradas orders.byId.* (evita detalle obsoleto tras borrados en BD). */
+async function clearOrdersListAndByIdCache(userId: string): Promise<void> {
+  const uid = String(userId || '').trim();
+  if (!uid || typeof window === 'undefined') return;
+  await cacheSet(userOrdersCacheKey(uid), [] as OrderForUI[]);
+  const db = await getOfflineDbIfBrowser();
+  if (db) {
+    const byIdRows = await db.appCache.where('key').startsWith('orders.byId.').toArray();
+    if (byIdRows.length) await db.appCache.bulkDelete(byIdRows.map((r) => r.key));
+  }
+}
 
 // Tipos ligeros para no acoplar demasiado al backend
 export interface OrderItemInput {
@@ -103,7 +622,13 @@ async function safeGet<T>(endpoint: string): Promise<T | null> {
     return await apiClient.get<T>(endpoint);
   } catch (error) {
     const err = error as ApiError;
-    console.error(`[orders-api] GET ${endpoint} failed:`, err.message || err);
+    const st = Number(err?.status ?? 0);
+    if (isExpectedOfflineError(error) || st === 404) {
+      return null;
+    }
+    if (process.env.NODE_ENV === 'development') {
+      console.warn(`[orders-api] GET ${endpoint} failed:`, err.message || err);
+    }
     return null;
   }
 }
@@ -846,37 +1371,114 @@ export const ORDER_STATUS_CODE = {
 } as const;
 
 /**
- * eternal-api `UpdateStatusCommand`: `Guid OrderId`, `OrderStatus NewStatus` (Created=1, Invoiced=2, Canceled=3).
- * System.Text.Json por defecto usa camelCase en JSON → `orderId`, `newStatus`.
- * Si `NewStatus` llega 0, suele ser: casing distinto, o enum como string (`JsonStringEnumConverter`).
- * Probamos varias formas en secuencia hasta que una responda OK.
+ * eternal-api `UpdateStatusCommand`: `Guid OrderId`, `OrderStatus NewStatus` (Created=1, Invoiced=2, Cancelled/Canceled=3).
+ * Si el API usa `JsonStringEnumConverter`, los números en JSON pueden fallar; probamos cadenas del enum (.NET suele usar `Cancelled` con doble L).
  */
 function orderStatusEnumName(code: 1 | 2 | 3): 'Created' | 'Invoiced' | 'Canceled' {
   if (code === 1) return 'Created';
   if (code === 2) return 'Invoiced';
-  return 'Canceled'; // C# enum: Canceled (una L)
+  return 'Canceled';
 }
 
-async function putOrderStatusUntilOk(orderId: string, statusCode: 1 | 2 | 3): Promise<boolean> {
+function buildOrderStatusPayloadCandidates(orderId: string, statusCode: 1 | 2 | 3): string[] {
   const id = String(orderId).trim();
-  if (!id) return false;
-  const n = Number(statusCode);
-  if (!Number.isInteger(n) || n < 1 || n > 3) return false;
+  const n = statusCode;
   const name = orderStatusEnumName(statusCode);
-  const path = `/orders/order/${encodeURIComponent(id)}/status`;
+  const seen = new Set<string>();
+  const add = (obj: Record<string, unknown>) => {
+    const s = JSON.stringify(obj);
+    if (!seen.has(s)) seen.add(s);
+  };
 
-  const candidates = [
-    JSON.stringify({ orderId: id, newStatus: n }),
-    JSON.stringify({ OrderId: id, NewStatus: n }),
-    JSON.stringify({ orderId: id, newStatus: name }),
-    JSON.stringify({ OrderId: id, NewStatus: name }),
-  ];
+  // Muchas rutas ASP.NET toman el id de la URL y el cuerpo solo lleva el nuevo estado.
+  if (statusCode === 3) {
+    add({ newStatus: n });
+    add({ NewStatus: n });
+    add({ newStatus: String(n) });
+    add({ NewStatus: String(n) });
+    for (const s of ['Cancelled', 'Canceled', 'cancelled', 'canceled', 'CANCELLED']) {
+      add({ newStatus: s });
+      add({ NewStatus: s });
+    }
+  } else if (statusCode === 2) {
+    add({ newStatus: n });
+    add({ NewStatus: n });
+    add({ newStatus: String(n) });
+    add({ NewStatus: String(n) });
+    for (const s of ['Invoiced', 'invoiced']) {
+      add({ newStatus: s });
+      add({ NewStatus: s });
+    }
+  }
+
+  if (statusCode === 3) {
+    for (const s of ['Cancelled', 'Canceled', 'cancelled', 'canceled', 'CANCELLED']) {
+      add({ orderId: id, newStatus: s });
+      add({ OrderId: id, NewStatus: s });
+    }
+  } else if (statusCode === 2) {
+    for (const s of ['Invoiced', 'invoiced']) {
+      add({ orderId: id, newStatus: s });
+      add({ OrderId: id, NewStatus: s });
+    }
+  }
+
+  add({ orderId: id, newStatus: n });
+  add({ OrderId: id, NewStatus: n });
+  add({ orderId: id, newStatus: name });
+  add({ OrderId: id, NewStatus: name });
+
+  return [...seen];
+}
+
+type PutOrderStatusResult = { ok: boolean; remoteGone?: boolean; connectivityFail?: boolean };
+
+async function putOrderStatusUntilOk(
+  orderId: string,
+  statusCode: 1 | 2 | 3,
+  options?: { notFoundAsSuccess?: boolean }
+): Promise<PutOrderStatusResult> {
+  const id = String(orderId).trim();
+  if (!id) return { ok: false };
+  const n = Number(statusCode);
+  if (!Number.isInteger(n) || n < 1 || n > 3) return { ok: false };
+  const path = `/orders/order/${encodeURIComponent(id)}/status`;
+  const candidates = buildOrderStatusPayloadCandidates(id, statusCode);
+  const nf = options?.notFoundAsSuccess === true;
+  let lastErrMsg: string | undefined;
+  let connectivityFail = false;
 
   for (const payload of candidates) {
-    const res = await safePut<any>(path, payload);
-    if (res !== null) return true;
+    try {
+      await apiClient.putBody<unknown>(path, payload);
+      return { ok: true };
+    } catch (error) {
+      const err = error as ApiError;
+      const st = Number(err?.status ?? 0);
+      if (nf && st === 404) return { ok: true, remoteGone: true };
+      lastErrMsg = String((err as any)?.message ?? err ?? '');
+      if (st === 0 || isExpectedOfflineError(error)) {
+        connectivityFail = true;
+        break;
+      }
+    }
   }
-  return false;
+  if (lastErrMsg && process.env.NODE_ENV === 'development') {
+    console.warn('[orders-api] PUT', path, 'all status payloads failed:', lastErrMsg);
+  }
+
+  if (connectivityFail) {
+    return { ok: false, connectivityFail: true };
+  }
+
+  if (nf) {
+    const stillThere = await safeGet<unknown>(`/orders/orders/${encodeURIComponent(id)}`);
+    if (stillThere == null) return { ok: true, remoteGone: true };
+    if (normalizeOrderStatus(stillThere) === 'cancelled') {
+      return { ok: true };
+    }
+  }
+  return { ok: false };
 }
 
 function mapRawOrderToUI(raw: any, details: any[] = []): OrderForUI {
@@ -951,6 +1553,29 @@ function mapRawOrderToUI(raw: any, details: any[] = []): OrderForUI {
 
 export const ordersApi = {
   /**
+   * Guarda en IndexedDB la versión editada del pedido (detalle/historial offline), sin llamar al API.
+   * Úsalo cuando la actualización queda en cola (`UPDATE_ORDER`).
+   */
+  async persistEditedOrderForOffline(orderId: string | number, input: CreateOrderInput): Promise<void> {
+    await persistUpdatedOrderToOfflineCaches(orderId, input);
+  },
+
+  async refreshOrdersCacheForUser(userId: string): Promise<void> {
+    const uid = String(userId || '').trim();
+    if (!uid || typeof window === 'undefined') return;
+    const db = await getOfflineDbIfBrowser();
+    if (db) {
+      await db.appCache.delete(userOrdersCacheKey(uid));
+      const byIdRows = await db.appCache.where('key').startsWith('orders.byId.').toArray();
+      if (byIdRows.length > 0) {
+        await db.appCache.bulkDelete(byIdRows.map((r) => r.key));
+      }
+    }
+    // Rehidratar desde backend (si hay red). Si no hay red, no lanzar error.
+    await this.getOrdersByUser(uid);
+  },
+
+  /**
    * Crea un pedido con Unit of Work (header + detalles en un solo POST /orders/orders).
    * Devuelve el id del pedido creado en backend (orderId) si se pudo obtener.
    */
@@ -1020,6 +1645,7 @@ export const ordersApi = {
       createdOrder?.value?.invoiceId ??
       createdOrder?.value?.InvoiceId;
 
+    await persistCreatedOrderToOfflineCaches(input, { orderId: createdOrderId, invoiceId });
     return { orderId: createdOrderId, invoiceId };
   },
 
@@ -1125,7 +1751,20 @@ export const ordersApi = {
       body.Notes = notes;
     }
 
-    const created = await safePost<any>('/invoice/invoices', body);
+    let created: any;
+    try {
+      created = await apiClient.post<any>('/invoice/invoices', body);
+    } catch (error) {
+      const err = error as ApiError;
+      const st = Number(err?.status ?? 0);
+      if (st === 0 || isExpectedOfflineError(error)) {
+        throw error;
+      }
+      if (process.env.NODE_ENV === 'development') {
+        console.warn('[orders-api] POST /invoice/invoices failed:', err?.message ?? err);
+      }
+      return null;
+    }
     if (created == null) return null;
     const invoiceId =
       created?.invoiceId ??
@@ -1149,8 +1788,13 @@ export const ordersApi = {
    * Edición de pedido inicial (vendedor): tienda + ítems.
    * Endpoint: PUT /orders/orders/{id}
    * Body mínimo: { id, storeId, items[{ orderDetailId, productId, quantity }] }
+   * Si `queueOffline` es true, no reintentar en UI: usar cola offline (`updateOrderResilient`).
    */
-  async updateOrder(orderId: string | number, input: CreateOrderInput, optionalInvoiceId?: string | number | null): Promise<{ ok: boolean; errorMessage?: string }> {
+  async updateOrder(
+    orderId: string | number,
+    input: CreateOrderInput,
+    optionalInvoiceId?: string | number | null
+  ): Promise<{ ok: boolean; errorMessage?: string; queueOffline?: boolean }> {
     void optionalInvoiceId;
     const idStr = String(orderId).trim();
     if (!idStr) return { ok: false, errorMessage: 'Id de pedido inválido.' };
@@ -1165,10 +1809,21 @@ export const ordersApi = {
       })),
     };
 
-    const res = await safePut<any>(`/orders/orders/${encodeURIComponent(idStr)}`, body);
-    if (res === null) {
-      return { ok: false, errorMessage: 'No se pudo actualizar el pedido.' };
+    try {
+      await apiClient.put<any>(`/orders/orders/${encodeURIComponent(idStr)}`, body);
+    } catch (error) {
+      const err = error as ApiError;
+      const st = Number(err?.status ?? 0);
+      if (st === 0 || isExpectedOfflineError(error)) {
+        return {
+          ok: false,
+          errorMessage: err?.message || 'Sin conexión. Los cambios se pueden guardar en cola.',
+          queueOffline: true,
+        };
+      }
+      return { ok: false, errorMessage: err?.message || 'No se pudo actualizar el pedido.' };
     }
+    await persistUpdatedOrderToOfflineCaches(idStr, input);
     return { ok: true };
   },
 
@@ -1455,11 +2110,23 @@ export const ordersApi = {
     const fileName = String(params.fileName ?? '').trim();
     if (!id || !fileName) return false;
     void params.notes;
-    const res = await safePatch<unknown>(
-      `/invoice/invoices/${encodeURIComponent(id)}/pod`,
-      fileName
-    );
-    return res !== null && res !== undefined;
+    try {
+      const res = await apiClient.patch<unknown>(
+        `/invoice/invoices/${encodeURIComponent(id)}/pod`,
+        fileName
+      );
+      return res !== null && res !== undefined;
+    } catch (error) {
+      const err = error as ApiError;
+      const st = Number(err?.status ?? 0);
+      if (st === 0 || isExpectedOfflineError(error)) {
+        throw error;
+      }
+      if (process.env.NODE_ENV === 'development') {
+        console.warn('[orders-api] PATCH pod failed:', err?.message ?? err);
+      }
+      return false;
+    }
   },
 
   // VisitLogs removidos: el sistema ahora usa Assignments (tiendas asignadas).
@@ -1483,7 +2150,8 @@ export const ordersApi = {
     if (!isInvoiced) {
       return true;
     }
-    return putOrderStatusUntilOk(idStr, ORDER_STATUS_CODE.invoiced);
+    const r = await putOrderStatusUntilOk(idStr, ORDER_STATUS_CODE.invoiced);
+    return r.ok;
   },
 
   /**
@@ -1493,7 +2161,38 @@ export const ordersApi = {
   async cancelOrderBySeller(orderId: string | number): Promise<boolean> {
     const idStr = String(orderId).trim();
     if (!idStr) return false;
-    return putOrderStatusUntilOk(idStr, ORDER_STATUS_CODE.cancelled);
+    const r = await putOrderStatusUntilOk(idStr, ORDER_STATUS_CODE.cancelled, {
+      notFoundAsSuccess: true,
+    });
+    if (r.ok) {
+      if (r.remoteGone) await purgeOrderFromOfflineClient(idStr);
+      else await markCancelledInBrowserCaches(idStr);
+      return true;
+    }
+    if (r.connectivityFail) {
+      throw {
+        message: 'Error de conexión. Verifica tu conexión a internet.',
+        status: 0,
+      } as ApiError;
+    }
+    const still = await safeGet<unknown>(`/orders/orders/${encodeURIComponent(idStr)}`);
+    if (still == null) {
+      await purgeOrderFromOfflineClient(idStr);
+      return true;
+    }
+    const norm = normalizeOrderStatus(still);
+    if (norm === 'cancelled') {
+      await markCancelledInBrowserCaches(idStr);
+      return true;
+    }
+    if (norm === 'initial' || norm === 'confirmed') {
+      const deleted = await safeDelete<any>(`/orders/orders/${encodeURIComponent(idStr)}`);
+      if (deleted != null) {
+        await purgeOrderFromOfflineClient(idStr);
+        return true;
+      }
+    }
+    return false;
   },
 
   /**
@@ -1582,16 +2281,85 @@ export const ordersApi = {
   },
 
   /**
+   * GET listado usuario y purga IndexedDB de ids remotos que ya no existen en servidor (sin esperar recarga).
+   */
+  async reconcileOfflineWithServerUserList(userId: string): Promise<boolean> {
+    if (!browserReportsOnline() || typeof window === 'undefined') return false;
+    try {
+      const list = await apiClient.get<any>(`/orders/orders/user/${encodeURIComponent(userId)}`);
+      const arr = Array.isArray(list)
+        ? list
+        : list?.data ?? list?.Data ?? list?.items ?? list?.Items ?? list?.value ?? list?.Value ?? [];
+      const ids = (arr as any[])
+        .map((raw: any) =>
+          String(raw?.orderId ?? raw?.OrderId ?? (raw as any)?.OrderID ?? raw?.id ?? raw?.Id ?? '')
+        )
+        .filter(Boolean);
+      return await reconcileOfflineStoresAgainstRemoteIdSet(String(userId), new Set(ids));
+    } catch {
+      return false;
+    }
+  },
+
+  /**
    * Lista pedidos del usuario con total real. Obtiene el listado, cada pedido completo (getOrderById)
    * y enriquece el total con el de la factura (GET /invoice/invoices) cuando el pedido no trae total.
    */
   async getOrdersByUser(userId: string): Promise<OrderForUI[]> {
-    const list = await safeGet<any>(`/orders/orders/user/${encodeURIComponent(userId)}`);
+    const online = browserReportsOnline();
+    let list: any = null;
+    let serverListOk = false;
+    if (online) {
+      try {
+        list = await apiClient.get<any>(`/orders/orders/user/${encodeURIComponent(userId)}`);
+        serverListOk = true;
+      } catch {
+        serverListOk = false;
+        list = null;
+      }
+    } else {
+      list = await safeGet<any>(`/orders/orders/user/${encodeURIComponent(userId)}`);
+      serverListOk = list != null;
+    }
     const arr = Array.isArray(list) ? list : list?.data ?? list?.Data ?? list?.items ?? list?.Items ?? list?.value ?? list?.Value ?? [];
-    if (!arr.length) return [];
     const ids = (arr as any[]).map((raw: any) =>
       String(raw?.orderId ?? raw?.OrderId ?? (raw as any)?.OrderID ?? raw?.id ?? raw?.Id ?? '')
     ).filter(Boolean);
+
+    if (typeof window !== 'undefined' && online && serverListOk) {
+      await clearPendingIdsConfirmedOnServer(ids);
+      await reconcileOfflineStoresAgainstRemoteIdSet(String(userId), new Set(ids));
+    }
+
+    if (!arr.length) {
+      if (typeof window !== 'undefined') {
+        const db = await getOfflineDbIfBrowser();
+        const localDrafts = db
+          ? await db.localOrders.where('userId').equals(String(userId)).toArray()
+          : [];
+        const localOrders = localDrafts.map((d) => d.data as OrderForUI);
+        const cachedOrders = (await cacheGet<OrderForUI[]>(userOrdersCacheKey(userId))) ?? [];
+        const fromById = await listCachedOrdersFromByIdForSalesperson(String(userId));
+        const mergedEmptyList = mergeOrdersUnique(mergeOrdersUnique(cachedOrders, fromById), localOrders);
+        const withPodRaw = await Promise.all(
+          mergedEmptyList.map((o) => mergeOfflinePendingPodIntoOrder(o, String(o.id)))
+        );
+        const withPod = withPodRaw.filter((o): o is OrderForUI => o != null);
+        if (online && serverListOk) {
+          await cacheSet(userOrdersCacheKey(userId), withPod);
+          return withPod;
+        }
+        return withPod;
+      }
+      const cachedOnly = (await cacheGet<OrderForUI[]>(userOrdersCacheKey(userId))) ?? [];
+      const fromByIdOnly = await listCachedOrdersFromByIdForSalesperson(String(userId));
+      const mergedSsr = await Promise.all(
+        mergeOrdersUnique(cachedOnly, fromByIdOnly).map((o) =>
+          mergeOfflinePendingPodIntoOrder(o, String(o.id))
+        )
+      );
+      return mergedSsr.filter((o): o is OrderForUI => o != null);
+    }
     const [fullOrders, invoicesRaw] = await Promise.all([
       Promise.all(ids.map((id) => this.getOrderById(id))),
       safeGet<any>('/invoice/invoices'),
@@ -1625,7 +2393,7 @@ export const ordersApi = {
       return arr.reduce((s: number, d: any) => s + Number(d?.subtotal ?? d?.Subtotal ?? d?.SubTotal ?? d?.total ?? d?.Total ?? 0), 0);
     };
 
-    const result = orders.map((o) => {
+    let result = orders.map((o) => {
       const match = byOrderId.get(String(o.id).trim())
         ?? byOrderId.get(String(o.backendOrderId ?? '').trim())
         ?? byOrderId.get(String(o.id).toLowerCase())
@@ -1640,8 +2408,9 @@ export const ordersApi = {
         ) {
           next = { ...next, invoiceId: invId };
         }
-        const hasPod = invoiceHasPodEvidence(inv);
-        next = { ...next, podUploaded: hasPod };
+        const invHasPod = invoiceHasPodEvidence(inv);
+        // No pisar POD ya resuelto (p. ej. cola offline en getOrderById / data URL local).
+        next = { ...next, podUploaded: invHasPod || !!next.podUploaded };
         const invNoHuman =
           inv?.invoiceNumber ??
           inv?.InvoiceNumber ??
@@ -1650,7 +2419,7 @@ export const ordersApi = {
         if (invNoHuman != null && String(invNoHuman).trim() !== '') {
           next = { ...next, invoiceNumber: String(invNoHuman).trim() };
         }
-        if (hasPod) {
+        if (invHasPod) {
           const podFromInv = getPodFromInvoice(inv);
           next = { ...next, podImageUrl: next.podImageUrl || podFromInv, podFileName: next.podFileName || podFromInv };
         }
@@ -1687,11 +2456,46 @@ export const ordersApi = {
           if (invoiceHasPodEvidence(invRaw)) {
             const pod = getPodFromInvoice(invRaw);
             result[idx] = { ...result[idx], podImageUrl: pod, podFileName: pod, podUploaded: true };
-          } else {
+          } else if (invRaw != null) {
             result[idx] = { ...result[idx], podUploaded: false };
           }
+          // invRaw == null (offline): no tocar; mergeOfflinePendingPodIntoOrder después aplica POD en cola.
         })
       );
+    }
+    result = await Promise.all(result.map((o) => mergeOfflinePendingPodIntoOrder(o, String(o.id))));
+    result = await applyCancellationOverridesFromCache(result);
+    if (typeof window !== 'undefined') {
+      const db = await getOfflineDbIfBrowser();
+      const localDrafts = db
+        ? await db.localOrders.where('userId').equals(String(userId)).toArray()
+        : [];
+      const prevList = (await cacheGet<OrderForUI[]>(userOrdersCacheKey(userId))) ?? [];
+      let mergedList = mergeOrdersUnique(result, prevList);
+      if (localDrafts.length) {
+        const localById = new Map(localDrafts.map((d) => [String(d.id), d.data as OrderForUI]));
+        const merged = [...mergedList];
+        for (const l of localById.values()) {
+          const lid = String(l.id ?? '').trim();
+          const lBackend = String(l.backendOrderId ?? '').trim();
+          const map = db ? await db.idMap.get(`order:${lid}`) : null;
+          const mappedRemote = String(map?.value ?? '').trim();
+          const hasRemoteTwin = merged.some((o) => {
+            const oid = String(o.id ?? '').trim();
+            const oBackend = String(o.backendOrderId ?? '').trim();
+            return (
+              (lid && (oid === lid || oBackend === lid)) ||
+              (lBackend && (oid === lBackend || oBackend === lBackend)) ||
+              (mappedRemote && (oid === mappedRemote || oBackend === mappedRemote))
+            );
+          });
+          if (!hasRemoteTwin) merged.unshift(l);
+        }
+        mergedList = merged;
+      }
+      await cacheSet(userOrdersCacheKey(userId), mergedList);
+      await Promise.all(mergedList.map((o) => cacheOrder(o)));
+      return await Promise.all(mergedList.map((o) => mergeOfflinePendingPodIntoOrder(o, String(o.id))));
     }
     return result;
   },
@@ -1723,8 +2527,72 @@ export const ordersApi = {
    * Obtiene un pedido por id. GET /orders/orders/{id}
    */
   async getOrderById(orderId: string): Promise<OrderForUI | null> {
-    const raw = await safeGet<any>(`/orders/orders/${encodeURIComponent(orderId)}`);
-    if (!raw) return null;
+    const withPendingPod = (o: OrderForUI | null) => mergeOfflinePendingPodIntoOrder(o, orderId);
+    if (typeof window !== 'undefined') {
+      const db = await getOfflineDbIfBrowser();
+      const local = db ? await db.localOrders.get(String(orderId)) : null;
+      const mappedRemoteId = db ? await db.idMap.get(`order:${String(orderId)}`) : null;
+      const browserOnline = typeof navigator === 'undefined' ? true : navigator.onLine;
+      // Borrador offline sin id real: el servidor no tiene este GET; no intentar red ni borrarlo como “404”.
+      if (local?.data && isTempLocalOrderId(orderId) && !mappedRemoteId?.value) {
+        return await withPendingPod(local.data as OrderForUI);
+      }
+      if (local?.data && !browserOnline) return await withPendingPod(local.data as OrderForUI);
+      const resolvedCache = await resolveOrderFromOfflineCaches(orderId);
+      if (resolvedCache && typeof navigator !== 'undefined' && !navigator.onLine) {
+        return await withPendingPod(resolvedCache);
+      }
+      if (mappedRemoteId?.value) {
+        const mappedId = String(mappedRemoteId.value).trim();
+        const cachedMapped = await resolveOrderFromOfflineCaches(mappedId);
+        if (cachedMapped && typeof navigator !== 'undefined' && !navigator.onLine) {
+          return await withPendingPod(cachedMapped);
+        }
+        const mappedRaw = await safeGet<any>(`/orders/orders/${encodeURIComponent(mappedId)}`);
+        if (mappedRaw) {
+          const mappedOrderRaw =
+            mappedRaw?.data ?? mappedRaw?.order ?? mappedRaw?.Order ?? mappedRaw?.value ?? mappedRaw?.result ?? mappedRaw;
+          let mappedDetails = extractOrderDetailsFromOrderPayload(mappedRaw);
+          if (!mappedDetails.length) mappedDetails = extractOrderDetailsFromOrderPayload(mappedOrderRaw);
+          const mappedResult = mapRawOrderToUI(mappedOrderRaw, mappedDetails);
+          if (mappedResult?.items?.length) {
+            mappedResult.items = await enrichOrderItemsWithProductNames(mappedResult.items);
+          }
+          await cacheOrder(mappedResult);
+          return await withPendingPod(mappedResult);
+        }
+        if (!mappedRaw && cachedMapped && !browserOnline) {
+          return await withPendingPod(cachedMapped);
+        }
+      }
+    }
+    let raw: any = null;
+    let orderFetchStatus = 0;
+    try {
+      raw = await apiClient.get<any>(`/orders/orders/${encodeURIComponent(orderId)}`);
+    } catch (e) {
+      orderFetchStatus = Number((e as ApiError)?.status ?? 0);
+      raw = null;
+    }
+    if (!raw) {
+      if (typeof window !== 'undefined') {
+        const db = await getOfflineDbIfBrowser();
+        if (db) {
+          const localRow = await db.localOrders.get(String(orderId));
+          const mapped = await db.idMap.get(`order:${String(orderId)}`);
+          if (localRow?.data && isTempLocalOrderId(orderId) && !mapped?.value) {
+            return await withPendingPod(localRow.data as OrderForUI);
+          }
+        }
+        if (browserReportsOnline() && orderFetchStatus === 404) {
+          await purgeOrderFromOfflineClient(String(orderId));
+          return null;
+        }
+        const fallback = await resolveOrderFromOfflineCaches(orderId);
+        if (fallback) return await withPendingPod(fallback);
+      }
+      return null;
+    }
     const orderRaw = raw?.data ?? raw?.order ?? raw?.Order ?? raw?.value ?? raw?.result ?? raw;
     let details = extractOrderDetailsFromOrderPayload(raw);
     if (!details.length) details = extractOrderDetailsFromOrderPayload(orderRaw);
@@ -1797,7 +2665,10 @@ export const ordersApi = {
         result.status = 'invoiced';
       }
     }
-    return result;
+    if (typeof window !== 'undefined' && result) {
+      await cacheOrder(result);
+    }
+    return await withPendingPod(result);
   },
 
   /**
