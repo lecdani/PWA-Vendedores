@@ -17,10 +17,13 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
   const [modalMessage, setModalMessage] = useState<string | null>(null);
   const [modalTone, setModalTone] = useState<'info' | 'success' | 'warn'>('info');
   const modalTimerRef = useRef<number | null>(null);
-  const reloadTimerRef = useRef<number | null>(null);
   const pendingSyncNoticeRef = useRef(false);
-  /** Una sola recarga por ciclo reconexión → sync (evita varios `done` seguidos). */
-  const reconnectReloadScheduledRef = useRef(false);
+  /**
+   * Solo evento nativo `offline` (o carga sin red): NO contar fallos puntuales de API (`app-network-status`),
+   * porque cada error+éxito parecía una reconexión y disparaba modal/sync/recarga en bucle.
+   */
+  const offlineCycleRef = useRef(0);
+  const lastHandledOfflineCycleRef = useRef(0);
 
   useEffect(() => {
     const STICKY_OFFLINE_KEY = 'app_ui_offline_sticky';
@@ -41,6 +44,9 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
     };
 
     let wasOnline = computeOnline();
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      offlineCycleRef.current = Math.max(offlineCycleRef.current, 1);
+    }
     setIsOnline(wasOnline);
     const setOnlineState = (next: boolean) => {
       if (next === wasOnline) return;
@@ -51,12 +57,13 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
         new CustomEvent(next ? 'app-connection-restored' : 'app-connection-lost')
       );
       if (goingOnline) {
-        pendingSyncNoticeRef.current = true;
-        reconnectReloadScheduledRef.current = false;
-        setModalTone('info');
-        setModalMessage('Conexion restablecida. Sincronizando cambios pendientes...');
-        if (modalTimerRef.current != null) window.clearTimeout(modalTimerRef.current);
-        modalTimerRef.current = window.setTimeout(() => setModalMessage(null), 8000);
+        if (offlineCycleRef.current > lastHandledOfflineCycleRef.current) {
+          pendingSyncNoticeRef.current = true;
+          setModalTone('info');
+          setModalMessage('Conexion restablecida. Sincronizando cambios pendientes...');
+          if (modalTimerRef.current != null) window.clearTimeout(modalTimerRef.current);
+          modalTimerRef.current = window.setTimeout(() => setModalMessage(null), 8000);
+        }
       }
     };
 
@@ -67,7 +74,7 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
     const onOffline = () => {
       setStickyOffline(true);
       pendingSyncNoticeRef.current = false;
-      reconnectReloadScheduledRef.current = false;
+      offlineCycleRef.current += 1;
       setOnlineState(false);
     };
     const onAppNetworkStatus = (event: Event) => {
@@ -87,6 +94,26 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
       }
     };
 
+    /** Una sola navegación al historial por ráfaga de sync (evita bucle). */
+    const POST_SYNC_HISTORY_NAV_GUARD_MS = 12_000;
+    const POST_SYNC_HISTORY_NAV_GUARD_KEY = 'pwa_post_sync_history_nav_ts';
+    const scheduleHistoryAfterSuccessfulSync = () => {
+      try {
+        const prev = Number(window.sessionStorage.getItem(POST_SYNC_HISTORY_NAV_GUARD_KEY) || 0);
+        const now = Date.now();
+        if (Number.isFinite(prev) && prev > 0 && now - prev < POST_SYNC_HISTORY_NAV_GUARD_MS) {
+          return;
+        }
+        window.sessionStorage.setItem(POST_SYNC_HISTORY_NAV_GUARD_KEY, String(now));
+      } catch {
+        // sin sessionStorage: permitir navegar
+      }
+      // Sin ref en el timeout: Strict Mode no debe cancelar la navegación.
+      window.setTimeout(() => {
+        window.location.assign('/history');
+      }, 1300);
+    };
+
     window.addEventListener('online', onOnline);
     window.addEventListener('offline', onOffline);
     window.addEventListener('app-network-status', onAppNetworkStatus as EventListener);
@@ -96,29 +123,41 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
         summary?: { processed?: number; succeeded?: number; failed?: number };
       }>;
       if (customEvent.detail?.phase !== 'done') return;
-      if (!pendingSyncNoticeRef.current) return;
       const summary = customEvent.detail.summary;
       if (!summary) return;
-      pendingSyncNoticeRef.current = false;
-      if ((summary.processed ?? 0) <= 0) {
-        setModalTone('success');
-        setModalMessage('Conexion restablecida. No hay cambios pendientes por sincronizar.');
-      } else if ((summary.succeeded ?? 0) > 0) {
-        setModalTone('success');
-        setModalMessage('Sincronizacion completada. Tus datos ya estan actualizados.');
-        if (!reconnectReloadScheduledRef.current) {
-          reconnectReloadScheduledRef.current = true;
-          if (reloadTimerRef.current != null) window.clearTimeout(reloadTimerRef.current);
-          reloadTimerRef.current = window.setTimeout(() => {
-            window.location.reload();
-          }, 1300);
-        }
-      } else {
-        setModalTone('warn');
-        setModalMessage('No se pudieron sincronizar algunos cambios. Reintentaremos automaticamente.');
+
+      const processed = summary.processed ?? 0;
+      const succeeded = summary.succeeded ?? 0;
+      const failed = summary.failed ?? 0;
+
+      const showReconnectModal = pendingSyncNoticeRef.current;
+      if (showReconnectModal) {
+        lastHandledOfflineCycleRef.current = offlineCycleRef.current;
+        pendingSyncNoticeRef.current = false;
       }
-      if (modalTimerRef.current != null) window.clearTimeout(modalTimerRef.current);
-      modalTimerRef.current = window.setTimeout(() => setModalMessage(null), 3600);
+
+      // Mensaje también si hubo cola sin modal previo (p. ej. solo sticky/API, sin ciclo offline nativo).
+      if (showReconnectModal || processed > 0) {
+        if (showReconnectModal && processed <= 0) {
+          setModalTone('success');
+          setModalMessage('Conexion restablecida. No hay cambios pendientes por sincronizar.');
+        } else if (succeeded > 0) {
+          setModalTone('success');
+          setModalMessage('Sincronizacion completada. Tus datos ya estan actualizados.');
+        } else if (failed > 0) {
+          setModalTone('warn');
+          setModalMessage('No se pudieron sincronizar algunos cambios. Reintentaremos automaticamente.');
+        } else if (processed > 0) {
+          setModalTone('info');
+          setModalMessage('Sincronizacion finalizada.');
+        }
+        if (modalTimerRef.current != null) window.clearTimeout(modalTimerRef.current);
+        modalTimerRef.current = window.setTimeout(() => setModalMessage(null), 3600);
+      }
+
+      if (succeeded > 0) {
+        scheduleHistoryAfterSuccessfulSync();
+      }
     };
     window.addEventListener('app-offline-sync', onOfflineSync as EventListener);
     return () => {
@@ -127,7 +166,6 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
       window.removeEventListener('app-network-status', onAppNetworkStatus as EventListener);
       window.removeEventListener('app-offline-sync', onOfflineSync as EventListener);
       if (modalTimerRef.current != null) window.clearTimeout(modalTimerRef.current);
-      if (reloadTimerRef.current != null) window.clearTimeout(reloadTimerRef.current);
     };
   }, []);
 

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { ArrowLeft, Send, ShoppingCart, DollarSign, Package } from 'lucide-react';
 import { useLanguage } from '@/shared/i18n/language-provider';
@@ -10,9 +10,13 @@ import { createOrderResilient, updateOrderResilient } from '@/shared/offline/off
 import { storesApi, StoreForUI } from '@/shared/api/stores-api';
 import { assignmentsApi } from '@/shared/api/assignments-api';
 import { getOrderReviewPayload } from '@/shared/order-review-payload';
-import { categoriesApi, CategoryForUI } from '@/shared/api/categories-api';
-import { orderItemMatchesFamily } from '@/shared/utils/order-item-matches-family';
-import { FamilySummaryCell } from '@/shared/components/family-summary-cell';
+import { productsApi, getProductShortDisplayName, type ProductForUI } from '@/shared/api/products-api';
+import {
+  collectPresentationRowsFromGrid,
+  collectPresentationRowsFromOrderLines,
+  sumQtyForPresentation,
+} from '@/shared/utils/planogram-presentation-summary';
+import { PresentationSummaryCell } from '@/shared/components/presentation-summary-cell';
 import { Button } from '@/shared/ui/button';
 import { Card, CardContent } from '@/shared/ui/card';
 import { Separator } from '@/shared/ui/separator';
@@ -31,7 +35,7 @@ export function OrderReview() {
   const [orderSource, setOrderSource] = useState<'planogram' | 'catalog'>('planogram');
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
-  const [allCategories, setAllCategories] = useState<CategoryForUI[]>([]);
+  const [productMap, setProductMap] = useState<Map<string, ProductForUI>>(() => new Map());
   const [editableStores, setEditableStores] = useState<StoreForUI[]>([]);
   const [productImageError, setProductImageError] = useState<Record<string, boolean>>({});
   const hasRecentOfflineHint = () => {
@@ -48,7 +52,15 @@ export function OrderReview() {
   };
 
   useEffect(() => {
-    categoriesApi.fetchAll().then(setAllCategories);
+    productsApi.fetchAll().then((list) => {
+      const m = new Map<string, ProductForUI>();
+      for (const p of list) {
+        m.set(String(p.id), p);
+        const n = Number(p.id);
+        if (!Number.isNaN(n)) m.set(String(n), p);
+      }
+      setProductMap(m);
+    });
   }, []);
 
   useEffect(() => {
@@ -98,6 +110,16 @@ export function OrderReview() {
 
   // Filtrar solo los productos con cantidad mayor a 0 para mostrar
   const orderItems = planogramData.filter((item: any) => item.toOrder > 0);
+
+  const presentationSummaryRows = useMemo(() => {
+    if (orderSource === 'planogram') {
+      return collectPresentationRowsFromGrid(planogramData, productMap);
+    }
+    if (orderSource === 'catalog') {
+      return collectPresentationRowsFromOrderLines(orderItems, productMap);
+    }
+    return [];
+  }, [orderSource, planogramData, productMap, orderItems]);
 
   const totalUnits = orderItems.reduce((sum: number, item: any) => sum + item.toOrder, 0);
   const totalAmount = orderItems.reduce((sum: number, item: any) => sum + (item.toOrder * item.price), 0);
@@ -352,8 +374,24 @@ export function OrderReview() {
                     </div>
                   )}
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm text-slate-900 mb-1">{item.productName}</p>
-                    <p className="text-xs text-slate-500 mb-2">{item.sku}</p>
+                    <p className="text-sm text-slate-900 mb-1">
+                      {(() => {
+                        const pid = String(item.productId ?? '').trim();
+                        const p = pid
+                          ? productMap.get(pid) ?? productMap.get(String(Number(pid)))
+                          : undefined;
+                        return p ? getProductShortDisplayName(p) : String(item.productName ?? '').trim();
+                      })()}
+                    </p>
+                    <p className="text-xs text-slate-500 mb-2">
+                      {(() => {
+                        const pid = String(item.productId ?? '').trim();
+                        const p = pid
+                          ? productMap.get(pid) ?? productMap.get(String(Number(pid)))
+                          : undefined;
+                        return String(p?.code ?? item.sku ?? '').trim() || '—';
+                      })()}
+                    </p>
                     <div className="flex items-center gap-2 text-xs">
                       <Badge variant="outline" className="bg-indigo-50 text-indigo-700 border-indigo-200">
                         {item.toOrder} {t('units')}
@@ -374,8 +412,8 @@ export function OrderReview() {
             ))}
           </div>
 
-          {/* Resumen por categoría: todas las registradas, con Pcs (0 o suma del pedido) */}
-          {allCategories.length > 0 && (
+          {/* Planograma y catálogo: presentaciones (mismo formato que planograma) */}
+          {presentationSummaryRows.length > 0 ? (
             <div className="border-t border-slate-100 pt-3">
               <table className="w-full min-w-[280px] overflow-hidden rounded-lg border border-slate-200 text-sm shadow-sm">
                 <thead>
@@ -389,29 +427,23 @@ export function OrderReview() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 bg-white">
-                  {[...allCategories]
-                    .sort((a, b) => a.name.localeCompare(b.name))
-                    .map((cat) => {
-                      const pcs = orderItems.reduce(
-                        (sum: number, item: any) =>
-                          orderItemMatchesFamily(item, cat, allCategories) ? sum + item.toOrder : sum,
-                        0
-                      );
-                      return (
-                        <tr key={cat.id} className="bg-slate-50/80">
-                          <td className="px-3 py-2.5 align-top">
-                            <FamilySummaryCell cat={cat} />
-                          </td>
-                          <td className="px-3 py-2.5 text-left align-middle bg-white">
-                            <span className="tabular-nums text-slate-900">{pcs}</span>
-                          </td>
-                        </tr>
-                      );
-                    })}
+                  {presentationSummaryRows.map((row) => {
+                    const pcs = sumQtyForPresentation(orderItems, productMap, row.presentationId);
+                    return (
+                      <tr key={row.presentationId} className="bg-slate-50/80">
+                        <td className="px-3 py-2.5 align-top">
+                          <PresentationSummaryCell row={row} />
+                        </td>
+                        <td className="px-3 py-2.5 text-left align-middle bg-white">
+                          <span className="tabular-nums text-slate-900">{pcs}</span>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
-          )}
+          ) : null}
         </Card>
 
         {/* Total Card (sin impuestos) */}

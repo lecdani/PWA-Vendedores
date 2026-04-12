@@ -117,7 +117,7 @@ export function SalesReport() {
 
       // Enriquecer pedidos con precios e información de producto cuando falten
       const productNameCache = new Map<string, { name: string; sku: string }>();
-      const productFamilyCache = new Map<string, string>();
+      const productPresentationCache = new Map<string, string>();
       const resolveProductName = async (productId: string, currentName: string, currentSku: string) => {
         if (!productId) return { name: currentName, sku: currentSku };
         if (currentName && !looksLikeId(currentName)) return { name: currentName, sku: currentSku };
@@ -141,20 +141,20 @@ export function SalesReport() {
               order.items.map(async (item: any) => {
                 let price = Number(item.price) || 0;
                 if (!price) {
-                  const inlineFamilyId = String(
-                    item?.familyId ?? item?.FamilyId ?? item?.categoryId ?? item?.CategoryId ?? ''
+                  const inlinePresId = String(
+                    item?.presentationId ?? item?.PresentationId ?? ''
                   ).trim();
-                  let familyId = inlineFamilyId;
+                  let presId = inlinePresId;
                   const productId = String(item?.productId ?? item?.ProductId ?? '').trim();
-                  if (!familyId && productId) {
-                    familyId = productFamilyCache.get(productId) || '';
-                    if (!familyId) {
+                  if (!presId && productId) {
+                    presId = productPresentationCache.get(productId) || '';
+                    if (!presId) {
                       const product = await productsApi.getById(productId);
-                      familyId = String(product?.familyId ?? product?.categoryId ?? '').trim();
-                      if (familyId) productFamilyCache.set(productId, familyId);
+                      presId = String(product?.presentationId ?? '').trim();
+                      if (presId) productPresentationCache.set(productId, presId);
                     }
                   }
-                  if (familyId) price = await histpricesApi.getLatest(familyId);
+                  if (presId) price = await histpricesApi.getLatest(presId);
                 }
                 const resolved = await resolveProductName(
                   String(item?.productId ?? item?.ProductId ?? ''),

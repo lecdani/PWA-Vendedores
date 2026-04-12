@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { 
   ArrowLeft, 
@@ -9,6 +9,7 @@ import {
   DollarSign,
   Grid3x3,
   Printer,
+  Download,
   CheckCircle2,
   Camera,
   ChevronDown,
@@ -24,14 +25,25 @@ import { storesApi } from '@/shared/api/stores-api';
 import { citiesApi } from '@/shared/api/cities-api';
 import { histpricesApi } from '@/shared/api/histprices-api';
 import { productsApi, getProductImageUrl } from '@/shared/api/products-api';
+import { planogramsApi } from '@/shared/api/planograms-api';
+import { distributionsApi } from '@/shared/api/distributions-api';
 import { categoriesApi, CategoryForUI } from '@/shared/api/categories-api';
-import { orderItemMatchesFamily } from '@/shared/utils/order-item-matches-family';
-import { FamilySummaryCell } from '@/shared/components/family-summary-cell';
+import {
+  collectPresentationRowsFromGrid,
+  collectPresentationRowsFromOrderLines,
+  getPresentationSummaryKey,
+  getProductFromMap,
+  sumQtyForPresentation,
+  type PlanogramPresentationSummaryRow,
+} from '@/shared/utils/planogram-presentation-summary';
+import { PresentationSummaryCell } from '@/shared/components/presentation-summary-cell';
+import type { ProductForUI } from '@/shared/api/products-api';
 import { getBackendAssetUrl } from '@/shared/api/api-client';
 import { Button } from '@/shared/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/shared/ui/card';
 import { Badge } from '@/shared/ui/badge';
 import { Separator } from '@/shared/ui/separator';
+import { getSalesRouteCodeById } from '@/shared/api/sales-routes-api';
 import { Invoice } from './invoice';
 
 /** Estados de API heterogéneos → facturado */
@@ -64,11 +76,26 @@ function sameFamilyId(a: string | undefined, b: string | undefined): boolean {
   return an === bn;
 }
 
+function invoiceVolLabel(volume?: number, unit?: string): string {
+  if (volume == null || !Number.isFinite(Number(volume))) return '';
+  const u = String(unit || '').trim();
+  return u ? `${volume} ${u}` : String(volume);
+}
+
 export type InvoiceDisplayState = {
   invoiceNumber: string;
   date: string;
   total: number;
-  items: Array<{ qty: number; code: string; description: string; price: number; amount: number }>;
+  items: Array<{
+    qty: number;
+    code: string;
+    sku?: string;
+    description: string;
+    price: number;
+    amount: number;
+    /** Id de línea de pedido / detalle factura — necesario para no colapsar presentaciones al resolver por SKU duplicado. */
+    productId?: string;
+  }>;
   pod?: string;
   storeId?: string;
   /** PO devuelto por la API de factura (prioridad sobre el del pedido). */
@@ -97,6 +124,29 @@ function mergeInvoiceDisplay(prev: InvoiceDisplayState | null, next: InvoiceDisp
   };
 }
 
+function detailLineQty(item: any): number {
+  return Number(item?.quantity ?? item?.toOrder ?? 0) || 0;
+}
+
+function effectiveUnitPriceFromDetailItem(item: any): number {
+  const qty = detailLineQty(item);
+  const p =
+    Number(item?.price ?? item?.unitPrice ?? item?.UnitPrice ?? item?.Price ?? 0) || 0;
+  if (p > 0) return p;
+  const amt =
+    Number(
+      item?.amount ??
+        item?.Amount ??
+        item?.lineTotal ??
+        item?.LineTotal ??
+        item?.subtotal ??
+        item?.Subtotal ??
+        0
+    ) || 0;
+  if (qty > 0 && amt > 0) return amt / qty;
+  return 0;
+}
+
 export function OrderDetail({ orderId }: { orderId: string }) {
   const { t } = useLanguage();
   const router = useRouter();
@@ -113,8 +163,10 @@ export function OrderDetail({ orderId }: { orderId: string }) {
     Array<{ productId: string; quantity: number; unitPrice?: number; row?: number; col?: number; sku?: string; productName?: string }>
   >([]);
   const [showInitialOrderInvoiced, setShowInitialOrderInvoiced] = useState(false);
-  const [invoiceViewMode, setInvoiceViewMode] = useState<'product' | 'family'>('product');
+  const [invoiceViewMode, setInvoiceViewMode] = useState<'product' | 'family'>('family');
   const [invoicePrintLayout, setInvoicePrintLayout] = useState<'normal' | 'ticket'>('normal');
+  /** Código de ruta vía GET /salesRoutes/{id} cuando el perfil no trae sellerCode ni salesRouteCode. */
+  const [vendorRouteFetched, setVendorRouteFetched] = useState('');
 
   const readDeliveryFromStorage = useCallback(() => {
     if (typeof window === 'undefined') return;
@@ -145,11 +197,169 @@ export function OrderDetail({ orderId }: { orderId: string }) {
   const [podImageError, setPodImageError] = useState(false);
   const [productImageError, setProductImageError] = useState<Record<string, boolean>>({});
   const [allCategories, setAllCategories] = useState<CategoryForUI[]>([]);
-  const [storeHasPlanogram, setStoreHasPlanogram] = useState(true);
+  const [familyIdByProductId, setFamilyIdByProductId] = useState<Record<string, string>>({});
+  const [productMap, setProductMap] = useState<Map<string, ProductForUI>>(() => new Map());
+  /** Productos del pedido vía GET por id (misma fuente que Admin) — el listado suele traer menos datos de presentación y rompe la agrupación en factura. */
+  const [invoiceProductById, setInvoiceProductById] = useState<Map<string, ProductForUI>>(() => new Map());
+  const [storeHasPlanogram, setStoreHasPlanogram] = useState<boolean | null>(null);
+  const [planogramSummaryRows, setPlanogramSummaryRows] = useState<PlanogramPresentationSummaryRow[]>([]);
+
+  const orderProductIdsKey = useMemo(() => {
+    if (!order?.items?.length) return '';
+    return [
+      ...new Set(order.items.map((i: any) => String(i.productId || '').trim()).filter(Boolean)),
+    ]
+      .sort()
+      .join(',');
+  }, [order?.items]);
+
+  useEffect(() => {
+    if (!orderProductIdsKey) {
+      setInvoiceProductById(new Map());
+      return;
+    }
+    let cancelled = false;
+    const ids = orderProductIdsKey.split(',').filter(Boolean);
+    void (async () => {
+      const m = new Map<string, ProductForUI>();
+      await Promise.all(
+        ids.map(async (id) => {
+          try {
+            const p = await productsApi.getById(id);
+            if (p && !cancelled) {
+              m.set(String(p.id), p);
+              const n = Number(id);
+              if (!Number.isNaN(n)) m.set(String(n), p);
+            }
+          } catch {
+            /* ignore */
+          }
+        })
+      );
+      if (!cancelled) setInvoiceProductById(m);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [order?.id, orderProductIdsKey]);
 
   useEffect(() => {
     categoriesApi.fetchAll().then(setAllCategories);
   }, []);
+
+  useEffect(() => {
+    productsApi.fetchAll().then((list) => {
+      const acc: Record<string, string> = {};
+      const m = new Map<string, ProductForUI>();
+      for (const p of list) {
+        const fid = String(p.familyId ?? p.categoryId ?? '').trim();
+        if (fid) {
+          acc[String(p.id)] = fid;
+          const n = Number(p.id);
+          if (!Number.isNaN(n)) acc[String(n)] = fid;
+        }
+        m.set(String(p.id), p);
+        const n = Number(p.id);
+        if (!Number.isNaN(n)) m.set(String(n), p);
+      }
+      setFamilyIdByProductId(acc);
+      setProductMap(m);
+    });
+  }, []);
+
+  /**
+   * Misma regla que Admin `OrderDetailView`: rejilla de presentaciones del plano solo si la tienda no es solo-catálogo
+   * y el pedido tiene `planogramId` (pedido creado desde planograma).
+   */
+  const isCatalogOnlyStore = storeHasPlanogram === false;
+  const orderHasPlanogramRecord = !!(order?.planogramId && String(order.planogramId).trim());
+  const usePlanogramGridForPresentationSummary = !isCatalogOnlyStore && orderHasPlanogramRecord;
+  /** Factura/POD en flujo vendedor: igual que antes, solo se oculta si la tienda es explícitamente sin planograma. */
+  const usePlanogramWorkflowUi = storeHasPlanogram !== false;
+  const showPhysicalPlanogramButton = storeHasPlanogram === true;
+
+  const presentationRowsOrderSummary = useMemo(() => {
+    if (!usePlanogramGridForPresentationSummary || !order) return [];
+    if (planogramSummaryRows.length > 0) return planogramSummaryRows;
+    return collectPresentationRowsFromOrderLines(order.items || [], productMap);
+  }, [usePlanogramGridForPresentationSummary, order, productMap, planogramSummaryRows]);
+
+  /** Catálogo (o sin rejilla): presentaciones solo a partir de líneas del pedido. */
+  const catalogPresentationRowsFromOrder = useMemo(() => {
+    if (usePlanogramGridForPresentationSummary || !order) return [];
+    return collectPresentationRowsFromOrderLines(order.items || [], productMap);
+  }, [usePlanogramGridForPresentationSummary, order, productMap]);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      if (!usePlanogramGridForPresentationSummary || !order?.planogramId || productMap.size === 0) {
+        if (mounted) setPlanogramSummaryRows([]);
+        return;
+      }
+      try {
+        const planogramId = String(order.planogramId).trim();
+        let distributions = await distributionsApi.getByPlanogram(planogramId);
+        if (!distributions.length) {
+          const active = await planogramsApi.getActive();
+          if (active?.id) {
+            distributions = await distributionsApi.getByPlanogram(String(active.id));
+          }
+        }
+        const cells = distributions.map((d) => ({
+          productId: String(d.productId ?? '').trim(),
+        }));
+        const rows = collectPresentationRowsFromGrid(cells, productMap);
+        if (mounted) setPlanogramSummaryRows(rows);
+      } catch {
+        if (mounted) setPlanogramSummaryRows([]);
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [usePlanogramGridForPresentationSummary, order?.planogramId, productMap]);
+
+  const productForInvoiceLine = useCallback(
+    (productId: string | undefined) => {
+      const pid = String(productId ?? '').trim();
+      if (!pid) return undefined;
+      return getProductFromMap(invoiceProductById, pid) ?? getProductFromMap(productMap, pid);
+    },
+    [invoiceProductById, productMap]
+  );
+
+  const resolveLineForFamilyMatch = (item: any) => {
+    if (!item) return item;
+    const pid = String(item.productId ?? item.ProductId ?? '').trim();
+    let fid = String(item.familyId ?? item.categoryId ?? item.FamilyId ?? item.CategoryId ?? '').trim();
+    if (!fid && pid) {
+      fid = familyIdByProductId[pid] ?? familyIdByProductId[String(Number(pid))] ?? '';
+    }
+    return fid ? { ...item, familyId: fid } : item;
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const sc = String(user?.sellerCode || '').trim();
+      const src = String(user?.salesRouteCode || '').trim();
+      if (sc || src) {
+        if (!cancelled) setVendorRouteFetched('');
+        return;
+      }
+      const rid = String(user?.salesRouteId || '').trim();
+      if (!rid) {
+        if (!cancelled) setVendorRouteFetched('');
+        return;
+      }
+      const code = await getSalesRouteCodeById(rid);
+      if (!cancelled) setVendorRouteFetched(code || '');
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.sellerCode, user?.salesRouteCode, user?.salesRouteId]);
 
   useEffect(() => {
     readDeliveryFromStorage();
@@ -190,25 +400,53 @@ export function OrderDetail({ orderId }: { orderId: string }) {
         });
 
         let orderToSet = apiOrder;
-        const needsPrice = apiOrder.items.some((i: any) => i.productId && !Number(i.price));
-        const needsProductName = apiOrder.items.some((i: any) => i.productId && !(i.productName || i.sku || '').trim());
-        const needsImage = apiOrder.items.some((i: any) => i.productId && !i.imageUrl);
-        const needsCategory = apiOrder.items.some((i: any) => i.productId && (i.category == null || i.category === ''));
-        const needsFamilyId = apiOrder.items.some(
-          (i: any) => i.productId && !(i.familyId ?? i.categoryId ?? i.FamilyId ?? i.CategoryId)
+        const itemNeedsResolvedPrice = (i: any) =>
+          detailLineQty(i) > 0 && effectiveUnitPriceFromDetailItem(i) <= 0;
+        const needsPrice = apiOrder.items.some(itemNeedsResolvedPrice);
+        const needsProductName = apiOrder.items.some(
+          (i: any) => String(i.productId ?? i.ProductId ?? '').trim() && !(i.productName || i.sku || '').trim()
         );
-        if (needsPrice || needsProductName || needsImage || needsCategory || needsFamilyId) {
+        const needsImage = apiOrder.items.some(
+          (i: any) => String(i.productId ?? i.ProductId ?? '').trim() && !i.imageUrl
+        );
+        const needsCategory = apiOrder.items.some(
+          (i: any) => String(i.productId ?? i.ProductId ?? '').trim() && (i.category == null || i.category === '')
+        );
+        const needsFamilyId = apiOrder.items.some(
+          (i: any) =>
+            String(i.productId ?? i.ProductId ?? '').trim() &&
+            !(i.familyId ?? i.categoryId ?? i.FamilyId ?? i.CategoryId)
+        );
+        /** Alinear nombre mostrado con catálogo (shortName) aunque el API envíe nombre largo. */
+        const needsCatalogSnapshot = apiOrder.items.some((i: any) =>
+          String(i.productId ?? i.ProductId ?? '').trim()
+        );
+        const needsComputedTotals =
+          (Number(apiOrder.total) <= 0 || Number(apiOrder.subtotal) <= 0) &&
+          apiOrder.items.some((i: any) => detailLineQty(i) > 0);
+        if (
+          needsPrice ||
+          needsProductName ||
+          needsImage ||
+          needsCategory ||
+          needsFamilyId ||
+          needsCatalogSnapshot ||
+          needsComputedTotals
+        ) {
           const enrichedItems = await Promise.all(
             apiOrder.items.map(async (item: any) => {
+              const pid = String(item.productId ?? item.ProductId ?? '').trim();
               let productName = (item.productName || item.sku || '').trim();
-              let price = Number(item.price) || 0;
+              let price = effectiveUnitPriceFromDetailItem(item);
               let imageUrl = item.imageUrl;
               let category = (item.category || '').trim();
               let familyId = String(item.familyId ?? item.FamilyId ?? item.categoryId ?? item.CategoryId ?? '').trim();
-              if (item.productId) {
-                const product = await productsApi.getById(item.productId);
+              let product: Awaited<ReturnType<typeof productsApi.getById>> = null;
+              if (pid) {
+                product = await productsApi.getById(pid);
                 if (product) {
-                  if (!productName) productName = product.name || product.code || product.sku || '';
+                  const sn = String(product.shortName ?? '').trim();
+                  productName = (sn || productName || product.name || product.code || product.sku || '').trim();
                   if (!imageUrl) imageUrl = getProductImageUrl(product);
                   if (!familyId) familyId = String(product.familyId ?? product.categoryId ?? '').trim();
                   if (familyId) {
@@ -221,10 +459,14 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                     category = categoryById.get(id) ?? categoryById.get(String(Number(id))) ?? '';
                   }
                 }
-                if (!price && familyId) price = await histpricesApi.getLatest(familyId);
+                if (!price && product) {
+                  const presId = String(product.presentationId ?? '').trim();
+                  if (presId) price = await histpricesApi.getLatest(presId);
+                }
               }
               return {
                 ...item,
+                productId: pid || item.productId,
                 productName: productName || item.productName,
                 price,
                 imageUrl: imageUrl || item.imageUrl,
@@ -234,7 +476,10 @@ export function OrderDetail({ orderId }: { orderId: string }) {
               };
             })
           );
-          const computedSubtotal = enrichedItems.reduce((s: number, i: any) => s + (i.quantity ?? i.toOrder ?? 0) * (i.price || 0), 0);
+          const computedSubtotal = enrichedItems.reduce(
+            (s: number, i: any) => s + detailLineQty(i) * (Number(i.price) || 0),
+            0
+          );
           orderToSet = {
             ...apiOrder,
             items: enrichedItems,
@@ -242,30 +487,60 @@ export function OrderDetail({ orderId }: { orderId: string }) {
             total: apiOrder.total || computedSubtotal + (apiOrder.tax || 0),
           };
         }
+        {
+          const items = orderToSet.items || [];
+          const recomputed = items.reduce(
+            (s: number, i: any) => s + detailLineQty(i) * (effectiveUnitPriceFromDetailItem(i) || Number(i.price) || 0),
+            0
+          );
+          if (recomputed > 0) {
+            const tax = Number(orderToSet.tax ?? 0);
+            if (Number(orderToSet.subtotal) <= 0) {
+              orderToSet = { ...orderToSet, subtotal: recomputed };
+            }
+            if (Number(orderToSet.total) <= 0) {
+              orderToSet = { ...orderToSet, total: recomputed + tax };
+            }
+          }
+        }
         if (cancelled) return;
         setOrder(orderToSet);
         const name = (orderToSet.storeName || '').trim();
-        const looksLikeId = !name || name === orderToSet.storeId || /^[0-9a-f-]{36}$/i.test(name) || /^\d+$/.test(name);
-        if (orderToSet.storeId && looksLikeId) {
-          const store = await storesApi.fetchStoreById(orderToSet.storeId);
-          if (store) {
-            setStoreHasPlanogram(store.hasPlanogram !== false);
-            setInvoiceStoreName(store.name);
-            setInvoiceStoreAddress((store.address || '').trim());
-            const cityRaw = (store.city || '').trim();
+        const sid = String(orderToSet.storeId || '').trim();
+        const orderPgId = String((orderToSet as any).planogramId ?? '').trim();
+        const inferPlanogramFromOrder = () => (orderPgId ? true : null);
+        let resolvedStore: Awaited<ReturnType<typeof storesApi.fetchStoreById>> = null;
+        if (sid) {
+          try {
+            resolvedStore = await storesApi.fetchStoreById(sid);
+          } catch {
+            resolvedStore = null;
+          }
+        }
+        if (resolvedStore) {
+          setStoreHasPlanogram(resolvedStore.hasPlanogram !== false);
+          const looksLikeId = !name || name === sid || /^[0-9a-f-]{36}$/i.test(name) || /^\d+$/.test(name);
+          if (looksLikeId) {
+            setInvoiceStoreName(resolvedStore.name);
+            setInvoiceStoreAddress((resolvedStore.address || '').trim());
+            const cityRaw = (resolvedStore.city || '').trim();
             if (cityRaw && citiesApi.looksLikeCityId(cityRaw)) {
-              const cityName = await citiesApi.getCityNameById(cityRaw);
-              setInvoiceStoreCity(cityName);
+              try {
+                const cityName = await citiesApi.getCityNameById(cityRaw);
+                setInvoiceStoreCity(cityName);
+              } catch {
+                setInvoiceStoreCity(cityRaw);
+              }
             } else {
               setInvoiceStoreCity(cityRaw);
             }
           } else {
-            setStoreHasPlanogram(true);
-            setInvoiceStoreName(name || '—');
+            setInvoiceStoreName(name || resolvedStore.name || orderToSet.storeName || '—');
             setInvoiceStoreAddress(orderToSet.storeAddress || '');
             setInvoiceStoreCity('');
           }
         } else {
+          setStoreHasPlanogram(inferPlanogramFromOrder());
           setInvoiceStoreName(name || orderToSet.storeName || '—');
           setInvoiceStoreAddress(orderToSet.storeAddress || '');
           setInvoiceStoreCity('');
@@ -382,10 +657,17 @@ export function OrderDetail({ orderId }: { orderId: string }) {
     );
   }
 
-  const initialLineUnits = order.items.reduce((s, i) => s + (i.toOrder ?? i.quantity ?? 0), 0);
+  const initialLineUnits = order.items.reduce((s, i) => s + (Number(i.toOrder ?? i.quantity ?? 0) || 0), 0);
   const totalUnits = order.totalUnits ?? initialLineUnits;
+  const subtotalFromItems = order.items.reduce(
+    (s, i) =>
+      s +
+      (Number(i.toOrder ?? i.quantity ?? 0) || 0) *
+        (Number((i as any).price ?? (i as any).unitPrice ?? 0) || 0),
+    0
+  );
   const displayTotal =
-    order.total > 0 ? order.total : order.items.reduce((s, i) => s + (i.toOrder ?? i.quantity ?? 0) * (i.price ?? 0), 0);
+    Number(order.total) > 0 ? Number(order.total) : subtotalFromItems;
 
   /** Líneas tal como en la factura: primero GET factura; si aún no hay, mismo shape desde localStorage. */
   const invoiceLinesFromApi =
@@ -394,6 +676,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
   const linesFromStorageAsInvoice: Array<{
     qty: number;
     code: string;
+    sku?: string;
     description: string;
     price: number;
     amount: number;
@@ -403,25 +686,79 @@ export function OrderDetail({ orderId }: { orderId: string }) {
     const oi = order.items.find((x: any) => String(x.productId) === pid);
     const price =
       Number(row.unitPrice) > 0 ? Number(row.unitPrice) : Number(oi?.price) || 0;
+    const skuVal = String(row.sku || oi?.sku || '').trim();
+    const p = productForInvoiceLine(pid);
+    const fullName = String(p?.name || row.productName || oi?.productName || oi?.sku || '—').trim() || '—';
+    const skuFromProduct = String(p?.commerceSku ?? '').trim();
+    const lineSku = skuVal || skuFromProduct;
     return {
       qty,
-      code: String(row.sku || oi?.sku || pid || '—').trim() || '—',
-      description: String(row.productName || oi?.productName || oi?.sku || '—').trim() || '—',
+      code: String(lineSku || pid || '—').trim() || '—',
+      ...(lineSku ? { sku: lineSku } : {}),
+      description: fullName,
       price,
       amount: qty * price,
+      ...(pid ? { productId: pid } : {}),
     };
   });
+
+  /** Catálogo / factura sin líneas en API: mismo criterio que rellenar totales desde ítems del pedido. */
+  const linesFromOrderAsInvoice: Array<{
+    qty: number;
+    code: string;
+    sku?: string;
+    description: string;
+    price: number;
+    amount: number;
+    productId?: string;
+  }> = (order.items || [])
+    .map((it: any) => {
+      const qty = Number(it.toOrder ?? it.quantity ?? 0) || 0;
+      if (qty <= 0) return null;
+      const pid = String(it.productId ?? it.ProductId ?? '').trim();
+      const sku = String(it.sku ?? it.Sku ?? '').trim();
+      const price = Number(it.price ?? it.unitPrice ?? 0) || 0;
+      const code = String(sku || pid || '—').trim() || '—';
+      return {
+        qty,
+        code,
+        ...(sku ? { sku } : {}),
+        description: String(it.productName ?? '').trim() || '—',
+        price,
+        amount: qty * price,
+        ...(pid ? { productId: pid } : {}),
+      };
+    })
+    .filter((x): x is NonNullable<typeof x> => x != null);
 
   // Si tenemos celdas facturadas guardadas en front, preferirlas sobre la API para NO agrupar productos duplicados.
   const hasDeliveredCellsInFront =
     savedDeliveryItems.some((x) => x && x.row != null && x.col != null) || false;
-  const effectiveInvoiceLines =
-    hasDeliveredCellsInFront ? linesFromStorageAsInvoice : (invoiceLinesFromApi.length > 0 ? invoiceLinesFromApi : linesFromStorageAsInvoice);
+  const effectiveInvoiceLines = hasDeliveredCellsInFront
+    ? linesFromStorageAsInvoice
+    : invoiceLinesFromApi.length > 0
+      ? invoiceLinesFromApi
+      : linesFromStorageAsInvoice.length > 0
+        ? linesFromStorageAsInvoice
+        : linesFromOrderAsInvoice;
+
+  /** Solo factura API o entrega guardada en front — no el fallback del pedido (evita marcar «confirmado» pedidos iniciales). */
+  const hasBillingLinesFromApiOrStorage = hasDeliveredCellsInFront
+    ? linesFromStorageAsInvoice.length > 0
+    : invoiceLinesFromApi.length > 0 || linesFromStorageAsInvoice.length > 0;
 
   const toInvoiceRows = effectiveInvoiceLines.map((line, idx) => {
     const code = String(line.code || '').trim();
     const normCode = code.replace(/-/g, '').toLowerCase();
+    const linePid = String((line as { productId?: string }).productId || '').trim();
     const oi =
+      (linePid
+        ? order.items.find(
+            (x: any) =>
+              String(x.productId ?? x.ProductId ?? '') === linePid ||
+              String(x.productId ?? x.ProductId ?? '') === String(Number(linePid))
+          )
+        : undefined) ||
       order.items.find((x: any) => String(x.sku || '').trim() === code) ||
       order.items.find((x: any) => String(x.productId) === code) ||
       (code.length >= 8
@@ -430,20 +767,48 @@ export function OrderDetail({ orderId }: { orderId: string }) {
             return pid && (pid === normCode || String(x.productId) === code);
           })
         : undefined);
+    const pidEff = linePid || String(oi?.productId || '').trim();
+    const p = productForInvoiceLine(pidEff);
+    const lineSkuRaw = String((line as { sku?: string }).sku || '').trim();
+    const internalCode = String(p?.internalCode ?? '').trim();
+    const pCommerce = String(p?.commerceSku ?? '').trim();
+    /** La API de factura a veces envía el código interno ("01") en `sku`; el SKU real va en el producto. */
+    const lineSkuMisleading =
+      lineSkuRaw &&
+      internalCode &&
+      lineSkuRaw.toLowerCase() === internalCode.toLowerCase();
+    const lineSkuUse = lineSkuMisleading ? '' : lineSkuRaw;
+    const oiSkuRaw = String(oi?.sku ?? '').trim();
+    const oiSkuMisleading =
+      oiSkuRaw &&
+      internalCode &&
+      oiSkuRaw.toLowerCase() === internalCode.toLowerCase();
+    const oiSku = oiSkuMisleading ? '' : oiSkuRaw;
+    const displaySku = pCommerce || lineSkuUse || oiSku;
+    const productName = String(p?.name || line.description || oi?.productName || '—').trim() || '—';
+    const qty = Number(line.qty ?? 0) || 0;
+    const apiPrice = Number(line.price ?? 0) || 0;
+    const apiAmount = Number(line.amount ?? 0) || 0;
+    const oiUnit = Number(oi?.price ?? oi?.unitPrice ?? 0) || 0;
+    let unitPrice = apiPrice > 0 ? apiPrice : oiUnit;
+    let lineTotal = apiAmount > 0 ? apiAmount : qty * unitPrice;
+    if (lineTotal <= 0 && qty > 0 && unitPrice > 0) lineTotal = qty * unitPrice;
+    if (unitPrice <= 0 && qty > 0 && lineTotal > 0) unitPrice = lineTotal / qty;
     return {
       key: `line-${idx}`,
-      productId: String(oi?.productId || (line as any)?.productId || ''),
-      productName: line.description,
-      sku: line.code,
+      productId: pidEff,
+      productName,
+      matchKey: code,
+      displaySku,
       imageUrl: (oi as any)?.imageUrl as string | undefined,
-      qty: line.qty,
-      price: line.price,
-      lineTotal: line.amount,
+      qty,
+      price: unitPrice,
+      lineTotal,
     };
   });
 
   const invoiceRowMatchesOrderItem = (row: (typeof toInvoiceRows)[0], item: any) => {
-    const code = String(row.sku || '').trim();
+    const code = String(row.matchKey || '').trim();
     const norm = code.replace(/-/g, '').toLowerCase();
     const pid = String(item.productId || '').replace(/-/g, '').toLowerCase();
     if (String(item.sku || '').trim() === code) return true;
@@ -453,24 +818,84 @@ export function OrderDetail({ orderId }: { orderId: string }) {
     return false;
   };
 
+  const presentationRowsInvoiceSummary = usePlanogramGridForPresentationSummary
+    ? (planogramSummaryRows.length > 0 ? planogramSummaryRows : presentationRowsOrderSummary)
+    : [];
+  const invoiceSummaryCells = hasDeliveredCellsInFront
+    ? savedDeliveryItems
+        .map((row) => ({
+          productId: String(row.productId ?? '').trim(),
+          quantity: Number(row.quantity ?? 0) || 0,
+        }))
+        .filter((r) => r.productId && r.quantity > 0)
+    : toInvoiceRows
+        .map((row) => ({
+          productId: String(row.productId ?? '').trim(),
+          quantity: Number(row.qty ?? 0) || 0,
+        }))
+        .filter((r) => r.productId && r.quantity > 0);
+
+  const catalogPresentationRowsFromInvoice = !usePlanogramGridForPresentationSummary
+    ? collectPresentationRowsFromOrderLines(invoiceSummaryCells, productMap)
+    : [];
+
   const toInvoiceUnits = toInvoiceRows.reduce((s, r) => s + r.qty, 0);
   const toInvoiceTotal = toInvoiceRows.reduce((s, r) => s + r.lineTotal, 0);
 
   const invoiceItems = toInvoiceRows.map((row) => {
-    const matched = order.items.find((item: any) => invoiceRowMatchesOrderItem(row, item));
-    const familyId = String(
-      matched?.familyId ?? matched?.FamilyId ?? matched?.categoryId ?? matched?.CategoryId ?? ''
+    const rowPid = String(row.productId || '').trim();
+    let matched = rowPid
+      ? (order.items.find(
+          (item: any) =>
+            String(item.productId ?? item.ProductId ?? '').trim() === rowPid ||
+            String(item.productId ?? item.ProductId ?? '').trim() === String(Number(rowPid))
+        ) as any)
+      : undefined;
+    if (!matched) {
+      matched = order.items.find((item: any) => invoiceRowMatchesOrderItem(row, item)) as any;
+    }
+    const resolved = matched ? resolveLineForFamilyMatch(matched) : null;
+    let familyId = String(
+      resolved?.familyId ??
+        resolved?.FamilyId ??
+        resolved?.categoryId ??
+        resolved?.CategoryId ??
+        ''
     ).trim();
-    const categoryName = String(matched?.category ?? '').trim().toLowerCase();
+    const pid = String(row.productId || '').trim();
+    if (!familyId && pid) {
+      familyId =
+        String(familyIdByProductId[pid] ?? familyIdByProductId[String(Number(pid))] ?? '').trim();
+    }
+    const categoryName = String(resolved?.category ?? matched?.category ?? '').trim().toLowerCase();
     const family = familyId
       ? allCategories.find((c) => sameFamilyId(String(c.id), familyId))
       : allCategories.find((c) => String(c.name || '').trim().toLowerCase() === categoryName) || null;
-    const familyName = (family?.name || matched?.category || '').trim() || undefined;
+    const familyName = (family?.name || resolved?.category || matched?.category || '').trim() || undefined;
     const familyCode = String(family?.code || '').trim() || undefined;
     const familySku = String(family?.sku || '').trim() || undefined;
+    const familyShortName = String(family?.shortName || '').trim() || undefined;
+    const familyVolume =
+      family?.volume != null && Number.isFinite(Number(family.volume)) ? Number(family.volume) : undefined;
+    const familyUnit = family?.unit?.trim() || undefined;
+    const p = productForInvoiceLine(pid);
+    let familyInvoiceKey = getPresentationSummaryKey(p);
+    if (!familyInvoiceKey) {
+      familyInvoiceKey = pid ? `pid:${pid}` : `row:${row.matchKey}`;
+    }
+    const volPart = invoiceVolLabel(
+      p?.presentationVolume ?? familyVolume,
+      p?.presentationUnit ?? familyUnit
+    );
+    const presTitle = String(p?.presentationName ?? family?.name ?? '').trim();
+    const presentationLabel =
+      [presTitle, volPart].filter(Boolean).join(' · ') || familyName || undefined;
+    const commercialSku = String(p?.commerceSku || row.displaySku || '').trim();
+    const presentationGenericCode = String(p?.presentationGenericCode ?? '').trim() || undefined;
     return {
       qty: row.qty,
-      code: row.sku,
+      code: row.matchKey,
+      ...(commercialSku ? { sku: commercialSku } : {}),
       description: row.productName,
       price: row.price,
       amount: row.lineTotal,
@@ -478,6 +903,12 @@ export function OrderDetail({ orderId }: { orderId: string }) {
       familyName,
       familyCode,
       familySku,
+      familyShortName,
+      familyVolume,
+      familyUnit,
+      familyInvoiceKey,
+      presentationLabel,
+      presentationGenericCode,
     };
   });
 
@@ -487,7 +918,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
   const orderPhase = (() => {
     if (isCancelled) return 'cancelled';
     if (matchesInvoicedStatus(order?.status)) return 'invoiced';
-    if (effectiveInvoiceLines.length > 0) {
+    if (hasBillingLinesFromApiOrStorage) {
       if (invoiceLinesFromApi.length > 0) return 'invoiced';
       return 'confirmed';
     }
@@ -517,9 +948,9 @@ export function OrderDetail({ orderId }: { orderId: string }) {
   const showBilledOrderBlock = orderPhase !== 'initial' && orderPhase !== 'cancelled';
   const showInvoiceSection = orderPhase !== 'initial' && orderPhase !== 'cancelled';
   /** Sin planograma: misma data en API, pero no se muestra documento ni textos de factura al vendedor. */
-  const showInvoiceDocumentUi = showInvoiceSection && storeHasPlanogram;
+  const showInvoiceDocumentUi = showInvoiceSection && usePlanogramWorkflowUi;
   const showInvoiceRetry =
-    storeHasPlanogram &&
+    usePlanogramWorkflowUi &&
     showInvoiceSection &&
     effectiveInvoiceLines.length === 0 &&
     ((order.invoiceId != null && String(order.invoiceId).trim() !== '') ||
@@ -539,7 +970,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
     const s = (status || '').toLowerCase();
     if (matchesCancelledStatus(status)) return t('cancelled') || 'Cancelado';
     if (matchesInvoicedStatus(status))
-      return storeHasPlanogram ? t('invoiced') || 'Facturado' : t('status_delivered');
+      return usePlanogramWorkflowUi ? t('invoiced') || 'Facturado' : t('status_delivered');
     if (s === 'confirmed' || ['completed', 'complete', 'confirmado'].includes(s)) return t('confirmed');
     return t('initial');
   };
@@ -598,11 +1029,11 @@ export function OrderDetail({ orderId }: { orderId: string }) {
   const podImageUrl = displayPod ? buildPodImageUrl(displayPod) : '';
   const isPodPath = displayPod && !displayPod.startsWith('data:') && !displayPod.startsWith('http');
 
-  const vendorName =
-    String((user as any)?.sellerCode || '').trim() ||
-    [user?.name, user?.lastName].filter(Boolean).join(' ') ||
-    user?.email ||
-    order.vendorNumber ||
+  const vendorCode =
+    String(user?.sellerCode || '').trim() ||
+    String(user?.salesRouteCode || '').trim() ||
+    String(vendorRouteFetched || '').trim() ||
+    String(order.vendorNumber || '').trim() ||
     '';
   const invoiceStoreDisplayName = invoiceStoreName || order.storeName || '';
   const cleanAddress = (addr: string) => (addr || '').replace(/,?\s*[0-9a-f-]{36}\s*$/i, '').replace(/,?\s*\d+\s*$/, '').trim();
@@ -613,7 +1044,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
   );
   const poDisplay = String((order as any)?.po ?? '').trim();
   const headerMainNumber =
-    storeHasPlanogram
+    usePlanogramWorkflowUi
       ? (orderPhase === 'initial' || orderPhase === 'cancelled'
           ? (poDisplay || invoiceNumberDisplay)
           : invoiceNumberDisplay)
@@ -657,14 +1088,23 @@ export function OrderDetail({ orderId }: { orderId: string }) {
     router.push(`/catalog-order/${encodeURIComponent(sid)}?orderId=${encodeURIComponent(orderId)}&mode=confirm`);
   };
 
-  const handleViewPlanogram = () => {
-    router.push(`/view-planogram/${orderId}`);
+  /** Misma lógica que Admin: pedido inicial = cantidades del pedido; facturado = líneas de factura. */
+  const handleViewPlanogramAsOrder = () => {
+    router.push(
+      `/view-planogram/${encodeURIComponent(String(orderId ?? '').trim())}?source=order`
+    );
+  };
+  const handleViewPlanogramAsInvoice = () => {
+    router.push(
+      `/view-planogram/${encodeURIComponent(String(orderId ?? '').trim())}?source=invoice`
+    );
   };
 
   const handleEditInitialOrder = () => {
     const sid = String(order.storeId || '').trim();
     if (!sid) return;
-    if (storeHasPlanogram) {
+    const hasPgOrder = !!(order?.planogramId && String(order.planogramId).trim());
+    if (usePlanogramWorkflowUi && hasPgOrder) {
       router.push(`/planogram/${encodeURIComponent(sid)}?orderId=${encodeURIComponent(orderId)}`);
       return;
     }
@@ -704,7 +1144,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
             </Button>
             <div className="flex-1 min-w-0">
               <h2 className="text-sm text-slate-900 font-medium">
-                {storeHasPlanogram ? `${headerMainNumber || invoiceNumberDisplay}` : t('order_detail')}
+                {usePlanogramWorkflowUi ? `${headerMainNumber || invoiceNumberDisplay}` : t('order_detail')}
               </h2>
               <p className="text-xs text-slate-500 truncate">{invoiceStoreDisplayName || order.storeName} · {new Date(order.date).toLocaleDateString()}</p>
             </div>
@@ -734,7 +1174,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                 <StoreIcon className="h-5 w-5 text-indigo-600" />
               </div>
               <div className="flex-1 min-w-0">
-                {storeHasPlanogram ? (
+                {usePlanogramWorkflowUi ? (
                   <>
                     <p className="text-base font-semibold text-slate-900 mb-1.5">{headerMainNumber || invoiceNumberDisplay}</p>
                     <p className="text-xs text-slate-500 mb-0.5">{t('store')}: {invoiceStoreDisplayName || order.storeName || '—'}</p>
@@ -769,7 +1209,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
               <CardTitle
                 className={`text-sm ${orderPhase === 'invoiced' ? 'text-green-950' : 'text-blue-950'}`}
               >
-                {storeHasPlanogram
+                {usePlanogramWorkflowUi
                   ? orderPhase === 'invoiced'
                     ? t('order_invoiced_title')
                     : t('order_confirmed_title')
@@ -777,7 +1217,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                     ? t('order_delivered_title')
                     : t('order_confirmed_title')}
               </CardTitle>
-              {storeHasPlanogram ? (
+              {usePlanogramWorkflowUi ? (
                 <>
                   <p className="text-xs text-slate-600 mt-1">
                     <span className="font-medium text-slate-700">{t('invoice')}</span>:{' '}
@@ -810,11 +1250,11 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                   </Button>
                 </div>
               )}
-              {storeHasPlanogram && (
+              {showPhysicalPlanogramButton && (
                 <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3">
                   <Button
                     type="button"
-                    onClick={handleViewPlanogram}
+                    onClick={handleViewPlanogramAsInvoice}
                     className="w-full bg-indigo-600 hover:bg-indigo-700"
                   >
                     <Grid3x3 className="h-4 w-4 mr-2" />
@@ -853,7 +1293,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                         <span className="text-slate-900">{new Date(order.deliveryDate).toLocaleDateString()}</span>
                       </div>
                     )}
-                    {storeHasPlanogram && orderPhase === 'invoiced' && invoiceFromApi?.date && (
+                    {usePlanogramWorkflowUi && orderPhase === 'invoiced' && invoiceFromApi?.date && (
                       <div className="flex justify-between">
                         <span className="text-slate-500">{t('invoice_date_row')}</span>
                         <span className="text-slate-900">
@@ -866,7 +1306,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                   </div>
                   <div>
                     <p className="text-xs font-medium text-slate-700 mb-2">
-                      {storeHasPlanogram ? t('order_billed_items') : t('order_items_summary')}
+                      {usePlanogramWorkflowUi ? t('order_billed_items') : t('order_items_summary')}
                     </p>
                     <div className="divide-y divide-slate-100 rounded-lg border border-slate-200 bg-white overflow-hidden">
                       {toInvoiceRows.map((row) => (
@@ -893,7 +1333,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                             )}
                             <div className="flex-1 min-w-0">
                               <p className="text-sm text-slate-900 mb-1">{row.productName}</p>
-                              <p className="text-xs text-slate-500 mb-2">{row.sku}</p>
+                              <p className="text-xs text-slate-500 mb-2">{row.displaySku || row.matchKey}</p>
                               <div className="flex items-center gap-2">
                                 <Badge variant="outline" className="bg-indigo-50 text-indigo-700 border-indigo-200 text-xs">
                                   {row.qty} {t('units')}
@@ -907,7 +1347,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                       ))}
                     </div>
                   </div>
-                  {allCategories.length > 0 && (
+                  {usePlanogramGridForPresentationSummary && presentationRowsInvoiceSummary.length > 0 ? (
                     <div>
                       <p className="text-xs font-medium text-slate-700 mb-2">{t('family_col') || 'Family'}</p>
                       <table className="w-full min-w-[280px] overflow-hidden rounded-lg border border-slate-200 text-sm shadow-sm bg-white">
@@ -922,29 +1362,62 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
-                          {[...allCategories]
-                            .sort((a, b) => a.name.localeCompare(b.name))
-                            .map((cat) => {
-                              const pcs = toInvoiceRows.reduce((sum, row) => {
-                                const oi = order.items.find((item: any) => invoiceRowMatchesOrderItem(row, item));
-                                if (!oi) return sum;
-                                return orderItemMatchesFamily(oi as any, cat, allCategories) ? sum + row.qty : sum;
-                              }, 0);
-                              return (
-                                <tr key={cat.id} className="bg-slate-50/80">
-                                  <td className="px-3 py-2.5 align-top">
-                                    <FamilySummaryCell cat={cat} />
-                                  </td>
-                                  <td className="px-3 py-2.5 text-left align-middle bg-white">
-                                    <span className="tabular-nums text-slate-900">{pcs}</span>
-                                  </td>
-                                </tr>
-                              );
-                            })}
+                          {presentationRowsInvoiceSummary.map((prow) => {
+                            const pcs = sumQtyForPresentation(
+                              invoiceSummaryCells,
+                              productMap,
+                              prow.presentationId
+                            );
+                            return (
+                              <tr key={prow.presentationId} className="bg-slate-50/80">
+                                <td className="px-3 py-2.5 align-top">
+                                  <PresentationSummaryCell row={prow} />
+                                </td>
+                                <td className="px-3 py-2.5 text-left align-middle bg-white">
+                                  <span className="tabular-nums text-slate-900">{pcs}</span>
+                                </td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
-                  )}
+                  ) : catalogPresentationRowsFromInvoice.length > 0 ? (
+                    <div>
+                      <p className="text-xs font-medium text-slate-700 mb-2">{t('family_col') || 'Family'}</p>
+                      <table className="w-full min-w-[280px] overflow-hidden rounded-lg border border-slate-200 text-sm shadow-sm bg-white">
+                        <thead>
+                          <tr className="bg-slate-100">
+                            <th className="border-b border-slate-200 px-3 py-2 text-left text-xs font-medium text-slate-600">
+                              {t('family_col') || 'Family'}
+                            </th>
+                            <th className="w-14 border-b border-slate-200 px-3 py-2 text-left text-xs font-medium text-slate-600">
+                              {t('pcs_col') || 'Pcs'}
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {catalogPresentationRowsFromInvoice.map((prow) => {
+                            const pcs = sumQtyForPresentation(
+                              invoiceSummaryCells,
+                              productMap,
+                              prow.presentationId
+                            );
+                            return (
+                              <tr key={prow.presentationId} className="bg-slate-50/80">
+                                <td className="px-3 py-2.5 align-top">
+                                  <PresentationSummaryCell row={prow} />
+                                </td>
+                                <td className="px-3 py-2.5 text-left align-middle bg-white">
+                                  <span className="tabular-nums text-slate-900">{pcs}</span>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : null}
                 </>
               ) : (
                 <p className="text-sm text-slate-600 py-2">{t('invoice_no_items')}</p>
@@ -964,20 +1437,20 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                   <button
                     type="button"
                     className={`px-3 py-1.5 text-xs font-medium ${
-                      invoiceViewMode === 'product' ? 'bg-slate-800 text-white' : 'bg-white text-slate-700'
-                    }`}
-                    onClick={() => setInvoiceViewMode('product')}
-                  >
-                    {t('invoice_tab_products')}
-                  </button>
-                  <button
-                    type="button"
-                    className={`px-3 py-1.5 text-xs font-medium border-l border-slate-200 ${
                       invoiceViewMode === 'family' ? 'bg-slate-800 text-white' : 'bg-white text-slate-700'
                     }`}
                     onClick={() => setInvoiceViewMode('family')}
                   >
                     {t('invoice_tab_families')}
+                  </button>
+                  <button
+                    type="button"
+                    className={`px-3 py-1.5 text-xs font-medium border-l border-slate-200 ${
+                      invoiceViewMode === 'product' ? 'bg-slate-800 text-white' : 'bg-white text-slate-700'
+                    }`}
+                    onClick={() => setInvoiceViewMode('product')}
+                  >
+                    {t('invoice_tab_products')}
                   </button>
                 </div>
                 {showInvoiceRetry && (
@@ -990,6 +1463,15 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                     {loadingInvoice ? t('loading') + '...' : (t('retry') || 'Reintentar factura')}
                   </Button>
                 )}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handlePrintInvoice}
+                  title={t('download_invoice')}
+                >
+                  <Download className="h-4 w-4 mr-2" />
+                  {t('download_invoice')}
+                </Button>
                 <Button
                   variant="outline"
                   size="sm"
@@ -1013,7 +1495,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
             <Invoice
               invoiceNumber={String(invoiceNumberDisplay ?? '—')}
               date={typeof invoiceDate === 'string' && invoiceDate.includes(',') ? invoiceDate : new Date(invoiceDate).toLocaleDateString('en-US')}
-              vendorName={vendorName}
+              vendorCode={vendorCode || '—'}
               storeName={invoiceStoreDisplayName}
               storeAddress={invoiceStoreDisplayAddress}
               items={invoiceItems}
@@ -1089,7 +1571,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
               </div>
             ) : (
               <p className="text-xs text-slate-500">
-                {storeHasPlanogram
+                {usePlanogramWorkflowUi
                   ? t('pod_already_invoiced') || 'Este pedido ya está facturado y no requiere cargar POD aquí.'
                   : t('pod_complete_catalog') ||
                     'El comprobante y el pedido ya están registrados.'}
@@ -1181,11 +1663,11 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                     </div>
                   )}
                 </div>
-                {storeHasPlanogram && (
+                {showPhysicalPlanogramButton && (
                   <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3">
                     <Button
                       type="button"
-                      onClick={handleViewPlanogram}
+                      onClick={handleViewPlanogramAsOrder}
                       className="w-full bg-indigo-600 hover:bg-indigo-700"
                     >
                       <Grid3x3 className="h-4 w-4 mr-2" />
@@ -1197,8 +1679,8 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                   <p className="text-xs font-medium text-slate-700 mb-2">{t('order_initial_items')}</p>
                   <div className="divide-y divide-slate-100 rounded-lg border border-slate-200 bg-white overflow-hidden">
                     {order.items.map((item: any, index: number) => {
-                      const quantity = item.toOrder || item.quantity || 0;
-                      const price = item.price ?? 0;
+                      const quantity = Number(item.toOrder ?? item.quantity ?? 0) || 0;
+                      const price = Number(item.price ?? item.unitPrice ?? 0) || 0;
                       const imgUrl = item.imageUrl;
                       return (
                         <div key={index} className="p-3">
@@ -1239,7 +1721,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                     })}
                   </div>
                 </div>
-                {allCategories.length > 0 && (
+                {usePlanogramGridForPresentationSummary && presentationRowsOrderSummary.length > 0 ? (
                   <div>
                     <p className="text-xs font-medium text-slate-700 mb-2">{t('family_col') || 'Family'}</p>
                     <table className="w-full min-w-[280px] overflow-hidden rounded-lg border border-slate-200 text-sm shadow-sm bg-white">
@@ -1254,34 +1736,57 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
-                        {[...allCategories]
-                          .sort((a, b) => a.name.localeCompare(b.name))
-                          .map((cat) => {
-                            const pcs = (order.items || []).reduce(
-                              (sum: number, item: any) => {
-                                const qty = item.toOrder ?? item.quantity ?? 0;
-                                return orderItemMatchesFamily(item, cat, allCategories) ? sum + qty : sum;
-                              },
-                              0
-                            );
-                            return (
-                              <tr key={cat.id} className="bg-slate-50/80">
-                                <td className="px-3 py-2.5 align-top">
-                                  <FamilySummaryCell cat={cat} />
-                                </td>
-                                <td className="px-3 py-2.5 text-left align-middle bg-white">
-                                  <span className="tabular-nums text-slate-900">{pcs}</span>
-                                </td>
-                              </tr>
-                            );
-                          })}
+                        {presentationRowsOrderSummary.map((prow) => {
+                          const pcs = sumQtyForPresentation(order.items || [], productMap, prow.presentationId);
+                          return (
+                            <tr key={prow.presentationId} className="bg-slate-50/80">
+                              <td className="px-3 py-2.5 align-top">
+                                <PresentationSummaryCell row={prow} />
+                              </td>
+                              <td className="px-3 py-2.5 text-left align-middle bg-white">
+                                <span className="tabular-nums text-slate-900">{pcs}</span>
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
-                )}
+                ) : catalogPresentationRowsFromOrder.length > 0 ? (
+                  <div>
+                    <p className="text-xs font-medium text-slate-700 mb-2">{t('family_col') || 'Family'}</p>
+                    <table className="w-full min-w-[280px] overflow-hidden rounded-lg border border-slate-200 text-sm shadow-sm bg-white">
+                      <thead>
+                        <tr className="bg-slate-100">
+                          <th className="border-b border-slate-200 px-3 py-2 text-left text-xs font-medium text-slate-600">
+                            {t('family_col') || 'Family'}
+                          </th>
+                          <th className="w-14 border-b border-slate-200 px-3 py-2 text-left text-xs font-medium text-slate-600">
+                            {t('pcs_col') || 'Pcs'}
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {catalogPresentationRowsFromOrder.map((prow) => {
+                          const pcs = sumQtyForPresentation(order.items || [], productMap, prow.presentationId);
+                          return (
+                            <tr key={prow.presentationId} className="bg-slate-50/80">
+                              <td className="px-3 py-2.5 align-top">
+                                <PresentationSummaryCell row={prow} />
+                              </td>
+                              <td className="px-3 py-2.5 text-left align-middle bg-white">
+                                <span className="tabular-nums text-slate-900">{pcs}</span>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : null}
                 {orderPhase === 'initial' && (
                   order.storeId ? (
-                    storeHasPlanogram ? (
+                    usePlanogramGridForPresentationSummary ? (
                       <Button
                         onClick={handleStartInvoiceFromPlanogram}
                         className="w-full bg-blue-600 hover:bg-blue-700"
@@ -1351,7 +1856,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
               </div>
             ) : (
               <p className="text-xs text-slate-500">
-                {storeHasPlanogram
+                {usePlanogramWorkflowUi
                   ? 'Revisa el pedido inicial y luego usa el botón de facturar.'
                   : 'Revisa el pedido inicial y luego confirma el pedido.'}
               </p>

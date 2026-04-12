@@ -7,13 +7,15 @@ export function FamilySummaryCell({
   labels?: any;
 }) {
   const familyCode = (cat.code || '').trim();
+  const familyName = (cat.name || '').trim();
   const displayShort = (cat.shortName || '').trim();
+  const displayName = familyName || displayShort;
 
-  const hasAny = !!(familyCode || displayShort);
+  const hasAny = !!(familyCode || displayName);
 
   if (!hasAny) return <div className="text-sm text-slate-400">—</div>;
 
-  const line = [familyCode, displayShort].filter(Boolean).join(' · ');
+  const line = [familyCode, displayName].filter(Boolean).join(' · ');
 
   return (
     <div className="min-w-0 py-1">

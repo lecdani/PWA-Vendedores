@@ -31,6 +31,12 @@ export function Profile() {
   const [isEditing, setIsEditing] = useState(false);
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileError, setProfileError] = useState('');
+  const [profileFieldErrors, setProfileFieldErrors] = useState<{
+    name?: string;
+    lastName?: string;
+    email?: string;
+    phone?: string;
+  }>({});
   const [userData, setUserData] = useState({
     name: '',
     lastName: '',
@@ -46,6 +52,11 @@ export function Profile() {
   });
   const [passwordSaving, setPasswordSaving] = useState(false);
   const [passwordError, setPasswordError] = useState('');
+  const [passwordFieldErrors, setPasswordFieldErrors] = useState<{
+    currentPassword?: string;
+    newPassword?: string;
+    confirmPassword?: string;
+  }>({});
   const [passwordSuccess, setPasswordSuccess] = useState(false);
   const [showPasswords, setShowPasswords] = useState({ current: false, new: false, confirm: false });
 
@@ -61,6 +72,7 @@ export function Profile() {
 
   const startEditing = () => {
     setProfileError('');
+    setProfileFieldErrors({});
     setUserData({
       name: user?.name ?? '',
       lastName: user?.lastName ?? '',
@@ -72,12 +84,40 @@ export function Profile() {
 
   const handleSave = async () => {
     setProfileError('');
+    setProfileFieldErrors({});
     if (!userData.name?.trim()) {
-      setProfileError('El nombre es obligatorio.');
+      setProfileFieldErrors({ name: 'El nombre es obligatorio.' });
+      return;
+    }
+    if (!userData.lastName?.trim()) {
+      setProfileFieldErrors({ lastName: 'El apellido es obligatorio.' });
       return;
     }
     if (!userData.email?.trim()) {
-      setProfileError('El correo es obligatorio.');
+      setProfileFieldErrors({ email: 'El correo es obligatorio.' });
+      return;
+    }
+    if (!/\S+@\S+\.\S+/.test(userData.email.trim())) {
+      setProfileFieldErrors({ email: 'Ingresa un correo valido.' });
+      return;
+    }
+    const token = typeof window !== 'undefined' ? (localStorage.getItem('auth_token') ?? '') : '';
+    const uniqueness = await authApi.validateProfileUniqueness({
+      token,
+      email: userData.email.trim(),
+      phone: userData.phone.trim(),
+      currentUserId: user?.id ?? null,
+      currentEmail: user?.email ?? null,
+    });
+    if (uniqueness.emailDuplicate || uniqueness.phoneDuplicate) {
+      setProfileFieldErrors({
+        email: uniqueness.emailDuplicate
+          ? 'Este correo ya esta registrado por otro usuario. Usa otro correo.'
+          : undefined,
+        phone: uniqueness.phoneDuplicate
+          ? 'Este telefono ya esta registrado por otro usuario. Usa otro numero o deja el campo vacio.'
+          : undefined,
+      });
       return;
     }
     const idToUse =
@@ -108,9 +148,17 @@ export function Profile() {
         phone: userData.phone.trim() || undefined
       });
       setIsEditing(false);
+      setProfileFieldErrors({});
     } catch (err: unknown) {
       const msg = (err as { message?: string })?.message ?? 'Error al guardar. Intenta de nuevo.';
-      setProfileError(msg);
+      const lower = String(msg).toLowerCase();
+      if (lower.includes('correo') || lower.includes('email')) {
+        setProfileFieldErrors((prev) => ({ ...prev, email: msg }));
+      } else if (lower.includes('telefono') || lower.includes('teléfono') || lower.includes('phone')) {
+        setProfileFieldErrors((prev) => ({ ...prev, phone: msg }));
+      } else {
+        setProfileError(msg);
+      }
     } finally {
       setProfileSaving(false);
     }
@@ -118,20 +166,26 @@ export function Profile() {
 
   const handleChangePassword = async () => {
     setPasswordError('');
+    setPasswordFieldErrors({});
     const current = passwordData.currentPassword.trim();
     const newPass = passwordData.newPassword.trim();
     const confirm = passwordData.confirmPassword.trim();
 
     if (!current) {
-      setPasswordError('Escribe tu contraseña actual para continuar.');
+      setPasswordFieldErrors({ currentPassword: 'Escribe tu contraseña actual para continuar.' });
       return;
     }
     if (!newPass || !confirm) {
-      setPasswordError('Completa la nueva contraseña y repítela en el siguiente campo.');
+      setPasswordFieldErrors({
+        newPassword: !newPass ? 'Completa la nueva contraseña.' : undefined,
+        confirmPassword: !confirm ? 'Confirma la nueva contraseña.' : undefined,
+      });
       return;
     }
     if (newPass !== confirm) {
-      setPasswordError('La nueva contraseña y la confirmación no coinciden. Verifica que sean iguales.');
+      setPasswordFieldErrors({
+        confirmPassword: 'La nueva contraseña y la confirmación no coinciden. Verifica que sean iguales.',
+      });
       return;
     }
     const strength = validatePasswordStrength(newPass);
@@ -139,18 +193,19 @@ export function Profile() {
       const reqMsg = strength.feedback?.length
         ? `La nueva contraseña debe cumplir: ${strength.feedback.join('. ')}`
         : 'La nueva contraseña no cumple los requisitos de seguridad.';
-      setPasswordError(reqMsg);
+      setPasswordFieldErrors({ newPassword: reqMsg });
       return;
     }
 
     const email = user?.email ?? '';
     if (!email) {
-      setPasswordError('No se pudo identificar tu cuenta. Cierra sesión e inicia de nuevo.');
+      setPasswordFieldErrors({ currentPassword: 'No se pudo identificar tu cuenta. Cierra sesión e inicia de nuevo.' });
       return;
     }
 
     setPasswordSaving(true);
     setPasswordError('');
+    setPasswordFieldErrors({});
     try {
       await authApi.changePassword({
         email,
@@ -175,7 +230,11 @@ export function Profile() {
       const displayMsg = isWrongCurrent
         ? 'La contraseña actual no es correcta. Revísala e inténtalo de nuevo.'
         : (msg || 'No se pudo cambiar la contraseña. Inténtalo más tarde.');
-      setPasswordError(displayMsg);
+      if (isWrongCurrent) {
+        setPasswordFieldErrors({ currentPassword: displayMsg });
+      } else {
+        setPasswordError(displayMsg);
+      }
     } finally {
       setPasswordSaving(false);
     }
@@ -216,12 +275,18 @@ export function Profile() {
             <div>
               <Label className="text-xs text-slate-500 mb-1">{t('first_name')}</Label>
               {isEditing ? (
-                <Input
-                  value={userData.name}
-                  onChange={(e) => setUserData({ ...userData, name: e.target.value })}
-                  className="h-9"
-                  placeholder={t('first_name')}
-                />
+                <>
+                  <Input
+                    value={userData.name}
+                    onChange={(e) => {
+                      setUserData({ ...userData, name: e.target.value });
+                      if (profileFieldErrors.name) setProfileFieldErrors((prev) => ({ ...prev, name: undefined }));
+                    }}
+                    className={`h-9 ${profileFieldErrors.name ? 'border-red-500' : ''}`}
+                    placeholder={t('first_name')}
+                  />
+                  {profileFieldErrors.name && <p className="text-xs text-red-600 mt-1">{profileFieldErrors.name}</p>}
+                </>
               ) : (
                 <div className="flex items-center gap-2 py-2">
                   <User className="h-4 w-4 text-slate-400" />
@@ -232,12 +297,18 @@ export function Profile() {
             <div>
               <Label className="text-xs text-slate-500 mb-1">{t('last_name')}</Label>
               {isEditing ? (
-                <Input
-                  value={userData.lastName}
-                  onChange={(e) => setUserData({ ...userData, lastName: e.target.value })}
-                  className="h-9"
-                  placeholder={t('last_name')}
-                />
+                <>
+                  <Input
+                    value={userData.lastName}
+                    onChange={(e) => {
+                      setUserData({ ...userData, lastName: e.target.value });
+                      if (profileFieldErrors.lastName) setProfileFieldErrors((prev) => ({ ...prev, lastName: undefined }));
+                    }}
+                    className={`h-9 ${profileFieldErrors.lastName ? 'border-red-500' : ''}`}
+                    placeholder={t('last_name')}
+                  />
+                  {profileFieldErrors.lastName && <p className="text-xs text-red-600 mt-1">{profileFieldErrors.lastName}</p>}
+                </>
               ) : (
                 <div className="flex items-center gap-2 py-2">
                   <User className="h-4 w-4 text-slate-400" />
@@ -253,10 +324,14 @@ export function Profile() {
                   <Input
                     type="email"
                     value={userData.email}
-                    onChange={(e) => setUserData({ ...userData, email: e.target.value })}
-                    className="h-9"
+                    onChange={(e) => {
+                      setUserData({ ...userData, email: e.target.value });
+                      if (profileFieldErrors.email) setProfileFieldErrors((prev) => ({ ...prev, email: undefined }));
+                    }}
+                    className={`h-9 ${profileFieldErrors.email ? 'border-red-500' : ''}`}
                     placeholder="correo@ejemplo.com"
                   />
+                  {profileFieldErrors.email && <p className="text-xs text-red-600 mt-1">{profileFieldErrors.email}</p>}
                   <p className="text-xs text-slate-500 mt-1">Puedes dejarlo igual o cambiarlo; solo no puede estar en uso por otra cuenta.</p>
                 </>
               ) : (
@@ -270,13 +345,19 @@ export function Profile() {
             <div>
               <Label className="text-xs text-slate-500 mb-1">{t('phone')}</Label>
               {isEditing ? (
-                <Input
-                  type="tel"
-                  value={userData.phone}
-                  onChange={(e) => setUserData({ ...userData, phone: e.target.value })}
-                  className="h-9"
-                  placeholder={t('phone')}
-                />
+                <>
+                  <Input
+                    type="tel"
+                    value={userData.phone}
+                    onChange={(e) => {
+                      setUserData({ ...userData, phone: e.target.value });
+                      if (profileFieldErrors.phone) setProfileFieldErrors((prev) => ({ ...prev, phone: undefined }));
+                    }}
+                    className={`h-9 ${profileFieldErrors.phone ? 'border-red-500' : ''}`}
+                    placeholder={t('phone')}
+                  />
+                  {profileFieldErrors.phone && <p className="text-xs text-red-600 mt-1">{profileFieldErrors.phone}</p>}
+                </>
               ) : (
                 <div className="flex items-center gap-2 py-2">
                   <Phone className="h-4 w-4 text-slate-400" />
@@ -366,11 +447,16 @@ export function Profile() {
               <div>
                 <Label className="text-slate-700">Contraseña actual</Label>
                 <div className="relative mt-1">
-                  <Input
+                <Input
                     type={showPasswords.current ? 'text' : 'password'}
                     value={passwordData.currentPassword}
-                    onChange={(e) => setPasswordData((p) => ({ ...p, currentPassword: e.target.value }))}
-                    className="pr-9 h-10"
+                  onChange={(e) => {
+                    setPasswordData((p) => ({ ...p, currentPassword: e.target.value }));
+                    if (passwordFieldErrors.currentPassword) {
+                      setPasswordFieldErrors((prev) => ({ ...prev, currentPassword: undefined }));
+                    }
+                  }}
+                  className={`pr-9 h-10 ${passwordFieldErrors.currentPassword ? 'border-red-500' : ''}`}
                     placeholder="Contraseña actual"
                     disabled={passwordSaving}
                   />
@@ -378,6 +464,9 @@ export function Profile() {
                     {showPasswords.current ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                   </button>
                 </div>
+                {passwordFieldErrors.currentPassword && (
+                  <p className="text-xs text-red-600 mt-1">{passwordFieldErrors.currentPassword}</p>
+                )}
               </div>
               <div>
                 <Label className="text-slate-700">Nueva contraseña</Label>
@@ -385,8 +474,13 @@ export function Profile() {
                   <Input
                     type={showPasswords.new ? 'text' : 'password'}
                     value={passwordData.newPassword}
-                    onChange={(e) => setPasswordData((p) => ({ ...p, newPassword: e.target.value }))}
-                    className="pr-9 h-10"
+                    onChange={(e) => {
+                      setPasswordData((p) => ({ ...p, newPassword: e.target.value }));
+                      if (passwordFieldErrors.newPassword) {
+                        setPasswordFieldErrors((prev) => ({ ...prev, newPassword: undefined }));
+                      }
+                    }}
+                    className={`pr-9 h-10 ${passwordFieldErrors.newPassword ? 'border-red-500' : ''}`}
                     placeholder="Nueva contraseña"
                     disabled={passwordSaving}
                   />
@@ -394,6 +488,9 @@ export function Profile() {
                     {showPasswords.new ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                   </button>
                 </div>
+                {passwordFieldErrors.newPassword && (
+                  <p className="text-xs text-red-600 mt-1">{passwordFieldErrors.newPassword}</p>
+                )}
               </div>
               <div>
                 <Label className="text-slate-700">Confirmar nueva contraseña</Label>
@@ -401,8 +498,13 @@ export function Profile() {
                   <Input
                     type={showPasswords.confirm ? 'text' : 'password'}
                     value={passwordData.confirmPassword}
-                    onChange={(e) => setPasswordData((p) => ({ ...p, confirmPassword: e.target.value }))}
-                    className="pr-9 h-10"
+                    onChange={(e) => {
+                      setPasswordData((p) => ({ ...p, confirmPassword: e.target.value }));
+                      if (passwordFieldErrors.confirmPassword) {
+                        setPasswordFieldErrors((prev) => ({ ...prev, confirmPassword: undefined }));
+                      }
+                    }}
+                    className={`pr-9 h-10 ${passwordFieldErrors.confirmPassword ? 'border-red-500' : ''}`}
                     placeholder="Repetir contraseña"
                     disabled={passwordSaving}
                   />
@@ -410,6 +512,9 @@ export function Profile() {
                     {showPasswords.confirm ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                   </button>
                 </div>
+                {passwordFieldErrors.confirmPassword && (
+                  <p className="text-xs text-red-600 mt-1">{passwordFieldErrors.confirmPassword}</p>
+                )}
               </div>
             </div>
 

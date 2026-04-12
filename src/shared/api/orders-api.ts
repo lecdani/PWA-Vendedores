@@ -23,6 +23,23 @@ function orderByIdCacheKey(orderId: string): string {
   return `orders.byId.${String(orderId).trim()}`;
 }
 
+/** Importes desde API: number, "12.34", "12,34", espacios. */
+function parseMoney(v: unknown): number {
+  if (v == null || v === '') return 0;
+  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;
+  const s = String(v).trim().replace(/\s/g, '').replace(/,/g, '.');
+  const n = Number(s);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function parseQtyValue(v: unknown): number {
+  if (v == null || v === '') return 0;
+  if (typeof v === 'number') return Number.isFinite(v) && v > 0 ? v : 0;
+  const s = String(v).trim().replace(/,/g, '.');
+  const n = Number(s);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
 /** Ids recién creados en API que aún no salen en GET listado: no purgar de caché hasta que el servidor los liste. */
 const ORDERS_PENDING_LIST_SYNC_KEY = 'orders.meta.pendingListSync';
 
@@ -187,6 +204,7 @@ function buildOrderForUIFromCreateInput(
     salespersonId: sp,
     po: input.po,
     planogramId: input.planogramId,
+    orderOrigin: input.planogramId ? 'planogram' : 'catalog',
     ...(inv ? { invoiceId: inv } : {}),
   };
 }
@@ -232,6 +250,7 @@ async function persistUpdatedOrderToOfflineCaches(orderId: string | number, inpu
     date: existing?.date ?? next.date,
     status: existing?.status ?? next.status,
     salespersonId: next.salespersonId ?? existing?.salespersonId,
+    orderOrigin: next.orderOrigin ?? existing?.orderOrigin,
   };
   await cacheOrder(merged);
   const uid = sp;
@@ -851,39 +870,76 @@ function getPoFromInvoice(raw: any): string {
   return '';
 }
 
+/** Precio unitario explícito (sin usar `price` plano: a veces es importe de línea). */
+function detailUnitPriceRaw(d: any): number {
+  const chain = [
+    d?.unitPrice,
+    d?.UnitPrice,
+    d?.unit_price,
+    d?.Unit_Price,
+    d?.salePrice,
+    d?.SalePrice,
+    d?.listPrice,
+    d?.ListPrice,
+    d?.listUnitPrice,
+    d?.ListUnitPrice,
+    d?.productPrice,
+    d?.ProductPrice,
+    d?.unitAmount,
+    d?.UnitAmount,
+    d?.rate,
+    d?.Rate,
+    d?.product?.unitPrice,
+    d?.Product?.UnitPrice,
+    d?.product?.price,
+    d?.Product?.Price,
+    d?.product?.salePrice,
+    d?.Product?.SalePrice,
+  ];
+  for (const c of chain) {
+    const n = parseMoney(c);
+    if (n > 0) return n;
+  }
+  return 0;
+}
+
 /** Extrae cantidad de un registro de detalle (diversos nombres del backend). */
 function detailQuantity(d: any): number {
-  const n = Number(
-    d?.quantity ??
-      d?.Quantity ??
-      d?.qty ??
-      d?.Qty ??
-      d?.invoiceQty ??
-      d?.InvoiceQty ??
-      d?.deliveredQuantity ??
-      d?.DeliveredQuantity ??
-      d?.deliveredQty ??
-      d?.DeliveredQty ??
-      d?.units ??
-      d?.Units ??
-      d?.pcs ??
-      d?.Pcs ??
-      d?.lineQuantity ??
-      d?.LineQuantity ??
-      d?.orderQuantity ??
-      d?.OrderQuantity ??
-      d?.count ??
-      d?.Count ??
-      d?.toOrder ??
-      d?.ToOrder ??
-      0
-  );
-  if (Number.isFinite(n) && n > 0) return n;
-  /** Algunos backends solo envían subtotal + precio unitario */
-  const sub = Number(
+  const keys = [
+    d?.quantity,
+    d?.Quantity,
+    d?.qty,
+    d?.Qty,
+    d?.invoiceQty,
+    d?.InvoiceQty,
+    d?.deliveredQuantity,
+    d?.DeliveredQuantity,
+    d?.deliveredQty,
+    d?.DeliveredQty,
+    d?.units,
+    d?.Units,
+    d?.pcs,
+    d?.Pcs,
+    d?.lineQuantity,
+    d?.LineQuantity,
+    d?.orderQuantity,
+    d?.OrderQuantity,
+    d?.orderedQuantity,
+    d?.OrderedQuantity,
+    d?.count,
+    d?.Count,
+    d?.toOrder,
+    d?.ToOrder,
+  ];
+  for (const k of keys) {
+    const n = parseQtyValue(k);
+    if (n > 0) return n;
+  }
+  /** Solo subtotal + P.U. (sin cantidad explícita) */
+  const sub = parseMoney(
     d?.subtotal ?? d?.Subtotal ?? d?.SubTotal ?? d?.amount ?? d?.Amount ?? d?.lineTotal ?? d?.LineTotal ?? 0
   );
-  const up = Number(d?.unitPrice ?? d?.UnitPrice ?? d?.price ?? d?.Price ?? d?.unit_price ?? 0);
+  const up = detailUnitPriceRaw(d) || parseMoney(d?.price ?? d?.Price);
   if (sub > 0 && up > 0) {
     const q = sub / up;
     if (Number.isFinite(q) && q > 0) return Math.round(q * 1000) / 1000;
@@ -891,27 +947,53 @@ function detailQuantity(d: any): number {
   return 0;
 }
 
-/** Extrae subtotal/importe de un registro de detalle (diversos nombres del backend). */
+/**
+ * Importe de línea (extendido). Evita tratar `price` como total si ya hay unitPrice y cantidad.
+ * `detailSubtotal` se mantiene como nombre por compatibilidad con el resto del archivo.
+ */
 function detailSubtotal(d: any): number {
-  const n = Number(
-    d?.subtotal ??
-      d?.Subtotal ??
-      d?.SubTotal ??
-      d?.lineTotal ??
-      d?.LineTotal ??
-      d?.amount ??
-      d?.Amount ??
-      d?.total ??
-      d?.Total ??
-      d?.price ??
-      d?.Price ??
-      0
-  );
-  if (Number.isFinite(n) && n > 0) return n;
+  const lineAmountKeys = [
+    'extendedPrice',
+    'ExtendedPrice',
+    'extendedAmount',
+    'ExtendedAmount',
+    'lineAmount',
+    'LineAmount',
+    'lineTotal',
+    'LineTotal',
+    'totalLineAmount',
+    'TotalLineAmount',
+    'grossLineAmount',
+    'GrossLineAmount',
+    'netLineTotal',
+    'NetLineTotal',
+    'amount',
+    'Amount',
+    'subtotal',
+    'Subtotal',
+    'SubTotal',
+    'grossAmount',
+    'GrossAmount',
+    'netAmount',
+    'NetAmount',
+    'value',
+    'Value',
+    'totalPrice',
+    'TotalPrice',
+    'linePrice',
+    'LinePrice',
+  ];
+  for (const k of lineAmountKeys) {
+    const n = parseMoney((d as any)?.[k]);
+    if (n > 0) return n;
+  }
   const qty = detailQuantity(d);
-  const up = Number(d?.unitPrice ?? d?.UnitPrice ?? 0);
+  const up = detailUnitPriceRaw(d);
   if (qty > 0 && up > 0) return qty * up;
-  return Number.isFinite(n) ? n : 0;
+  const pOnly = parseMoney(d?.price ?? d?.Price);
+  if (qty > 0 && pOnly > 0) return pOnly * qty;
+  if (pOnly > 0) return pOnly;
+  return 0;
 }
 
 /** Extrae productId de un registro de detalle. */
@@ -1014,7 +1096,7 @@ function findBestInvoiceDetailsArray(raw: any): any[] {
 function deepFindLongestLineItemArray(node: any, depth: number, maxDepth: number): any[] {
   if (node == null || depth > maxDepth) return [];
   if (Array.isArray(node)) {
-    if (node.length > 0 && isLineLikeRecord(node[0])) return node;
+    if (node.length > 0 && isInvoiceLineCandidate(node[0])) return node;
     return [];
   }
   if (typeof node !== 'object') return [];
@@ -1062,7 +1144,9 @@ const ORDER_OR_INVOICE_LINE_KEYS = [
 /** Líneas de pedido desde cualquier forma habitual del GET /orders/orders/{id}. */
 function extractOrderDetailsFromOrderPayload(payload: any): any[] {
   if (payload == null) return [];
-  if (Array.isArray(payload)) return payload.length > 0 && isLineLikeRecord(payload[0]) ? payload : [];
+  if (Array.isArray(payload)) {
+    return payload.length > 0 && isInvoiceLineCandidate(payload[0]) ? payload : [];
+  }
   const layers = peelInvoiceLayers(payload);
   const seenLayers = new Set<any>();
   for (const layer of layers) {
@@ -1078,8 +1162,10 @@ function extractOrderDetailsFromOrderPayload(payload: any): any[] {
     if (Array.isArray(v) && v.length) return v;
   }
   const extracted = extractFirstArray(payload);
-  if (Array.isArray(extracted) && extracted.length > 0 && isLineLikeRecord(extracted[0])) return extracted;
-  return deepFindLongestLineItemArray(payload, 0, 8);
+  if (Array.isArray(extracted) && extracted.length > 0 && isInvoiceLineCandidate(extracted[0])) return extracted;
+  const deep = deepFindLongestLineItemArray(payload, 0, 8);
+  if (deep.length) return deep;
+  return findBestInvoiceDetailsArray(payload);
 }
 
 /** Normaliza lista de detalles desde respuesta de API (array o objeto con data/items/details/invoiceDetails). */
@@ -1183,6 +1269,11 @@ export interface OrderForUI {
   po?: string;
    /** ID del planograma asociado al pedido (tabla orders.planogram_id). */
   planogramId?: string;
+  /**
+   * Origen en la PWA: catálogo vs grilla de planograma.
+   * El backend puede rellenar `planogramId` también en catálogo; esto evita mezclar el resumen por rejilla completa.
+   */
+  orderOrigin?: 'catalog' | 'planogram';
   /** Nº de líneas de factura (relleno en historial cuando se muestran datos de factura). */
   invoiceLineCount?: number;
 }
@@ -1481,6 +1572,36 @@ async function putOrderStatusUntilOk(
   return { ok: false };
 }
 
+function parseOrderOriginFromRaw(raw: any): 'catalog' | 'planogram' | undefined {
+  const v =
+    raw?.orderOrigin ??
+    raw?.OrderOrigin ??
+    raw?.orderSource ??
+    raw?.OrderSource ??
+    raw?.creationSource ??
+    raw?.CreationSource ??
+    raw?.orderType ??
+    raw?.OrderType;
+  const s = String(v ?? '').trim().toLowerCase();
+  if (!s) return undefined;
+  if (['catalog', 'catálogo', 'catalogo', 'cat'].includes(s)) return 'catalog';
+  if (['planogram', 'planograma', 'grid', 'layout'].includes(s)) return 'planogram';
+  return undefined;
+}
+
+/** Si el GET no trae `orderOrigin`, conservar el valor guardado al crear el pedido en la PWA. */
+async function mergeCachedOrderOriginOntoResult(result: OrderForUI, hintIds: string[]): Promise<OrderForUI> {
+  for (const id of hintIds) {
+    const idTrim = String(id ?? '').trim();
+    if (!idTrim) continue;
+    const prev = await resolveOrderFromOfflineCaches(idTrim);
+    if (prev?.orderOrigin && !result.orderOrigin) {
+      return { ...result, orderOrigin: prev.orderOrigin };
+    }
+  }
+  return result;
+}
+
 function mapRawOrderToUI(raw: any, details: any[] = []): OrderForUI {
   const id = String(raw?.orderId ?? raw?.OrderId ?? raw?.id ?? raw?.Id ?? '');
   const date = raw?.createdAt ?? raw?.CreatedAt ?? raw?.date ?? raw?.Date ?? new Date().toISOString();
@@ -1492,14 +1613,21 @@ function mapRawOrderToUI(raw: any, details: any[] = []): OrderForUI {
       '') as string;
   const items = (details || []).map((d: any) => {
     const qty = detailQuantity(d);
-    const subtotalRow = Number(d?.subtotal ?? d?.Subtotal ?? d?.SubTotal ?? 0);
+    const lineAmt = detailSubtotal(d);
+    const upRaw = detailUnitPriceRaw(d);
+    const pFlat = parseMoney(d?.price ?? d?.Price);
     const unitPrice =
-      Number(d?.unitPrice ?? d?.UnitPrice ?? d?.price ?? d?.Price ?? d?.product?.unitPrice ?? d?.Product?.UnitPrice ?? 0) ||
-      (qty > 0 && subtotalRow > 0 ? subtotalRow / qty : 0);
+      upRaw > 0
+        ? upRaw
+        : qty > 0 && lineAmt > 0
+          ? lineAmt / qty
+          : pFlat > 0
+            ? pFlat
+            : 0;
     return {
-      productId: String(d?.productId ?? d?.ProductId ?? ''),
+      productId: detailProductId(d),
       productName: String(d?.productName ?? d?.ProductName ?? d?.product?.name ?? d?.Product?.Name ?? d?.description ?? d?.Description ?? d?.name ?? d?.Name ?? '').trim(),
-      sku: String(d?.sku ?? d?.Sku ?? d?.product?.sku ?? d?.Product?.Sku ?? ''),
+      sku: String(d?.sku ?? d?.Sku ?? d?.product?.sku ?? d?.Product?.Sku ?? d?.product?.code ?? d?.Product?.Code ?? ''),
       toOrder: qty,
       quantity: qty,
       price: unitPrice,
@@ -1509,10 +1637,11 @@ function mapRawOrderToUI(raw: any, details: any[] = []): OrderForUI {
   });
   const rawTotal =
     raw?.total ?? raw?.Total ?? raw?.orderTotal ?? raw?.OrderTotal ?? raw?.amount ?? raw?.Amount
+    ?? raw?.totalAmount ?? raw?.TotalAmount ?? raw?.grandTotal ?? raw?.GrandTotal
     ?? raw?.invoice?.total ?? raw?.Invoice?.Total ?? raw?.invoice?.amount ?? raw?.Invoice?.Amount;
-  let total = Number(rawTotal ?? 0);
-  let subtotal = Number(raw?.subtotal ?? raw?.Subtotal ?? raw?.SubTotal ?? total);
-  const tax = Number(raw?.tax ?? raw?.Tax ?? 0);
+  let total = parseMoney(rawTotal);
+  let subtotal = parseMoney(raw?.subtotal ?? raw?.Subtotal ?? raw?.SubTotal ?? total);
+  const tax = parseMoney(raw?.tax ?? raw?.Tax ?? 0);
   const totalUnits = items.reduce((s, i) => s + (i.quantity ?? i.toOrder ?? 0), 0);
   const computedSubtotal = items.reduce((s, i) => s + (i.quantity ?? i.toOrder ?? 0) * (i.price || 0), 0);
   if (subtotal === 0 && computedSubtotal > 0) subtotal = computedSubtotal;
@@ -1548,6 +1677,7 @@ function mapRawOrderToUI(raw: any, details: any[] = []): OrderForUI {
     salespersonId: salespersonIdRaw != null ? String(salespersonIdRaw) : undefined,
     po: raw?.po ?? raw?.Po ?? raw?.purchaseOrder ?? raw?.PurchaseOrder ?? raw?.PO ?? undefined,
     planogramId: (planogramIdRaw || '').trim() || undefined,
+    orderOrigin: parseOrderOriginFromRaw(raw),
   };
 }
 
@@ -1957,7 +2087,7 @@ export const ordersApi = {
     date: string;
     total: number;
     storeId?: string;
-    items: Array<{ qty: number; code: string; description: string; price: number; amount: number }>;
+    items: Array<{ qty: number; code: string; sku?: string; description: string; price: number; amount: number }>;
     /** Ruta del POD desde la factura (ej. /imagenes/dani.png) para pedidos viejos */
     pod?: string;
     /** PO devuelto por la factura (si el backend lo envía aquí). */
@@ -2029,27 +2159,47 @@ export const ordersApi = {
         const qty = detailQuantity(d);
         let amount = detailSubtotal(d);
         let price = qty > 0 ? amount / qty : 0;
-        const pid = detailProductId(d);
-        const orderItem = orderItemsByProduct.get(pid);
+        const pid = String(detailProductId(d) || '').trim();
+        const orderItem = pid ? orderItemsByProduct.get(pid) : undefined;
+        let product: Awaited<ReturnType<typeof productsApi.getById>> | null = null;
+        if (pid) {
+          try {
+            product = await productsApi.getById(pid);
+          } catch {
+            product = null;
+          }
+        }
+        const detailSku = String(d?.sku ?? d?.Sku ?? d?.product?.sku ?? d?.Product?.Sku ?? '').trim();
         let description =
           (detailProductName(d) || orderItem?.productName || orderItem?.sku || '').trim();
-        if (!description && pid) {
-          const product = await productsApi.getById(pid);
+        if (!description && product) {
           description = (product?.name || product?.sku || '').trim();
         }
         description = description || '—';
-        const code = (orderItem?.sku || (d?.sku ?? d?.Sku ?? d?.product?.sku ?? d?.Product?.Sku ?? pid)) || '—';
+        const orderSku = String(orderItem?.sku || '').trim();
+        const productCommerceSku = String((product as { commerceSku?: string })?.commerceSku ?? '').trim();
+        const productCode = String(product?.code || '').trim();
+        const skuField = orderSku || detailSku || productCommerceSku || undefined;
+        const code = orderSku || detailSku || productCode || (pid ? pid : '') || '—';
         if ((price === 0 || amount === 0) && pid) {
           let latestPrice = orderItem?.price ?? 0;
           if (!(latestPrice > 0)) {
-            const product = await productsApi.getById(pid);
-            const familyId = String(product?.familyId ?? product?.categoryId ?? '').trim();
-            latestPrice = familyId ? await histpricesApi.getLatest(familyId) : 0;
+            const p = product ?? (await productsApi.getById(pid).catch(() => null));
+            const presId = String(p?.presentationId ?? '').trim();
+            latestPrice = presId ? await histpricesApi.getLatest(presId) : 0;
           }
           price = latestPrice;
           amount = qty * price;
         }
-        return { qty, code, description, price, amount };
+        return {
+          qty,
+          code,
+          ...(skuField ? { sku: skuField } : {}),
+          description,
+          price,
+          amount,
+          ...(pid ? { productId: pid } : {}),
+        };
       })
     );
 
@@ -2338,6 +2488,17 @@ export const ordersApi = {
           ? await db.localOrders.where('userId').equals(String(userId)).toArray()
           : [];
         const localOrders = localDrafts.map((d) => d.data as OrderForUI);
+        // Con servidor disponible, la fuente de verdad es backend.
+        // No reinyectar pedidos remotos desde caché vieja para evitar "fantasmas".
+        if (online && serverListOk) {
+          const withPodRaw = await Promise.all(
+            localOrders.map((o) => mergeOfflinePendingPodIntoOrder(o, String(o.id)))
+          );
+          const withPod = withPodRaw.filter((o): o is OrderForUI => o != null);
+          await cacheSet(userOrdersCacheKey(userId), withPod);
+          await Promise.all(withPod.map((o) => cacheOrder(o)));
+          return withPod;
+        }
         const cachedOrders = (await cacheGet<OrderForUI[]>(userOrdersCacheKey(userId))) ?? [];
         const fromById = await listCachedOrdersFromByIdForSalesperson(String(userId));
         const mergedEmptyList = mergeOrdersUnique(mergeOrdersUnique(cachedOrders, fromById), localOrders);
@@ -2345,10 +2506,6 @@ export const ordersApi = {
           mergedEmptyList.map((o) => mergeOfflinePendingPodIntoOrder(o, String(o.id)))
         );
         const withPod = withPodRaw.filter((o): o is OrderForUI => o != null);
-        if (online && serverListOk) {
-          await cacheSet(userOrdersCacheKey(userId), withPod);
-          return withPod;
-        }
         return withPod;
       }
       const cachedOnly = (await cacheGet<OrderForUI[]>(userOrdersCacheKey(userId))) ?? [];
@@ -2420,7 +2577,7 @@ export const ordersApi = {
           next = { ...next, invoiceNumber: String(invNoHuman).trim() };
         }
         if (invHasPod) {
-          const podFromInv = getPodFromInvoice(inv);
+        const podFromInv = getPodFromInvoice(inv);
           next = { ...next, podImageUrl: next.podImageUrl || podFromInv, podFileName: next.podFileName || podFromInv };
         }
         if (Number(next.total) <= 0) {
@@ -2454,7 +2611,7 @@ export const ordersApi = {
         conFacturaSinPod.map(async (idx) => {
           const invRaw = await getInvoiceById(String(result[idx].invoiceId!));
           if (invoiceHasPodEvidence(invRaw)) {
-            const pod = getPodFromInvoice(invRaw);
+          const pod = getPodFromInvoice(invRaw);
             result[idx] = { ...result[idx], podImageUrl: pod, podFileName: pod, podUploaded: true };
           } else if (invRaw != null) {
             result[idx] = { ...result[idx], podUploaded: false };
@@ -2471,7 +2628,8 @@ export const ordersApi = {
         ? await db.localOrders.where('userId').equals(String(userId)).toArray()
         : [];
       const prevList = (await cacheGet<OrderForUI[]>(userOrdersCacheKey(userId))) ?? [];
-      let mergedList = mergeOrdersUnique(result, prevList);
+      // Con listado servidor válido, evitar reintroducir basura desde cache previa.
+      let mergedList = online && serverListOk ? [...result] : mergeOrdersUnique(result, prevList);
       if (localDrafts.length) {
         const localById = new Map(localDrafts.map((d) => [String(d.id), d.data as OrderForUI]));
         const merged = [...mergedList];
@@ -2554,12 +2712,20 @@ export const ordersApi = {
             mappedRaw?.data ?? mappedRaw?.order ?? mappedRaw?.Order ?? mappedRaw?.value ?? mappedRaw?.result ?? mappedRaw;
           let mappedDetails = extractOrderDetailsFromOrderPayload(mappedRaw);
           if (!mappedDetails.length) mappedDetails = extractOrderDetailsFromOrderPayload(mappedOrderRaw);
+          const mappedScanned = findBestInvoiceDetailsArray(mappedRaw);
+          if (mappedScanned.length > mappedDetails.length) mappedDetails = mappedScanned;
           const mappedResult = mapRawOrderToUI(mappedOrderRaw, mappedDetails);
           if (mappedResult?.items?.length) {
             mappedResult.items = await enrichOrderItemsWithProductNames(mappedResult.items);
           }
-          await cacheOrder(mappedResult);
-          return await withPendingPod(mappedResult);
+          const mappedWithOrigin = await mergeCachedOrderOriginOntoResult(mappedResult, [
+            orderId,
+            String(mappedResult.id),
+            String(mappedResult.backendOrderId ?? ''),
+            mappedId,
+          ]);
+          await cacheOrder(mappedWithOrigin);
+          return await withPendingPod(mappedWithOrigin);
         }
         if (!mappedRaw && cachedMapped && !browserOnline) {
           return await withPendingPod(cachedMapped);
@@ -2596,6 +2762,8 @@ export const ordersApi = {
     const orderRaw = raw?.data ?? raw?.order ?? raw?.Order ?? raw?.value ?? raw?.result ?? raw;
     let details = extractOrderDetailsFromOrderPayload(raw);
     if (!details.length) details = extractOrderDetailsFromOrderPayload(orderRaw);
+    const scannedLines = findBestInvoiceDetailsArray(raw);
+    if (scannedLines.length > details.length) details = scannedLines;
     const backendId = orderRaw?.orderId ?? orderRaw?.OrderId ?? orderRaw?.id ?? orderRaw?.Id ?? raw?.orderId ?? raw?.OrderId ?? raw?.id ?? raw?.Id ?? orderId;
     if (!details.length && backendId !== orderId) {
       const altDetails = await this.getOrderDetailsByOrderIdRaw(String(backendId));
@@ -2666,7 +2834,14 @@ export const ordersApi = {
       }
     }
     if (typeof window !== 'undefined' && result) {
-      await cacheOrder(result);
+      const resultWithOrigin = await mergeCachedOrderOriginOntoResult(result, [
+        orderId,
+        String(result.id),
+        String(result.backendOrderId ?? ''),
+        String(backendId ?? ''),
+      ]);
+      await cacheOrder(resultWithOrigin);
+      return await withPendingPod(resultWithOrigin);
     }
     return await withPendingPod(result);
   },

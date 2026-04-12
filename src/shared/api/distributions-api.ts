@@ -8,28 +8,93 @@ export interface DistributionForUI {
   productId: string;
   xPosition: number; // fila (row) 0-9
   yPosition: number; // columna (col) 0-9
+  /** Si el backend marca false, no debe pintarse en la grilla (igual que en Admin). */
+  isActive?: boolean;
 }
 
 function getPositionFromRaw(raw: any): { x: number; y: number } {
   const pos = raw?.position ?? raw?.Position;
   const xFromPos = pos?.x ?? pos?.X ?? pos?.row ?? pos?.Row;
   const yFromPos = pos?.y ?? pos?.Y ?? pos?.column ?? pos?.Column ?? pos?.col ?? pos?.Col;
-  const apiX = raw?.Xposition ?? raw?.xposition ?? raw?.xPosition ?? raw?.XPosition ?? raw?.row ?? raw?.Row ?? xFromPos ?? 0;
-  const apiY = raw?.Yposition ?? raw?.yposition ?? raw?.yPosition ?? raw?.YPosition ?? raw?.column ?? raw?.Column ?? raw?.col ?? raw?.Col ?? yFromPos ?? 0;
+  // Mismas claves que Admin: algunos backends envían solo x/y o snake_case.
+  const apiX =
+    raw?.Xposition ??
+    raw?.xposition ??
+    raw?.xPosition ??
+    raw?.XPosition ??
+    raw?.x_position ??
+    raw?.X_POSITION ??
+    raw?.x ??
+    raw?.row ??
+    raw?.Row ??
+    xFromPos ??
+    0;
+  const apiY =
+    raw?.Yposition ??
+    raw?.yposition ??
+    raw?.yPosition ??
+    raw?.YPosition ??
+    raw?.y_position ??
+    raw?.Y_POSITION ??
+    raw?.y ??
+    raw?.column ??
+    raw?.Column ??
+    raw?.col ??
+    raw?.Col ??
+    yFromPos ??
+    0;
   const x = Math.max(0, Math.min(9, Math.floor(isNaN(Number(apiX)) ? 0 : Number(apiX))));
   const y = Math.max(0, Math.min(9, Math.floor(isNaN(Number(apiY)) ? 0 : Number(apiY))));
   return { x, y };
 }
 
+function resolveProductIdFromRaw(item: any, raw: any): string {
+  const nested = item?.product ?? item?.Product ?? raw?.product ?? raw?.Product;
+  const fromNested =
+    nested != null
+      ? String(
+          nested.id ??
+            nested.Id ??
+            nested.productId ??
+            nested.ProductId ??
+            nested.product_id ??
+            ''
+        ).trim()
+      : '';
+  const flat = String(
+    item?.productId ??
+      item?.ProductId ??
+      item?.product_id ??
+      item?.PRODUCT_ID ??
+      raw?.productId ??
+      raw?.ProductId ??
+      raw?.product_id ??
+      raw?.PRODUCT_ID ??
+      ''
+  ).trim();
+  return flat || fromNested;
+}
+
 function toDistribution(raw: any): DistributionForUI {
   const item = raw?.distribution ?? raw?.Distribution ?? raw;
-  const { x: xPosition, y: yPosition } = getPositionFromRaw(item ?? raw);
+  const base = item ?? raw;
+  const { x: xPosition, y: yPosition } = getPositionFromRaw(base);
+  const isActiveRaw = base?.isActive ?? base?.IsActive ?? base?.active ?? base?.Active;
+  const isActive = typeof isActiveRaw === 'boolean' ? isActiveRaw : true;
   return {
     id: String(item?.id ?? item?.Id ?? raw?.id ?? raw?.Id ?? ''),
-    planogramId: String(item?.planogramId ?? item?.PlanogramId ?? raw?.planogramId ?? raw?.PlanogramId ?? ''),
-    productId: String(item?.productId ?? item?.ProductId ?? raw?.productId ?? raw?.ProductId ?? ''),
+    planogramId: String(
+      item?.planogramId ??
+        item?.PlanogramId ??
+        item?.planogram_id ??
+        raw?.planogramId ??
+        raw?.PlanogramId ??
+        ''
+    ),
+    productId: resolveProductIdFromRaw(item, raw),
     xPosition,
     yPosition,
+    isActive,
   };
 }
 
@@ -61,7 +126,9 @@ export const distributionsApi = {
     try {
       const res = await apiClient.get<any>(`/distributions/distributions/planogram/${encodeURIComponent(planogramId)}`);
       const items = normalizeDistributionList(res);
-      const mapped = items.map((item: any) => toDistribution(item));
+      const mapped = items
+        .map((item: any) => toDistribution(item))
+        .filter((d) => d.isActive !== false && String(d.productId).trim());
       await cacheSet(key, mapped);
       return mapped;
     } catch (error) {
@@ -76,7 +143,10 @@ export const distributionsApi = {
             toDistribution(item)
           );
           const filtered = allItems.filter(
-            (d) => String(d.planogramId).trim() === String(planogramId).trim()
+            (d) =>
+              String(d.planogramId).trim() === String(planogramId).trim() &&
+              d.isActive !== false &&
+              String(d.productId).trim()
           );
           await cacheSet(key, filtered);
           return filtered;

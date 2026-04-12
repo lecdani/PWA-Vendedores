@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { ArrowLeft, Send, Grid3x3, Loader2, Package } from 'lucide-react';
 import { useLanguage } from '@/shared/i18n/language-provider';
@@ -8,8 +8,8 @@ import { Button } from '@/shared/ui/button';
 import { Badge } from '@/shared/ui/badge';
 import { planogramsApi } from '@/shared/api/planograms-api';
 import { distributionsApi } from '@/shared/api/distributions-api';
-import { productsApi, getProductImageUrl } from '@/shared/api/products-api';
-import { categoriesApi, CategoryForUI } from '@/shared/api/categories-api';
+import { productsApi, getProductImageUrl, getProductShortDisplayName, type ProductForUI } from '@/shared/api/products-api';
+import { categoriesApi } from '@/shared/api/categories-api';
 import { histpricesApi } from '@/shared/api/histprices-api';
 import { ordersApi } from '@/shared/api/orders-api';
 import {
@@ -18,8 +18,11 @@ import {
 } from '@/shared/offline/offline-orders';
 import { storesApi } from '@/shared/api/stores-api';
 import { setOrderReviewPayload } from '@/shared/order-review-payload';
-import { orderItemMatchesFamily } from '@/shared/utils/order-item-matches-family';
-import { FamilySummaryCell } from '@/shared/components/family-summary-cell';
+import {
+  collectPresentationRowsFromGrid,
+  sumQtyForPresentation,
+} from '@/shared/utils/planogram-presentation-summary';
+import { PresentationSummaryCell } from '@/shared/components/presentation-summary-cell';
 
 export interface ProductPosition {
   row: number;
@@ -31,6 +34,7 @@ export interface ProductPosition {
   category: string;
   /** Id de familia para agrupar en resumen sin depender solo del nombre. */
   familyId?: string;
+  presentationId?: string;
   idealStock: number;
   currentStock: number;
   toOrder: number;
@@ -72,7 +76,7 @@ export function Planogram({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [planogramId, setPlanogramId] = useState<string | null>(null);
   const [planogramName, setPlanogramName] = useState<string | null>(null);
-  const [allCategories, setAllCategories] = useState<CategoryForUI[]>([]);
+  const [productMap, setProductMap] = useState<Map<string, ProductForUI>>(() => new Map());
   const [limitError, setLimitError] = useState<string | null>(null);
   const [flowError, setFlowError] = useState<string | null>(null);
   const [continuing, setContinuing] = useState(false);
@@ -86,6 +90,11 @@ export function Planogram({
 
   const MAX_QTY_PER_PRODUCT_PLANOGRAM = 10;
   const isInvoiceFlow = mode === 'invoice' && !!orderId;
+
+  const presentationSummaryRows = useMemo(
+    () => collectPresentationRowsFromGrid(planogramData, productMap),
+    [planogramData, productMap]
+  );
 
   const cellKey = (row: number, col: number) => `${row}-${col}`;
 
@@ -134,11 +143,10 @@ export function Planogram({
         if (!activePlan) {
           setLoadError(t('no_active_planogram') || 'No hay planograma activo. Activa uno en el Admin.');
           setPlanogramData([]);
+          setProductMap(new Map());
           setLoading(false);
           return;
         }
-
-        setAllCategories(categories);
         setPlanogramId(activePlan.id);
         setPlanogramName(activePlan.name ?? null);
         const distList = await distributionsApi.getByPlanogram(activePlan.id);
@@ -150,14 +158,15 @@ export function Planogram({
           categoryById.set(String(Number(c.id)), c.name);
         });
 
-        const productMap = new Map<string, (typeof products)[0]>();
+        const pmap = new Map<string, ProductForUI>();
         products.forEach((p) => {
-          productMap.set(p.id, p);
+          pmap.set(p.id, p);
           const numId = Number(p.id);
-          if (!Number.isNaN(numId)) productMap.set(String(numId), p);
+          if (!Number.isNaN(numId)) pmap.set(String(numId), p);
         });
+        if (mounted) setProductMap(new Map(pmap));
         const getProduct = (productId: string) =>
-          productMap.get(productId) ?? productMap.get(String(Number(productId)));
+          pmap.get(productId) ?? pmap.get(String(Number(productId)));
 
         const resolveCategory = (p: (typeof products)[0] | null): string => {
           if (!p) return '';
@@ -170,18 +179,18 @@ export function Planogram({
           return name;
         };
 
-        const uniqueFamilyIds = [
+        const uniquePresentationIds = [
           ...new Set(
             distList
               .map((d) => {
                 const p = getProduct(d.productId);
-                return String(p?.familyId ?? p?.categoryId ?? '').trim();
+                return String(p?.presentationId ?? '').trim();
               })
               .filter(Boolean)
-          )
+          ),
         ];
         const priceResults = await Promise.all(
-          uniqueFamilyIds.map(async (id) => ({ id, price: await histpricesApi.getLatest(id) }))
+          uniquePresentationIds.map(async (id) => ({ id, price: await histpricesApi.getLatest(id) }))
         );
         const priceMap = new Map(priceResults.map((r) => [r.id, r.price]));
 
@@ -193,15 +202,17 @@ export function Planogram({
             const product = dist ? getProduct(dist.productId) : null;
             const productIdStr = product?.id ?? '';
             const familyId = String(product?.familyId ?? product?.categoryId ?? '').trim();
-            const price = resolveUnitPrice(product, familyId ? priceMap.get(familyId) : undefined);
+            const presId = String(product?.presentationId ?? '').trim();
+            const price = resolveUnitPrice(product, presId ? priceMap.get(presId) : undefined);
             grid.push({
               row,
               col,
               productId: productIdStr,
-              productName: product?.name ?? '',
-              sku: product?.code ?? product?.sku ?? '',
+              productName: product ? getProductShortDisplayName(product) : '',
+              sku: String(product?.code ?? '').trim() || '—',
               category: resolveCategory(product ?? null),
               familyId: familyId || undefined,
+              presentationId: product?.presentationId,
               idealStock: 0,
               currentStock: 0,
               toOrder: 0,
@@ -329,7 +340,10 @@ export function Planogram({
           setPlanogramData(grid);
         }
       } catch (e) {
-        if (mounted) setLoadError((e as Error)?.message ?? 'Error al cargar planograma');
+        if (mounted) {
+          setLoadError((e as Error)?.message ?? 'Error al cargar planograma');
+          setProductMap(new Map());
+        }
       } finally {
         if (mounted) setLoading(false);
       }
@@ -394,6 +408,7 @@ export function Planogram({
       planogramId: planogramId ?? undefined,
       planogramData,
       editOrderId: orderId ?? undefined,
+      source: 'planogram',
     });
     router.push('/order-review');
   };
@@ -598,14 +613,14 @@ export function Planogram({
                         </div>
                       )}
                       <span
-                        className="text-[11px] leading-snug font-semibold text-slate-900 truncate max-w-[52px] tabular-nums"
+                        className="text-[10px] leading-snug font-semibold text-slate-900 truncate max-w-[52px] tabular-nums"
                         title={item.sku}
                       >
                         {item.sku || '—'}
                       </span>
                     </div>
                     <span
-                      className="text-[8px] leading-tight font-medium text-slate-600 break-words line-clamp-2 w-full mt-0.5"
+                      className="text-[7px] leading-tight font-medium text-slate-600 break-words line-clamp-2 w-full mt-0.5"
                       title={item.productName}
                     >
                       {item.productName || ''}
@@ -662,8 +677,8 @@ export function Planogram({
           </span>
         </div>
 
-        {/* Resumen por categoría: todas las categorías registradas, con Pcs (0 o suma del pedido) */}
-        {allCategories.length > 0 && (
+        {/* Resumen “Familias” = presentaciones que tienen producto en esta grilla */}
+        {presentationSummaryRows.length > 0 && (
           <div className="mt-6 overflow-x-auto">
             <table className="w-full min-w-[300px] overflow-hidden rounded-lg border border-slate-200 text-sm shadow-sm">
               <thead>
@@ -677,23 +692,19 @@ export function Planogram({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 bg-white">
-                {[...allCategories]
-                  .sort((a, b) => a.name.localeCompare(b.name))
-                  .map((cat) => {
-                    const pcs = planogramData
-                      .filter((item) => orderItemMatchesFamily(item, cat, allCategories))
-                      .reduce((sum, item) => sum + item.toOrder, 0);
-                    return (
-                      <tr key={cat.id} className="bg-slate-50/80">
-                        <td className="px-3 py-2.5 align-top">
-                          <FamilySummaryCell cat={cat} />
-                        </td>
-                        <td className="px-3 py-2.5 text-left align-middle bg-white">
-                          <span className="tabular-nums text-slate-900">{pcs}</span>
-                        </td>
-                      </tr>
-                    );
-                  })}
+                {presentationSummaryRows.map((row) => {
+                  const pcs = sumQtyForPresentation(planogramData, productMap, row.presentationId);
+                  return (
+                    <tr key={row.presentationId} className="bg-slate-50/80">
+                      <td className="px-3 py-2.5 align-top">
+                        <PresentationSummaryCell row={row} />
+                      </td>
+                      <td className="px-3 py-2.5 text-left align-middle bg-white">
+                        <span className="tabular-nums text-slate-900">{pcs}</span>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

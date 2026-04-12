@@ -33,6 +33,30 @@ function shouldFetchInvoiceForHistory(order: OrderForUI): boolean {
   return ['invoiced', 'facturado', 'invoice', 'billed', 'facturada', 'delivered'].includes(s);
 }
 
+function orderLineQty(item: any): number {
+  return Number(item?.quantity ?? item?.toOrder ?? 0) || 0;
+}
+
+/** Precio unitario ya en ítem o derivado de importe de línea (API a veces no envía `price`). */
+function effectiveOrderItemUnitPrice(item: any): number {
+  const qty = orderLineQty(item);
+  const p =
+    Number(item?.price ?? item?.unitPrice ?? item?.UnitPrice ?? item?.Price ?? 0) || 0;
+  if (p > 0) return p;
+  const amt =
+    Number(
+      item?.amount ??
+        item?.Amount ??
+        item?.lineTotal ??
+        item?.LineTotal ??
+        item?.subtotal ??
+        item?.Subtotal ??
+        0
+    ) || 0;
+  if (qty > 0 && amt > 0) return amt / qty;
+  return 0;
+}
+
 export function OrderHistory() {
   const { t } = useLanguage();
   const router = useRouter();
@@ -61,36 +85,51 @@ export function OrderHistory() {
       setLoading(true);
       if (user?.id) {
         const apiOrders = await ordersApi.getOrdersByUser(user.id);
-        const productFamilyCache = new Map<string, string>();
+        const productPresentationCache = new Map<string, string>();
         const enriched = await Promise.all(
           apiOrders.map(async (order): Promise<OrderForUI> => {
             let o: OrderForUI = order;
-            if (Number(order.total) <= 0 && order.items?.length) {
+            const itemsNeedUnitPrice =
+              order.items?.some(
+                (item: any) => orderLineQty(item) > 0 && effectiveOrderItemUnitPrice(item) <= 0
+              ) ?? false;
+            const headerTotalWeak =
+              Number(order.total) <= 0 && Number(order.subtotal ?? 0) <= 0;
+            if (order.items?.length && (itemsNeedUnitPrice || headerTotalWeak)) {
               const items = await Promise.all(
                 order.items.map(async (item: any) => {
-                  let price = Number(item.price) || 0;
+                  let price = effectiveOrderItemUnitPrice(item);
                   if (!price) {
-                    const inlineFamilyId = String(
-                      item?.familyId ?? item?.FamilyId ?? item?.categoryId ?? item?.CategoryId ?? ''
+                    const inlinePresId = String(
+                      item?.presentationId ?? item?.PresentationId ?? ''
                     ).trim();
-                    let familyId = inlineFamilyId;
-                    if (!familyId && item?.productId) {
-                      const productId = String(item.productId).trim();
-                      familyId = productFamilyCache.get(productId) || '';
-                      if (!familyId) {
+                    let presId = inlinePresId;
+                    const productId = String(item?.productId ?? item?.ProductId ?? '').trim();
+                    if (!presId && productId) {
+                      presId = productPresentationCache.get(productId) || '';
+                      if (!presId) {
                         const product = await productsApi.getById(productId);
-                        familyId = String(product?.familyId ?? product?.categoryId ?? '').trim();
-                        if (familyId) productFamilyCache.set(productId, familyId);
+                        presId = String(product?.presentationId ?? '').trim();
+                        if (presId) productPresentationCache.set(productId, presId);
                       }
                     }
-                    if (familyId) price = await histpricesApi.getLatest(familyId);
+                    if (presId) price = await histpricesApi.getLatest(presId);
                   }
                   return { ...item, price };
                 })
               );
-              const subtotal = items.reduce((s, i) => s + (i.quantity ?? i.toOrder ?? 0) * (i.price ?? 0), 0);
-              const total = subtotal + Number(order.tax ?? 0);
-              o = { ...order, items, subtotal, total };
+              const subtotal = items.reduce(
+                (s, i) => s + orderLineQty(i) * (Number((i as any).price) || 0),
+                0
+              );
+              const tax = Number(order.tax ?? 0);
+              const total = subtotal > 0 ? subtotal + tax : Number(order.total) || 0;
+              o = {
+                ...order,
+                items,
+                subtotal: subtotal > 0 ? subtotal : order.subtotal,
+                total: total > 0 ? total : order.total,
+              };
             }
             return o;
           })
@@ -264,7 +303,11 @@ export function OrderHistory() {
             const titleMain = displayPo ? `${displayPo}` : displayStoreName;
             const subtitleStore = displayPo ? displayStoreName : null;
             const computedTotalFromOrderItems = order.items?.length
-              ? order.items.reduce((s: number, i: any) => s + (i.quantity ?? i.toOrder ?? 0) * (Number(i.price) || 0), 0)
+              ? order.items.reduce(
+                  (s: number, i: any) =>
+                    s + orderLineQty(i) * (effectiveOrderItemUnitPrice(i) || Number(i.price) || 0),
+                  0
+                )
               : 0;
             const totalDisplay =
               Number(order.total) > 0
@@ -282,7 +325,6 @@ export function OrderHistory() {
               order.totalUnits != null && order.totalUnits > 0
                 ? order.totalUnits
                 : order.items?.reduce((s: number, i: any) => s + (i.quantity ?? i.toOrder ?? 0), 0) ?? 0;
-            const hasTotal = totalDisplay > 0;
             return (
               <Card
                 key={order.id}
@@ -321,7 +363,7 @@ export function OrderHistory() {
                     <div className="text-right shrink-0">
                       <p className="text-xs text-slate-500 uppercase tracking-wide">{t('total')}</p>
                       <p className="text-base font-semibold text-slate-900">
-                        {hasTotal ? `$${Number(totalDisplay).toFixed(2)}` : t('total_not_available')}
+                        ${Number(totalDisplay).toFixed(2)}
                       </p>
                       <p className="text-xs text-slate-500">{unitsDisplay} {t('units')}</p>
                     </div>

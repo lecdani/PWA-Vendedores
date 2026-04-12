@@ -26,6 +26,46 @@ function getRoleFromLoginResponse(response: Record<string, unknown>): string {
   }
 }
 
+function normalizeLoginErrorMessage(raw: unknown): string {
+  const msg = String(raw ?? '').trim();
+  const lower = msg.toLowerCase();
+  if (!msg) return 'No se pudo iniciar sesion. Intenta nuevamente.';
+  if (
+    lower === 'unauthorized' ||
+    lower === 'unauthorize' ||
+    lower === 'no autorizado' ||
+    lower.includes('unauthorized') ||
+    lower.includes('credenciales') ||
+    lower.includes('invalid credentials') ||
+    lower.includes('invalid password') ||
+    lower.includes('password is incorrect') ||
+    lower.includes('contraseña') ||
+    lower.includes('contrasena')
+  ) {
+    return 'Correo o contrasena incorrectos. Verifica tus datos e intenta de nuevo.';
+  }
+  if (
+    lower.includes('inactive') ||
+    lower.includes('inactiva') ||
+    lower.includes('inactivo')
+  ) {
+    return 'Su cuenta esta inactiva. Contacte al administrador del sistema.';
+  }
+  if (
+    lower.includes('not found') ||
+    lower.includes('no existe') ||
+    lower.includes('no registrado') ||
+    lower.includes('user not found') ||
+    lower.includes('email')
+  ) {
+    return 'Este correo no esta registrado en el sistema.';
+  }
+  if (lower.includes('network') || lower.includes('conexion') || lower.includes('conexión')) {
+    return 'No se pudo conectar con el servidor. Verifica tu conexion e intenta nuevamente.';
+  }
+  return msg;
+}
+
 interface User {
   id: string;
   email: string;
@@ -34,6 +74,8 @@ interface User {
   lastName?: string;
   phone?: string;
   sellerCode?: string;
+  /** Código de ruta si el API lo envía embebido (sin GET extra). */
+  salesRouteCode?: string;
   baseCityId?: string;
   salesRouteId?: string;
 }
@@ -77,7 +119,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (response.success === false || response.error) {
         return {
           success: false,
-          error: (response.message as string) || (response.error as string) || 'Credenciales incorrectas',
+          error: normalizeLoginErrorMessage((response.message as string) || (response.error as string)),
         };
       }
 
@@ -85,7 +127,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!token) {
         return {
           success: false,
-          error: (response.message as string) || 'Token no recibido del servidor',
+          error: normalizeLoginErrorMessage((response.message as string) || 'Token no recibido del servidor'),
         };
       }
 
@@ -106,6 +148,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       let apiSellerCode: string | undefined;
       let apiBaseCityId: string | undefined;
       let apiSalesRouteId: string | undefined;
+      let apiSalesRouteCode: string | undefined;
       try {
         const apiUser = await authApi.getCurrentUserFromApi(token, id !== email ? id : undefined, userEmail);
         roleRaw = apiUser.role;
@@ -117,6 +160,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         apiSellerCode = apiUser.sellerCode;
         apiBaseCityId = apiUser.baseCityId;
         apiSalesRouteId = apiUser.salesRouteId;
+        apiSalesRouteCode = apiUser.salesRouteCode;
       } catch {
         roleRaw = getRoleFromLoginResponse(response);
       }
@@ -146,6 +190,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         role: 'vendedor',
         phone: apiPhone,
         sellerCode: apiSellerCode,
+        salesRouteCode: apiSalesRouteCode,
         baseCityId: apiBaseCityId,
         salesRouteId: apiSalesRouteId,
       };
@@ -189,7 +234,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (apiError.type === 'invalid_credentials') {
         return { 
           success: false, 
-          error: apiError.message || 'Email o contraseña incorrectos' 
+          error: normalizeLoginErrorMessage(apiError.message || 'Email o contraseña incorrectos')
         };
       }
       
@@ -197,7 +242,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (apiError.status === 401) {
         return { 
           success: false, 
-          error: apiError.message || 'Email o contraseña incorrectos' 
+          error: normalizeLoginErrorMessage(apiError.message || 'Email o contraseña incorrectos')
         };
       }
       
@@ -214,7 +259,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       
       return { 
         success: false, 
-        error: apiError.message || 'Error al conectar con el servidor' 
+        error: normalizeLoginErrorMessage(apiError.message || 'Error al conectar con el servidor')
       };
     }
   };

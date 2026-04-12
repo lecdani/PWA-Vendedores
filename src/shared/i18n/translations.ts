@@ -149,6 +149,8 @@ export const translations = {
     'planogram_view_only': 'Visualización del planograma utilizado en este pedido',
     'planogram_quantities_invoice': 'Cantidades según factura',
     'planogram_view_invoice_hint': 'Las celdas muestran las unidades facturadas (misma factura que en el detalle del pedido).',
+    'view_planogram_load_error': 'No se pudo cargar el planograma de este pedido. Revisa la conexión o vuelve a intentar.',
+    'view_planogram_not_found': 'El planograma guardado en este pedido ya no está disponible (sincroniza catálogo o contacta administración).',
     
     // Order History
     'search_orders': 'Buscar pedidos...',
@@ -181,7 +183,7 @@ export const translations = {
     'order_date': 'Fecha de Pedido',
     'delivery_date': 'Fecha de Entrega',
     'invoice': 'Factura',
-    'download_invoice': 'Descargar Factura',
+    'download_invoice': 'Guardar PDF',
     'download': 'Descargar',
     'print': 'Imprimir',
     'print_ticket': 'Imprimir ticket',
@@ -440,6 +442,8 @@ export const translations = {
     'planogram_view_only': 'Planogram view used in this order',
     'planogram_quantities_invoice': 'Quantities per invoice',
     'planogram_view_invoice_hint': 'Cells show invoiced units (same invoice as order detail).',
+    'view_planogram_load_error': 'Could not load the planogram for this order. Check your connection or try again.',
+    'view_planogram_not_found': 'The planogram stored with this order is no longer available. Sync catalog or contact admin.',
     
     // Order History
     'search_orders': 'Search orders...',
@@ -472,7 +476,7 @@ export const translations = {
     'order_date': 'Order Date',
     'delivery_date': 'Delivery Date',
     'invoice': 'Invoice',
-    'download_invoice': 'Download Invoice',
+    'download_invoice': 'Save as PDF',
     'download': 'Download',
     'print': 'Print',
     'print_ticket': 'Print ticket',

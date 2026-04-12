@@ -153,9 +153,25 @@ export function PendingPOD() {
             ).trim();
             const titleMain = invNo ? `${invNo}` : displayStoreName;
             const subtitleStore = invNo ? displayStoreName : null;
-            const hasTotal = invOk && invTotal > 0;
             const displayDate = invOk && invDate ? invDate : order.date;
             const unitsLabel = invOk ? invUnits : null;
+            const orderUnitsFallback =
+              order.items?.reduce((s, i: any) => s + (Number(i.quantity ?? i.toOrder ?? 0) || 0), 0) ?? 0;
+            const totalDisplay =
+              invTotal > 0
+                ? invTotal
+                : Number(order.total) > 0
+                  ? Number(order.total)
+                  : order.items?.length
+                    ? order.items.reduce(
+                        (s, i: any) =>
+                          s +
+                          (Number(i.quantity ?? i.toOrder ?? 0) || 0) *
+                            (Number(i.price ?? i.unitPrice ?? 0) || 0),
+                        0
+                      )
+                    : 0;
+            const unitsDisplay = invOk ? invUnits : orderUnitsFallback || 0;
             return (
               <Card
                 key={order.id}
@@ -183,17 +199,17 @@ export function PendingPOD() {
                           {t('waiting_pod')}
                         </Badge>
                         <span className="text-xs text-slate-500">
-                          {unitsLabel != null ? `${unitsLabel} ${t('units')}` : t('total_not_available')}
+                          {`${unitsDisplay} ${t('units')}`}
                         </span>
                       </div>
                     </div>
                     <div className="text-right shrink-0">
                       <p className="text-xs text-slate-500 uppercase tracking-wide">{t('total')}</p>
                       <p className="text-base font-semibold text-slate-900">
-                        {hasTotal ? `$${Number(invTotal).toFixed(2)}` : t('total_not_available')}
+                        ${Number(totalDisplay).toFixed(2)}
                       </p>
                       <p className="text-xs text-slate-500">
-                        {unitsLabel != null ? `${unitsLabel} ${t('units')}` : t('total_not_available')}
+                        {`${unitsDisplay} ${t('units')}`}
                       </p>
                     </div>
                   </div>

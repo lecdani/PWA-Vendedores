@@ -193,22 +193,50 @@ html {
   font-size: var(--font-size);
 }
 
-/* Imprimir / Descargar: solo la factura */
+/* Imprimir / PDF: solo la factura, con colores (misma idea que Sistema Web Admin) */
 @media print {
+  @page {
+    size: A4 portrait;
+    margin: 6mm;
+  }
+
+  html,
+  body {
+    overflow: visible !important;
+    height: auto !important;
+  }
+
   body * {
     visibility: hidden;
   }
+
   #invoice-print,
   #invoice-print * {
     visibility: visible;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    color-adjust: exact !important;
   }
+
   #invoice-print {
     position: absolute;
     left: 0;
     top: 0;
     width: 100%;
-    max-width: 100%;
-    box-shadow: none;
+    max-width: 100% !important;
+    margin: 0;
+    padding: 0;
+    box-shadow: none !important;
+    border: none;
     background: white;
+    overflow: visible !important;
+  }
+
+  #invoice-print.ticket-print,
+  #invoice-print.ticket-print * {
+    visibility: visible;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    color-adjust: exact !important;
   }
 }

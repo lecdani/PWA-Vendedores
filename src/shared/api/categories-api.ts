@@ -11,6 +11,8 @@ export interface CategoryForUI {
   sku?: string;
   volume?: number;
   unit?: string;
+  /** Marca de la familia (para filtrar resúmenes de planograma). */
+  brandId?: string;
 }
 
 function toCategory(raw: any): CategoryForUI {
@@ -23,7 +25,10 @@ function toCategory(raw: any): CategoryForUI {
   const volumeRaw = Number(raw?.volume ?? raw?.Volume ?? 0);
   const volume = Number.isFinite(volumeRaw) && volumeRaw > 0 ? volumeRaw : undefined;
   const unit = String(raw?.unit ?? raw?.Unit ?? '').trim() || undefined;
-  return { id, name, shortName, code, sku, volume, unit };
+  const brandRaw = raw?.brandId ?? raw?.BrandId;
+  const brandId =
+    brandRaw != null && String(brandRaw).trim() !== '' ? String(brandRaw).trim() : undefined;
+  return { id, name, shortName, code, sku, volume, unit, brandId };
 }
 
 function isExpectedOfflineError(error: unknown): boolean {

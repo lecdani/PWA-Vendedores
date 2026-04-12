@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { ArrowLeft, Send, Loader2, Package, Search, Minus, Plus } from 'lucide-react';
 import { useLanguage } from '@/shared/i18n/language-provider';
@@ -57,6 +57,31 @@ function resolveUnitPrice(product: any, histprice?: number): number {
   return 0;
 }
 
+/** ¿El producto pertenece a la familia/categoría (id o nombre si no hay FK)? */
+function productInFamilyCategory(
+  p: ProductWithQty,
+  categoryId: string,
+  categoryName?: string
+): boolean {
+  const cid = String(categoryId).trim();
+  const pf = String(p.familyId ?? '').trim();
+  const pc = String(p.categoryId ?? '').trim();
+  const idsEqual = (a: string, b: string) => {
+    if (!a || !b) return false;
+    if (a === b) return true;
+    const na = Number(a);
+    const nb = Number(b);
+    return !Number.isNaN(na) && !Number.isNaN(nb) && na === nb;
+  };
+  if (idsEqual(pf, cid) || idsEqual(pc, cid)) return true;
+  if (!pf && !pc && categoryName) {
+    const pn = (p.category || p.categoryName || '').trim().toLowerCase();
+    const cn = categoryName.trim().toLowerCase();
+    return !!pn && pn === cn;
+  }
+  return false;
+}
+
 export function CatalogOrder({
   storeId,
   orderId,
@@ -70,7 +95,7 @@ export function CatalogOrder({
   const router = useRouter();
   const [storeInfo, setStoreInfo] = useState<{ id: string; name: string; address?: string } | null>(null);
   const [productsWithQty, setProductsWithQty] = useState<ProductWithQty[]>([]);
-  const [categories, setCategories] = useState<CategoryForUI[]>([]);
+  const [allCategories, setAllCategories] = useState<CategoryForUI[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedCategoryId, setSelectedCategoryId] = useState<string | 'all'>('all');
   const [showOnlyWithQty, setShowOnlyWithQty] = useState(false);
@@ -131,15 +156,18 @@ export function CatalogOrder({
           return name;
         };
 
-        const uniqueFamilyIds = [...new Set(activeProducts.map((p) => String(p.familyId ?? p.categoryId ?? '').trim()).filter(Boolean))];
+        const uniquePresentationIds = [
+          ...new Set(activeProducts.map((p) => String(p.presentationId ?? '').trim()).filter(Boolean)),
+        ];
         const priceResults = await Promise.all(
-          uniqueFamilyIds.map(async (id) => ({ id, price: await histpricesApi.getLatest(id) }))
+          uniquePresentationIds.map(async (id) => ({ id, price: await histpricesApi.getLatest(id) }))
         );
         const priceMap = new Map(priceResults.map((r) => [r.id, r.price]));
 
         let withQty: ProductWithQty[] = activeProducts.map((p) => {
           const familyId = String(p.familyId ?? p.categoryId ?? '').trim();
-          const price = resolveUnitPrice(p, familyId ? priceMap.get(familyId) : undefined);
+          const presId = String(p.presentationId ?? '').trim();
+          const price = resolveUnitPrice(p, presId ? priceMap.get(presId) : undefined);
           return {
             ...p,
             toOrder: 0,
@@ -150,17 +178,30 @@ export function CatalogOrder({
         });
 
         if (orderId && mounted) {
-          const details = await ordersApi.getOrderDetailsByOrderIdRaw(orderId);
           const qtyByProduct = new Map<string, number>();
           const allowed = new Set<string>();
-          details.forEach((d: any) => {
-            const pid = String(d?.productId ?? d?.ProductId ?? '').trim();
-            const qty = Number(d?.quantity ?? d?.Quantity ?? 0);
-            if (pid) {
-              qtyByProduct.set(pid, (qtyByProduct.get(pid) ?? 0) + qty);
-              allowed.add(pid);
-            }
-          });
+          const isLocalDraftOrder = String(orderId).startsWith('local-order-');
+          if (isLocalDraftOrder) {
+            const order = await ordersApi.getOrderById(String(orderId));
+            (order?.items ?? []).forEach((it: any) => {
+              const pid = String(it?.productId ?? it?.ProductId ?? '').trim();
+              const qty = Number(it?.quantity ?? it?.toOrder ?? it?.Quantity ?? 0);
+              if (pid) {
+                qtyByProduct.set(pid, (qtyByProduct.get(pid) ?? 0) + qty);
+                allowed.add(pid);
+              }
+            });
+          } else {
+            const details = await ordersApi.getOrderDetailsByOrderIdRaw(orderId);
+            details.forEach((d: any) => {
+              const pid = String(d?.productId ?? d?.ProductId ?? '').trim();
+              const qty = Number(d?.quantity ?? d?.Quantity ?? 0);
+              if (pid) {
+                qtyByProduct.set(pid, (qtyByProduct.get(pid) ?? 0) + qty);
+                allowed.add(pid);
+              }
+            });
+          }
           if (isConfirmFlow) {
             allowedProductIdsRef.current = allowed;
           } else {
@@ -175,7 +216,7 @@ export function CatalogOrder({
         }
 
         if (mounted) setProductsWithQty(withQty);
-        if (mounted) setCategories(cats);
+        if (mounted) setAllCategories(cats);
       } catch (e) {
         if (mounted) setLoadError((e as Error)?.message ?? 'Error al cargar catálogo');
       } finally {
@@ -197,7 +238,7 @@ export function CatalogOrder({
     );
   };
 
-  const setQuantityAbsolute = (productId: string, value: number) => {
+  const setQuantityAbsolute = (productId: string, value: string | number) => {
     if (isConfirmFlow && !productIdAllowed(productId)) return;
     const raw = Number(value) || 0;
     const next = Math.max(0, Math.floor(raw));
@@ -206,9 +247,24 @@ export function CatalogOrder({
     );
   };
 
+  const categoriesWithProducts = useMemo(
+    () =>
+      allCategories.filter((cat) =>
+        productsWithQty.some((p) => productInFamilyCategory(p, cat.id, cat.name))
+      ),
+    [allCategories, productsWithQty]
+  );
+
+  useEffect(() => {
+    if (selectedCategoryId === 'all') return;
+    const still = categoriesWithProducts.some((c) => String(c.id) === selectedCategoryId);
+    if (!still) setSelectedCategoryId('all');
+  }, [selectedCategoryId, categoriesWithProducts]);
+
   const filteredProducts = productsWithQty.filter((p) => {
-    if (selectedCategoryId !== 'all' && p.categoryId && String(p.categoryId) !== selectedCategoryId) {
-      return false;
+    if (selectedCategoryId !== 'all') {
+      const cat = allCategories.find((c) => String(c.id) === selectedCategoryId);
+      if (!productInFamilyCategory(p, selectedCategoryId, cat?.name)) return false;
     }
     if (showOnlyWithQty && p.toOrder <= 0) {
       return false;
@@ -253,7 +309,7 @@ export function CatalogOrder({
       .filter((p) => p.toOrder > 0)
       .map((p) => ({
         productId: p.id,
-        productName: p.name || '',
+        productName: p.shortName || p.name || '',
         sku: p.code || p.sku || '',
         category: p.categoryName || '',
         familyId: String(p.familyId ?? p.categoryId ?? '').trim() || undefined,
@@ -399,7 +455,7 @@ export function CatalogOrder({
           >
             {t('all_categories') ?? 'Todas'}
           </button>
-          {categories.map((cat) => (
+          {categoriesWithProducts.map((cat) => (
             <button
               key={cat.id}
               type="button"
@@ -507,17 +563,17 @@ export function CatalogOrder({
                     </div>
                   )}
                   <span
-                    className="text-[9px] leading-tight font-semibold text-slate-900 truncate max-w-[42px]"
+                    className="text-[8px] leading-tight font-semibold text-slate-900 truncate max-w-[42px]"
                     title={product.code || product.sku}
                   >
                     {product.code || product.sku || '—'}
                   </span>
                 </div>
                 <span
-                  className="text-[8px] leading-tight font-medium text-slate-600 break-words line-clamp-2 w-full"
-                  title={product.name}
+                  className="text-[7px] leading-tight font-medium text-slate-600 break-words line-clamp-2 w-full"
+                  title={product.shortName || product.name}
                 >
-                  {product.name || ''}
+                  {product.shortName || product.name || ''}
                 </span>
                 <span className="text-[8px] text-indigo-600 mt-0.5">
                   ${product.price.toFixed(2)}

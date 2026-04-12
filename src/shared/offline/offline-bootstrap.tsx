@@ -2,7 +2,14 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { usePathname } from 'next/navigation';
-import { hasPendingOfflineSync, requestProcessOfflineQueue, startOfflineSyncListeners } from './offline-orders';
+import {
+  getLastOfflineQueueCompletedAt,
+  hasPendingOfflineSync,
+  requestProcessOfflineQueue,
+  startOfflineSyncListeners,
+} from './offline-orders';
+
+const MIN_MS_BETWEEN_PENDING_POLL_SYNC = 50_000;
 
 /**
  * Solo banner offline y disparadores de cola. Modales / recarga tras sync: `main-layout.tsx`.
@@ -87,9 +94,11 @@ export function OfflineBootstrap() {
         requestProcessOfflineQueue(400);
       }
       void hasPendingOfflineSync().then((pending) => {
-        if (pending) requestProcessOfflineQueue(500);
+        if (!pending) return;
+        if (Date.now() - getLastOfflineQueueCompletedAt() < MIN_MS_BETWEEN_PENDING_POLL_SYNC) return;
+        requestProcessOfflineQueue(500);
       });
-    }, 20000);
+    }, 60000);
 
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('/sw.js').catch(() => undefined);

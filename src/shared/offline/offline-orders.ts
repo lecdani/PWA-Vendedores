@@ -154,7 +154,7 @@ async function hasPendingCreateJobForLocalId(localId: string): Promise<boolean> 
 async function updateCreateJobPayloadForLocalId(localId: string, input: CreateOrderInput): Promise<boolean> {
   const lid = String(localId || '').trim();
   if (!lid) return false;
-  const rows = await offlineDb.offlineJobs.where('status').anyOf('pending', 'failed').toArray();
+  const rows = await offlineDb.offlineJobs.where('status').anyOf('pending', 'failed', 'processing').toArray();
   const createJobs = rows.filter((j) => {
     if (j.type !== 'CREATE_ORDER' || j.id == null) return false;
     const p = j.payload as CreateOrderPayload;
@@ -162,14 +162,22 @@ async function updateCreateJobPayloadForLocalId(localId: string, input: CreateOr
   });
   if (createJobs.length === 0) return false;
   createJobs.sort((a, b) => (b.updatedAt ?? b.createdAt ?? 0) - (a.updatedAt ?? a.createdAt ?? 0));
-  const keepId = createJobs[0].id!;
-  const keepPayload = (createJobs[0].payload as CreateOrderPayload) ?? ({ localOrderId: lid, input } as CreateOrderPayload);
-  await offlineDb.offlineJobs.update(keepId, {
+  const keepRow = createJobs[0];
+  const keepId = keepRow.id!;
+  const keepPayload = (keepRow.payload as CreateOrderPayload) ?? ({ localOrderId: lid, input } as CreateOrderPayload);
+  const basePatch = {
     payload: { ...keepPayload, localOrderId: lid, input },
-    status: 'pending',
-    error: undefined,
     updatedAt: Date.now(),
-  });
+  };
+  if (keepRow.status === 'processing') {
+    await offlineDb.offlineJobs.update(keepId, basePatch);
+  } else {
+    await offlineDb.offlineJobs.update(keepId, {
+      ...basePatch,
+      status: 'pending',
+      error: undefined,
+    });
+  }
   const duplicateIds = createJobs
     .slice(1)
     .map((j) => j.id)
@@ -218,6 +226,8 @@ function createInputFromOrderSnapshot(order: OrderForUI): CreateOrderInput {
     storeName: order.storeName,
     storeAddress: order.storeAddress,
     salespersonId: order.salespersonId,
+    salesRouteId: (order as any).salesRouteId != null ? String((order as any).salesRouteId) : undefined,
+    vendorNumber: order.vendorNumber,
     items,
     subtotal,
     tax,
@@ -225,6 +235,18 @@ function createInputFromOrderSnapshot(order: OrderForUI): CreateOrderInput {
     po: order.po,
     planogramId: order.planogramId,
   };
+}
+
+/** Borrador local (si existe) es la fuente de verdad frente al payload del job CREATE (p. ej. edición mientras el job está en `processing`). */
+async function resolveCreateInputForQueuedLocalOrder(
+  localOrderId: string,
+  jobPayloadInput: CreateOrderInput
+): Promise<CreateOrderInput> {
+  const lid = String(localOrderId || '').trim();
+  if (!lid) return jobPayloadInput;
+  const row = await offlineDb.localOrders.get(lid);
+  if (row?.data) return createInputFromOrderSnapshot(row.data as OrderForUI);
+  return jobPayloadInput;
 }
 
 /**
@@ -243,7 +265,10 @@ async function promoteTempOrderToRemote(localOrderId: string, fallbackInput?: Cr
   }
 
   const draft = await offlineDb.localOrders.get(localId);
-  const input = fallbackInput ?? (draft?.data ? createInputFromOrderSnapshot(draft.data as OrderForUI) : null);
+  const input =
+    draft?.data != null
+      ? createInputFromOrderSnapshot(draft.data as OrderForUI)
+      : fallbackInput ?? null;
   if (!input) return null;
 
   const created = await ordersApi.createOrder(input);
@@ -258,6 +283,12 @@ let syncRunning = false;
 let syncRequestTimer: ReturnType<typeof setTimeout> | null = null;
 let lastVisibilitySyncRequestAt = 0;
 const MIN_MS_BETWEEN_VISIBILITY_SYNC = 30_000;
+/** Marca fin de la última corrida de cola (éxito o vacía); el intervalo de reintento no dispara antes. */
+let lastOfflineQueueCompletedAt = 0;
+
+export function getLastOfflineQueueCompletedAt(): number {
+  return lastOfflineQueueCompletedAt;
+}
 
 /**
  * Encola una ejecución de la cola (debounce). Evita varias corridas seguidas por online + intervalo + visibilidad.
@@ -530,10 +561,14 @@ export async function processOfflineQueue(): Promise<OfflineSyncSummary | null> 
         const job = live;
         if (job.type === 'CREATE_ORDER') {
           const payload = job.payload as CreateOrderPayload;
+          const inputForCreate = await resolveCreateInputForQueuedLocalOrder(
+            String(payload.localOrderId ?? ''),
+            payload.input
+          );
           const existingMap = await offlineDb.idMap.get(`order:${payload.localOrderId}`);
           let rid = String(existingMap?.value ?? '').trim();
           if (!rid) {
-            const created = await ordersApi.createOrder(payload.input);
+            const created = await ordersApi.createOrder(inputForCreate);
             rid = created?.orderId ? String(created.orderId) : '';
             if (!rid) throw new Error(created?.errorMessage || 'No se pudo crear pedido en sincronización');
             await setIdMap(payload.localOrderId, rid);
@@ -700,6 +735,7 @@ export async function processOfflineQueue(): Promise<OfflineSyncSummary | null> 
     return summary;
   } finally {
     syncRunning = false;
+    lastOfflineQueueCompletedAt = Date.now();
   }
 }
 

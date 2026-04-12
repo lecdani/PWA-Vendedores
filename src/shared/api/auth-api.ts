@@ -27,6 +27,49 @@ export interface LoginResponse {
 }
 
 export const authApi = {
+  async validateProfileUniqueness(params: {
+    token: string;
+    email: string;
+    phone?: string;
+    currentUserId?: string | null;
+    currentEmail?: string | null;
+  }): Promise<{ emailDuplicate: boolean; phoneDuplicate: boolean }> {
+    const token = String(params.token || '').trim();
+    if (!token) return { emailDuplicate: false, phoneDuplicate: false };
+    try {
+      const list = await apiClient.getWithToken<unknown>('/users/users', token);
+      const items = Array.isArray(list)
+        ? list
+        : (list as Record<string, unknown>)?.data ?? (list as Record<string, unknown>)?.items ?? [];
+
+      const targetEmail = String(params.email || '').trim().toLowerCase();
+      const targetPhone = String(params.phone || '').trim();
+      const currentId = String(params.currentUserId || '').trim().toLowerCase();
+      const currentEmail = String(params.currentEmail || '').trim().toLowerCase();
+
+      let emailDuplicate = false;
+      let phoneDuplicate = false;
+
+      for (const raw of items as Record<string, unknown>[]) {
+        const id = String(raw?.id ?? raw?.Id ?? '').trim().toLowerCase();
+        const email = String(raw?.email ?? raw?.Email ?? '').trim().toLowerCase();
+        const phone = String(raw?.phone ?? raw?.Phone ?? '').trim();
+
+        const sameById = !!currentId && id === currentId;
+        const sameByEmail = !!currentEmail && email === currentEmail;
+        if (sameById || sameByEmail) continue;
+
+        if (targetEmail && email === targetEmail) emailDuplicate = true;
+        if (targetPhone && phone && phone === targetPhone) phoneDuplicate = true;
+        if (emailDuplicate && phoneDuplicate) break;
+      }
+
+      return { emailDuplicate, phoneDuplicate };
+    } catch {
+      return { emailDuplicate: false, phoneDuplicate: false };
+    }
+  },
+
   async login(email: string, password: string): Promise<LoginResponse> {
     try {
       const response = await apiClient.post<LoginResponse>('/auth/login', {
@@ -98,6 +141,8 @@ export const authApi = {
     name?: string;
     lastName?: string;
     sellerCode?: string;
+    /** Código legible de la ruta si viene en el usuario o en salesRoute anidado. */
+    salesRouteCode?: string;
     baseCityId?: string;
     salesRouteId?: string;
   }> {
@@ -130,6 +175,29 @@ export const authApi = {
       return v != null && String(v).trim() !== '' ? String(v).trim() : undefined;
     };
 
+    const rawSalesRouteCode = (raw: Record<string, unknown>) => {
+      const nested = (raw?.salesRoute ?? raw?.SalesRoute) as Record<string, unknown> | undefined;
+      const fromNested =
+        nested &&
+        String(
+          nested.code ??
+            nested.Code ??
+            nested.routeCode ??
+            nested.RouteCode ??
+            ''
+        ).trim();
+      if (fromNested) return fromNested;
+      return (
+        String(
+          raw?.salesRouteCode ??
+            raw?.SalesRouteCode ??
+            raw?.routeCode ??
+            raw?.RouteCode ??
+            ''
+        ).trim() || undefined
+      );
+    };
+
     const mapUser = (raw: Record<string, unknown>) => ({
       id: rawId(raw),
       role: rawRole(raw),
@@ -138,6 +206,7 @@ export const authApi = {
       name: rawName(raw),
       lastName: rawLastName(raw),
       sellerCode: rawSellerCode(raw),
+      salesRouteCode: rawSalesRouteCode(raw),
       baseCityId: rawBaseCityId(raw),
       salesRouteId: rawSalesRouteId(raw),
     });
