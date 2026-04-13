@@ -895,6 +895,13 @@ function detailUnitPriceRaw(d: any): number {
     d?.Product?.Price,
     d?.product?.salePrice,
     d?.Product?.SalePrice,
+    /** Catálogo / DTO anidado: el P.U. suele venir aquí y no en la raíz del detalle. */
+    d?.product?.listPrice,
+    d?.product?.ListPrice,
+    d?.Product?.ListPrice,
+    d?.Product?.listPrice,
+    d?.product?.currentPrice,
+    d?.Product?.CurrentPrice,
   ];
   for (const c of chain) {
     const n = parseMoney(c);

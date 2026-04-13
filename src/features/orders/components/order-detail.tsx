@@ -131,7 +131,25 @@ function detailLineQty(item: any): number {
 function effectiveUnitPriceFromDetailItem(item: any): number {
   const qty = detailLineQty(item);
   const p =
-    Number(item?.price ?? item?.unitPrice ?? item?.UnitPrice ?? item?.Price ?? 0) || 0;
+    Number(
+      item?.price ??
+        item?.unitPrice ??
+        item?.UnitPrice ??
+        item?.Price ??
+        item?.listPrice ??
+        item?.ListPrice ??
+        item?.salePrice ??
+        item?.SalePrice ??
+        item?.product?.unitPrice ??
+        item?.product?.price ??
+        item?.product?.listPrice ??
+        item?.product?.currentPrice ??
+        item?.Product?.UnitPrice ??
+        item?.Product?.Price ??
+        item?.Product?.ListPrice ??
+        item?.Product?.CurrentPrice ??
+        0
+    ) || 0;
   if (p > 0) return p;
   const amt =
     Number(
@@ -662,8 +680,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
   const subtotalFromItems = order.items.reduce(
     (s, i) =>
       s +
-      (Number(i.toOrder ?? i.quantity ?? 0) || 0) *
-        (Number((i as any).price ?? (i as any).unitPrice ?? 0) || 0),
+      (Number(i.toOrder ?? i.quantity ?? 0) || 0) * effectiveUnitPriceFromDetailItem(i as any),
     0
   );
   const displayTotal =
@@ -1680,7 +1697,7 @@ export function OrderDetail({ orderId }: { orderId: string }) {
                   <div className="divide-y divide-slate-100 rounded-lg border border-slate-200 bg-white overflow-hidden">
                     {order.items.map((item: any, index: number) => {
                       const quantity = Number(item.toOrder ?? item.quantity ?? 0) || 0;
-                      const price = Number(item.price ?? item.unitPrice ?? 0) || 0;
+                      const price = effectiveUnitPriceFromDetailItem(item);
                       const imgUrl = item.imageUrl;
                       return (
                         <div key={index} className="p-3">

@@ -29,47 +29,109 @@ interface ProductPosition {
 
 type LineItem = { qty: number; code: string; description: string; price: number; amount: number };
 
+type InvoicePlanogramLine = LineItem & { productId?: string; sku?: string };
+
 type QRow = { productName: string; sku: string; quantity: number; price: number };
 
-/** Una entrada por línea de factura (mismo criterio que Admin: colas por producto para celdas duplicadas). */
-function buildInvoiceQuantityQueues(
-  invoiceItems: LineItem[],
+function normKey(s: string): string {
+  return String(s || '')
+    .trim()
+    .replace(/-/g, '')
+    .toLowerCase();
+}
+
+function matchesInvoicedOrderStatus(status: string | undefined): boolean {
+  const s = (status || '').toLowerCase().trim();
+  return ['invoiced', 'facturado', 'invoice', 'billed', 'facturada'].includes(s);
+}
+
+/**
+ * Colas por productId desde líneas de factura — misma lógica que Admin `OrderPlanogramView`
+ * (code/sku/id/catálogo + nombre único) para que el planograma facturado no quede vacío ni caiga al pedido inicial.
+ */
+function buildQuantitiesQueueFromInvoiceLines(
+  invoiceItems: InvoicePlanogramLine[],
   orderItems: Array<{ productId?: string; ProductId?: string; productName?: string; sku?: string; price?: number }>,
   getProduct: (id: string) => ProductForUI | undefined,
-  allProducts: ProductForUI[]
+  catalogProducts: ProductForUI[]
 ): Map<string, QRow[]> {
   const map = new Map<string, QRow[]>();
-  for (const line of invoiceItems) {
-    const code = String(line.code || '').trim();
-    const normCode = code.replace(/-/g, '').toLowerCase();
+
+  const resolveProductId = (line: InvoicePlanogramLine): string => {
+    const fromApi = String(line.productId ?? '').trim();
+    if (fromApi) return fromApi;
+
+    const code = String(line.code || line.sku || '').trim();
+    if (!code || code === '—') return '';
+    const normCode = normKey(code);
+    const desc = String(line.description || '').trim();
+
     const oi =
       orderItems.find((x: any) => String(x.sku || '').trim() === code) ||
       orderItems.find((x: any) => String(x.productId ?? x.ProductId ?? '') === code) ||
       (code.length >= 8
         ? orderItems.find((x: any) => {
-            const pid = String(x.productId ?? x.ProductId ?? '').replace(/-/g, '').toLowerCase();
+            const pid = normKey(String(x.productId ?? x.ProductId ?? ''));
             return pid && (pid === normCode || String(x.productId ?? x.ProductId) === code);
           })
         : undefined);
 
     let productId = oi ? String(oi.productId ?? oi.ProductId ?? '') : '';
-    if (!productId && code) {
-      const bySku = allProducts.find((p) => String(p.sku || '').trim() === code);
-      if (bySku) productId = bySku.id;
-    }
+
     if (!productId && /^[0-9a-f-]{36}$/i.test(code)) {
       productId = code;
     }
+
+    if (!productId) {
+      const hit = catalogProducts.find((p) => {
+        const skuT = String(p.sku || '').trim();
+        const codeT = String(p.code || '').trim();
+        const comm = String(p.commerceSku || '').trim();
+        return (
+          skuT === code ||
+          codeT === code ||
+          comm === code ||
+          normKey(skuT) === normCode ||
+          normKey(codeT) === normCode ||
+          normKey(comm) === normCode ||
+          normKey(String(p.id)) === normCode
+        );
+      });
+      if (hit) productId = String(hit.id);
+    }
+
+    if (!productId && desc.length > 2) {
+      const lower = desc.toLowerCase();
+      const nameHits = catalogProducts.filter(
+        (p) => (p.name || '').trim().toLowerCase() === lower || (p.shortName || '').trim().toLowerCase() === lower
+      );
+      if (nameHits.length === 1) productId = String(nameHits[0].id);
+    }
+
+    return productId;
+  };
+
+  for (const line of invoiceItems) {
+    const code = String(line.code || line.sku || '').trim();
+    const productId = resolveProductId(line);
     if (!productId) continue;
 
+    const oi =
+      orderItems.find((x: any) => String(x.productId ?? x.ProductId ?? '') === productId) ||
+      orderItems.find(
+        (x: any) => normKey(String(x.productId ?? x.ProductId ?? '')) === normKey(productId)
+      );
+
+    const prod = getProduct(productId);
     const qty = Number(line.qty) || 0;
     if (qty <= 0) continue;
     const price = Number(line.price) || 0;
-    const prod = getProduct(productId);
     const name = prod
       ? getProductShortDisplayName(prod)
-      : (line.description || oi?.productName || code).trim();
-    const sku = String(oi?.sku || prod?.sku || code).trim();
+      : (line.description || (oi as any)?.productName || code).trim();
+    const sku = String(
+      (oi as any)?.sku || prod?.commerceSku || prod?.sku || prod?.code || code
+    ).trim();
     const row: QRow = { productName: name, sku, quantity: qty, price };
     const arr = map.get(productId) ?? [];
     arr.push(row);
@@ -221,8 +283,12 @@ async function enrichQueuePrices(
     const nextRows = await Promise.all(
       rows.map(async (row) => {
         if (row.price > 0) return row;
-        const oi = orderItems.find((x: any) => String(x.productId ?? x.ProductId) === id);
-        let price = Number(oi?.price) || 0;
+        const oi =
+          orderItems.find((x: any) => String(x.productId ?? x.ProductId) === id) ||
+          orderItems.find(
+            (x: any) => normKey(String(x.productId ?? x.ProductId ?? '')) === normKey(id)
+          );
+        let price = Number(oi?.price ?? oi?.unitPrice ?? 0) || 0;
         if (!price) {
           const productForPrice = getProduct(id);
           const presId = String(productForPrice?.presentationId ?? '').trim();
@@ -363,23 +429,45 @@ export function ViewPlanogram({
           } catch {
             invoiceDisplay = null;
           }
+          const st = (apiOrder.status || '').toLowerCase().trim();
+          const mightHaveInvoice =
+            (invoiceHint != null && String(invoiceHint).trim() !== '') ||
+            matchesInvoicedOrderStatus(apiOrder.status) ||
+            ['confirmed', 'completed', 'complete', 'confirmado', 'cerrado', 'closed'].includes(st);
+          if (!invoiceDisplay?.items?.length && mightHaveInvoice) {
+            try {
+              const alt = await ordersApi.getInvoiceDisplayForOrder(
+                resolvedOrderId,
+                undefined,
+                apiOrder
+              );
+              if (alt?.items?.length) invoiceDisplay = alt;
+            } catch {
+              /* ignore */
+            }
+          }
           if (!mounted) return;
 
-          let queue =
-            invoiceDisplay?.items?.length > 0
-              ? buildInvoiceQuantityQueues(
-                  invoiceDisplay.items,
-                  orderItems as any[],
-                  getProduct,
-                  products
-                )
-              : new Map<string, QRow[]>();
-          let usedInvoiceQuantities = queue.size > 0;
+          let queue = new Map<string, QRow[]>();
+          let usedInvoiceQuantities = false;
 
-          if (!usedInvoiceQuantities) {
+          if (invoiceDisplay?.items?.length) {
+            const fromInv = buildQuantitiesQueueFromInvoiceLines(
+              invoiceDisplay.items as InvoicePlanogramLine[],
+              orderItems as any[],
+              getProduct,
+              products
+            );
+            if (fromInv.size > 0) {
+              queue = fromInv;
+              usedInvoiceQuantities = true;
+            }
+          }
+
+          /** Igual que Admin: solo si no hay líneas de factura se usan cantidades del pedido (evita mezclar inicial vs facturado). */
+          if (!usedInvoiceQuantities && !(invoiceDisplay?.items?.length)) {
             queue = await buildOrderQuantityQueue(orderItems, getProduct);
-            usedInvoiceQuantities = false;
-          } else {
+          } else if (usedInvoiceQuantities) {
             queue = await enrichQueuePrices(queue, orderItems, getProduct);
           }
 
