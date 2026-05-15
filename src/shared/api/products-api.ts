@@ -161,13 +161,32 @@ export function getProductShortDisplayName(p: ProductForUI | null | undefined): 
 
 export function getProductImageUrl(p: { image?: string; imageFileName?: string } | null): string {
   if (!p) return '';
+  const normalizeAbsoluteLikeUrl = (value: string): string => {
+    const raw = String(value ?? '').trim();
+    if (!raw) return '';
+    // Corrige casos mal serializados tipo "https:/dominio/archivo.png"
+    if (/^https?:\/(?!\/)/i.test(raw)) {
+      return raw.replace(/^https?:\//i, (m) => `${m}/`);
+    }
+    return raw;
+  };
+  const isAbsoluteHttpUrl = (value: string): boolean => /^https?:\/\//i.test(value);
   const img = p.image?.trim();
   if (img) {
-    // Si ya es ruta (contiene /) o URL, usarla; si es solo nombre de archivo, prefijar images/url/
-    const path = img.includes('/') || img.startsWith('http') ? img : 'images/url/' + img;
+    const normalizedImg = normalizeAbsoluteLikeUrl(img);
+    // Si ya es ruta o URL, usarla; si es solo nombre de archivo, prefijar images/url/
+    const path =
+      normalizedImg.includes('/') || normalizedImg.startsWith('http')
+        ? normalizedImg
+        : 'images/url/' + normalizedImg;
     return getBackendAssetUrl(path);
   }
-  if (p.imageFileName) return getBackendAssetUrl('images/url/' + p.imageFileName);
+  const rawFileName = String(p.imageFileName ?? '').trim();
+  if (rawFileName) {
+    const normalizedFileName = normalizeAbsoluteLikeUrl(rawFileName);
+    if (isAbsoluteHttpUrl(normalizedFileName)) return normalizedFileName;
+    return getBackendAssetUrl('images/url/' + normalizedFileName);
+  }
   return '';
 }
 
@@ -177,7 +196,17 @@ export const productsApi = {
     try {
       const res = await apiClient.get<any>('/products/products');
       const list = Array.isArray(res) ? res : res?.data ?? res?.items ?? [];
-      const products = (list as any[]).map(toProduct);
+      let products = (list as any[]).map(toProduct);
+      // Algunos despliegues devuelven vacío temporalmente; reintentar una vez evita falsos "sin catálogo".
+      if (products.length === 0 && (typeof navigator === 'undefined' || navigator.onLine)) {
+        try {
+          const retryRes = await apiClient.get<any>('/products/products');
+          const retryList = Array.isArray(retryRes) ? retryRes : retryRes?.data ?? retryRes?.items ?? [];
+          products = (retryList as any[]).map(toProduct);
+        } catch {
+          // mantener el resultado original
+        }
+      }
       await cacheSet('products.all', products);
       // Pre-cargar cache básica por id para evitar peticiones repetidas posteriores
       products.forEach((p) => {

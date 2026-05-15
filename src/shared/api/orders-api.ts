@@ -400,7 +400,7 @@ async function mergeOfflinePendingPodIntoOrder(
     ...order,
     podUploaded: true,
     podImageUrl: dataUrl,
-    podFileName: media.fileName || order.podFileName,
+    podFileName: media?.fileName || order.podFileName,
   };
 }
 
@@ -2627,7 +2627,9 @@ export const ordersApi = {
         })
       );
     }
-    result = await Promise.all(result.map((o) => mergeOfflinePendingPodIntoOrder(o, String(o.id))));
+    result = (
+      await Promise.all(result.map((o) => mergeOfflinePendingPodIntoOrder(o, String(o.id))))
+    ).filter((o): o is OrderForUI => o != null);
     result = await applyCancellationOverridesFromCache(result);
     if (typeof window !== 'undefined') {
       const db = await getOfflineDbIfBrowser();
@@ -2660,7 +2662,9 @@ export const ordersApi = {
       }
       await cacheSet(userOrdersCacheKey(userId), mergedList);
       await Promise.all(mergedList.map((o) => cacheOrder(o)));
-      return await Promise.all(mergedList.map((o) => mergeOfflinePendingPodIntoOrder(o, String(o.id))));
+      return (
+        await Promise.all(mergedList.map((o) => mergeOfflinePendingPodIntoOrder(o, String(o.id))))
+      ).filter((o): o is OrderForUI => o != null);
     }
     return result;
   },

@@ -7,6 +7,8 @@ import {
   Plus,
   History,
   BarChart3,
+  FileCheck,
+  User,
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { MetricCard } from './metric-card';
@@ -137,7 +139,7 @@ export function Dashboard() {
           <h3 className="text-slate-900">{t('quick_access')}</h3>
         </div>
 
-        <div className="grid grid-cols-1 gap-3">
+        <div className="grid grid-cols-2 gap-3">
           <ModuleCard
             title={t('order_history')}
             description={t('view_all_orders')}
@@ -146,7 +148,14 @@ export function Dashboard() {
             iconBg="bg-slate-500"
             onClick={() => router.push('/history')}
           />
-
+          <ModuleCard
+            title={t('pending_deliveries')}
+            description={t('pod_subtitle')}
+            icon={FileCheck}
+            color="bg-amber-50 text-amber-700"
+            iconBg="bg-amber-500"
+            onClick={() => router.push('/pending-pod')}
+          />
           <ModuleCard
             title={t('reports')}
             description={t('reports_desc')}
@@ -154,6 +163,14 @@ export function Dashboard() {
             color="bg-purple-50 text-purple-600"
             iconBg="bg-purple-500"
             onClick={() => router.push('/sales-report')}
+          />
+          <ModuleCard
+            title={t('profile')}
+            description={t('quick_access_profile_desc')}
+            icon={User}
+            color="bg-sky-50 text-sky-700"
+            iconBg="bg-sky-500"
+            onClick={() => router.push('/profile')}
           />
         </div>
       </div>

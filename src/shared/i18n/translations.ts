@@ -18,6 +18,8 @@ export const translations = {
     // Modules
     'management_modules': 'Módulos de Gestión',
     'quick_access': 'Acceso Rápido',
+    'quick_access_home_desc': 'Resumen y accesos del portal',
+    'quick_access_profile_desc': 'Tu cuenta y preferencias',
     'new_order': 'Gestión de Pedidos',
     'new_order_desc': 'Gestiona Pedidos, Facturas y PDFs en un solo lugar',
     'order_history': 'Historial de Pedidos',
@@ -311,6 +313,8 @@ export const translations = {
     // Modules
     'management_modules': 'Management Modules',
     'quick_access': 'Quick Access',
+    'quick_access_home_desc': 'Summary and portal shortcuts',
+    'quick_access_profile_desc': 'Your account and preferences',
     'new_order': 'Order Management',
     'new_order_desc': 'Manage Orders, Invoices and PDFs in one place',
     'order_history': 'Order History',

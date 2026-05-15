@@ -90,7 +90,7 @@ export default function LoginPage() {
             Iniciar Sesión
           </h2>
 
-          <form onSubmit={handleSubmit} className="space-y-5">
+          <form onSubmit={handleSubmit} className="space-y-5" autoComplete="off">
             {/* Campo Email */}
             <div className="space-y-2">
               <Label htmlFor="email" className="text-slate-700 font-medium">
@@ -102,6 +102,7 @@ export default function LoginPage() {
                 </div>
                 <Input
                   id="email"
+                  name="vendor_login_email"
                   type="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
@@ -109,6 +110,10 @@ export default function LoginPage() {
                   className="pl-10 h-11 bg-slate-50 border-slate-200 focus:border-indigo-500 focus:ring-indigo-500"
                   required
                   disabled={isSubmitting || isLoading}
+                  autoComplete="username"
+                  spellCheck={false}
+                  autoCapitalize="off"
+                  autoCorrect="off"
                 />
               </div>
             </div>
@@ -124,6 +129,7 @@ export default function LoginPage() {
                 </div>
                 <Input
                   id="password"
+                  name="vendor_login_password"
                   type={showPassword ? 'text' : 'password'}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
@@ -131,6 +137,13 @@ export default function LoginPage() {
                   className="pl-10 pr-10 h-11 bg-slate-50 border-slate-200 focus:border-indigo-500 focus:ring-indigo-500"
                   required
                   disabled={isSubmitting || isLoading}
+                  autoComplete="off"
+                  spellCheck={false}
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  data-1p-ignore
+                  data-lpignore="true"
+                  data-form-type="other"
                 />
                 <button
                   type="button"

@@ -150,8 +150,11 @@ export const authApi = {
       raw?.id != null ? String(raw.id) : raw?.Id != null ? String(raw.Id) : undefined;
     const rawRole = (raw: Record<string, unknown>) =>
       String(raw?.rol ?? raw?.Rol ?? raw?.role ?? raw?.Role ?? '').trim();
-    const rawIsActive = (raw: Record<string, unknown>) =>
-      typeof raw?.isActive === 'boolean' ? raw.isActive : (raw?.IsActive ?? true);
+    const rawIsActive = (raw: Record<string, unknown>) => {
+      if (typeof raw?.isActive === 'boolean') return raw.isActive;
+      if (typeof raw?.IsActive === 'boolean') return raw.IsActive;
+      return true;
+    };
     const rawPhone = (raw: Record<string, unknown>) =>
       String(raw?.phone ?? raw?.Phone ?? '').trim() || undefined;
     const rawName = (raw: Record<string, unknown>) =>

@@ -44,6 +44,19 @@ const withPWA = require('next-pwa')({
         cacheName: 'static-assets-v1',
       },
     },
+    /** Imágenes de producto vía proxy (no terminan en .jpg en la URL). Primera vez red; luego caché del SW. */
+    {
+      urlPattern: /\/api\/proxy\/images\//i,
+      handler: 'StaleWhileRevalidate',
+      method: 'GET',
+      options: {
+        cacheName: 'product-images-v1',
+        expiration: {
+          maxEntries: 400,
+          maxAgeSeconds: 60 * 60 * 24 * 30,
+        },
+      },
+    },
   ],
 });
 

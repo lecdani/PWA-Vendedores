@@ -239,4 +239,14 @@ html {
     print-color-adjust: exact !important;
     color-adjust: exact !important;
   }
+
+  /* Ticket térmico: el resto de la pantalla no debe aportar altura de página (solo #invoice-print) */
+  body:has(#invoice-print.ticket-print) .print-ticket-suppress {
+    display: none !important;
+  }
+
+  body:has(#invoice-print.ticket-print) .min-h-screen {
+    min-height: 0 !important;
+    height: auto !important;
+  }
 }

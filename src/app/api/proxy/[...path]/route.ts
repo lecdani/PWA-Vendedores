@@ -70,6 +70,7 @@ async function handleProxyRequest(
     }
 
     const responseContentType = response.headers.get('content-type') || '';
+    const isImageUrlResolverPath = path.toLowerCase().startsWith('images/url/');
 
     // Respuestas binarias (imágenes): reenviar sin leer como texto
     if (
@@ -83,6 +84,56 @@ async function handleProxyRequest(
           'Content-Type': responseContentType,
           'Cache-Control': 'public, max-age=3600',
         },
+      });
+    }
+
+    // Algunos backends devuelven una URL (texto/json) en /images/url/{fileName}
+    // en lugar de la imagen binaria. En ese caso, resolver y retransmitir la imagen.
+    if (isImageUrlResolverPath && method === 'GET') {
+      const bodyText = await response.text();
+      let candidateUrl = '';
+      if (responseContentType.includes('application/json')) {
+        try {
+          const parsed = bodyText ? JSON.parse(bodyText) : {};
+          candidateUrl = String(
+            parsed?.url ??
+              parsed?.Url ??
+              parsed?.imageUrl ??
+              parsed?.ImageUrl ??
+              parsed?.data?.url ??
+              parsed?.data?.Url ??
+              ''
+          ).trim();
+        } catch {
+          candidateUrl = bodyText.trim().replace(/^"|"$/g, '');
+        }
+      } else {
+        candidateUrl = bodyText.trim().replace(/^"|"$/g, '');
+      }
+
+      if (/^https?:\/\//i.test(candidateUrl)) {
+        try {
+          const imgResponse = await fetch(candidateUrl);
+          const imgContentType = imgResponse.headers.get('content-type') || '';
+          if (imgResponse.ok && (imgContentType.includes('image/') || imgContentType.includes('application/octet-stream'))) {
+            const imgBuffer = await imgResponse.arrayBuffer();
+            return new NextResponse(imgBuffer, {
+              status: 200,
+              headers: {
+                'Content-Type': imgContentType,
+                'Cache-Control': 'public, max-age=3600',
+              },
+            });
+          }
+        } catch {
+          // Si falla resolver la URL remota, devolver respuesta original abajo.
+        }
+      }
+
+      // Si no se pudo resolver la URL remota, mantener compatibilidad devolviendo texto.
+      return new NextResponse(bodyText, {
+        status: response.status,
+        headers: { 'Content-Type': responseContentType || 'text/plain' },
       });
     }
 

@@ -280,7 +280,7 @@ async function promoteTempOrderToRemote(localOrderId: string, fallbackInput?: Cr
 }
 
 let syncRunning = false;
-let syncRequestTimer: ReturnType<typeof setTimeout> | null = null;
+let syncRequestTimer: number | null = null;
 let lastVisibilitySyncRequestAt = 0;
 const MIN_MS_BETWEEN_VISIBILITY_SYNC = 30_000;
 /** Marca fin de la última corrida de cola (éxito o vacía); el intervalo de reintento no dispara antes. */

@@ -133,23 +133,37 @@ export function Planogram({
       setLoading(true);
       setLoadError(null);
       try {
-        const [activePlan, products, categories] = await Promise.all([
-          planogramsApi.getActive(),
+        const [products, categories, orderHeader] = await Promise.all([
           productsApi.fetchAll(),
           categoriesApi.fetchAll(),
+          orderId ? ordersApi.getOrderById(orderId) : Promise.resolve(null),
         ]);
 
         if (!mounted) return;
-        if (!activePlan) {
+
+        const planogramIdFromOrder = String(orderHeader?.planogramId ?? '').trim();
+        let targetPlan = null as Awaited<ReturnType<typeof planogramsApi.getActive>>;
+        if (planogramIdFromOrder) {
+          targetPlan = await planogramsApi.getById(planogramIdFromOrder);
+          if (!targetPlan) {
+            const allPlans = await planogramsApi.fetchAll();
+            targetPlan = allPlans.find((p) => String(p.id) === planogramIdFromOrder) ?? null;
+          }
+        }
+        if (!targetPlan) {
+          targetPlan = await planogramsApi.getActive();
+        }
+
+        if (!targetPlan) {
           setLoadError(t('no_active_planogram') || 'No hay planograma activo. Activa uno en el Admin.');
           setPlanogramData([]);
           setProductMap(new Map());
           setLoading(false);
           return;
         }
-        setPlanogramId(activePlan.id);
-        setPlanogramName(activePlan.name ?? null);
-        const distList = await distributionsApi.getByPlanogram(activePlan.id);
+        setPlanogramId(targetPlan.id);
+        setPlanogramName(targetPlan.name ?? null);
+        const distList = await distributionsApi.getByPlanogram(targetPlan.id);
         if (!mounted) return;
 
         const categoryById = new Map<string, string>();
@@ -158,15 +172,49 @@ export function Planogram({
           categoryById.set(String(Number(c.id)), c.name);
         });
 
+        const normalizeId = (v: unknown) =>
+          String(v ?? '')
+            .trim()
+            .replace(/-/g, '')
+            .toLowerCase();
         const pmap = new Map<string, ProductForUI>();
         products.forEach((p) => {
-          pmap.set(p.id, p);
-          const numId = Number(p.id);
+          const id = String(p.id ?? '').trim();
+          if (!id) return;
+          pmap.set(id, p);
+          pmap.set(normalizeId(id), p);
+          const numId = Number(id);
           if (!Number.isNaN(numId)) pmap.set(String(numId), p);
         });
         if (mounted) setProductMap(new Map(pmap));
-        const getProduct = (productId: string) =>
-          pmap.get(productId) ?? pmap.get(String(Number(productId)));
+        const getProduct = (productId: string) => {
+          const raw = String(productId ?? '').trim();
+          return pmap.get(raw) ?? pmap.get(normalizeId(raw)) ?? pmap.get(String(Number(raw)));
+        };
+        // Si la lista general no trae todos los productos del planograma (p.ej. inactivos),
+        // cargar faltantes por id para no dejar la grilla vacía.
+        const missingProductIds = Array.from(
+          new Set(
+            distList
+              .map((d) => String(d.productId ?? '').trim())
+              .filter((id) => id && !getProduct(id))
+          )
+        );
+        if (missingProductIds.length > 0) {
+          const fetchedMissing = await Promise.all(
+            missingProductIds.map((id) => productsApi.getById(id).catch(() => null))
+          );
+          fetchedMissing.forEach((p) => {
+            if (!p) return;
+            const id = String(p.id ?? '').trim();
+            if (!id) return;
+            pmap.set(id, p);
+            pmap.set(normalizeId(id), p);
+            const n = Number(id);
+            if (!Number.isNaN(n)) pmap.set(String(n), p);
+          });
+          if (mounted) setProductMap(new Map(pmap));
+        }
 
         const resolveCategory = (p: (typeof products)[0] | null): string => {
           if (!p) return '';

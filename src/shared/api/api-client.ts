@@ -44,33 +44,16 @@ export class ApiClient {
         status: 0,
       } as ApiError;
     }
-    // Si ya detectamos fallo de red recientemente, evita nuevos GET largos,
-    // pero solo por una ventana corta para no quedar "pegado" en offline.
-    if (
-      typeof window !== 'undefined' &&
-      isGet &&
-      window.sessionStorage.getItem(ApiClient.OFFLINE_HINT_KEY) === '1'
-    ) {
-      window.dispatchEvent(new CustomEvent('app-network-status', { detail: { online: false } }));
-      // valor legacy ('1') puede quedar persistido; limpiarlo para reintentar.
-      window.sessionStorage.removeItem(ApiClient.OFFLINE_HINT_KEY);
-    }
+    // Hint offline: solo informar estado visual, pero NO cortar GET de forma agresiva.
+    // Cortar aquí provocaba falsos "sin datos" cuando el backend respondía lento.
     if (typeof window !== 'undefined' && isGet) {
       const rawHint = window.sessionStorage.getItem(ApiClient.OFFLINE_HINT_KEY);
       if (rawHint) {
-        const now = Date.now();
+        window.dispatchEvent(new CustomEvent('app-network-status', { detail: { online: false } }));
         const ts = Number(rawHint);
-        const validTs = Number.isFinite(ts) && ts > 0;
-        const shouldFastFail = validTs && now - ts < ApiClient.OFFLINE_HINT_TTL_MS;
-        if (shouldFastFail) {
-          window.dispatchEvent(new CustomEvent('app-network-status', { detail: { online: false } }));
-          throw {
-            message: 'Error de conexión. Verifica tu conexión a internet.',
-            status: 0,
-          } as ApiError;
+        if (!Number.isFinite(ts) || Date.now() - ts >= ApiClient.OFFLINE_HINT_TTL_MS) {
+          window.sessionStorage.removeItem(ApiClient.OFFLINE_HINT_KEY);
         }
-        // Hint expirado: permitir reintento online normal.
-        window.sessionStorage.removeItem(ApiClient.OFFLINE_HINT_KEY);
       }
     }
     
@@ -92,7 +75,7 @@ export class ApiClient {
       if (options.signal.aborted) controller.abort();
       else options.signal.addEventListener('abort', () => controller.abort(), { once: true });
     }
-    const timeoutMs = isGet ? 3500 : 12000;
+    const timeoutMs = isGet ? 12000 : 12000;
     const timeoutId = typeof window !== 'undefined' ? window.setTimeout(() => controller.abort(), timeoutMs) : null;
 
     const config: RequestInit = {
