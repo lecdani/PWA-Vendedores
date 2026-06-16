@@ -22,10 +22,14 @@ export function CapturePOD({ orderId }: { orderId: string }) {
   const { t } = useLanguage();
   const router = useRouter();
   const { user } = useAuth();
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  
+  const galleryInputRef = useRef<HTMLInputElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
   const [podImage, setPodImage] = useState<string | null>(null);
   const [podFile, setPodFile] = useState<File | null>(null);
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [cameraLoading, setCameraLoading] = useState(false);
   const [notes, setNotes] = useState('');
   const [uploading, setUploading] = useState(false);
   const [orderData, setOrderData] = useState<any>(null);
@@ -176,25 +180,126 @@ export function CapturePOD({ orderId }: { orderId: string }) {
     return () => window.removeEventListener('focus', onFocus);
   }, [orderId]);
 
-  const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (file) {
-      setPodFile(file);
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setPodImage(reader.result as string);
-      };
-      reader.readAsDataURL(file);
+  useEffect(() => {
+    return () => {
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!cameraOpen || !videoRef.current || !streamRef.current) return;
+    const video = videoRef.current;
+    video.srcObject = streamRef.current;
+    void video.play().catch(() => {
+      /* ignorar; iOS a veces requiere segundo intento tras gesto */
+    });
+  }, [cameraOpen]);
+
+  const stopCameraStream = () => {
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
     }
   };
 
-  const handleTakePhoto = () => {
-    fileInputRef.current?.click();
+  const closeCamera = () => {
+    stopCameraStream();
+    setCameraOpen(false);
+    setCameraLoading(false);
+  };
+
+  const requestCameraStream = async (): Promise<MediaStream> => {
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      throw new Error('unsupported');
+    }
+    const attempts: MediaStreamConstraints[] = [
+      { video: { facingMode: { ideal: 'environment' } }, audio: false },
+      { video: { facingMode: 'environment' }, audio: false },
+      { video: { facingMode: 'user' }, audio: false },
+      { video: true, audio: false },
+    ];
+    let lastErr: unknown;
+    for (const constraints of attempts) {
+      try {
+        return await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    throw lastErr ?? new Error('denied');
+  };
+
+  const applySelectedPodFile = (file: File) => {
+    setPodFile(file);
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setPodImage(reader.result as string);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      applySelectedPodFile(file);
+    }
+    event.target.value = '';
+  };
+
+  /** Cámara en vivo vía getUserMedia (fiable en PWA; el input file+capture suele abrir solo archivos). */
+  const handleTakePhoto = async () => {
+    setPodUploadError(null);
+    setCameraLoading(true);
+    try {
+      const stream = await requestCameraStream();
+      streamRef.current = stream;
+      setCameraOpen(true);
+    } catch {
+      setPodUploadError(
+        t('camera_unavailable') ||
+          'No se pudo abrir la cámara. Permite el acceso en el navegador o sube la imagen desde galería.'
+      );
+      closeCamera();
+    } finally {
+      setCameraLoading(false);
+    }
+  };
+
+  const capturePhotoFromCamera = () => {
+    const video = videoRef.current;
+    if (!video || video.videoWidth <= 0 || video.videoHeight <= 0) return;
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0);
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) return;
+        const file = new File([blob], `pod-${orderId}-${Date.now()}.jpg`, { type: 'image/jpeg' });
+        applySelectedPodFile(file);
+        closeCamera();
+      },
+      'image/jpeg',
+      0.92
+    );
+  };
+
+  /** Solo galería / archivos. */
+  const handleUploadFromGallery = () => {
+    const input = galleryInputRef.current;
+    if (!input) return;
+    input.value = '';
+    input.click();
   };
 
   const handleRemoveImage = () => {
     setPodImage(null);
     setPodFile(null);
+    closeCamera();
   };
 
   const handleSubmit = async () => {
@@ -474,15 +579,16 @@ export function CapturePOD({ orderId }: { orderId: string }) {
                 
                 <div className="flex flex-col gap-2">
                   <Button
-                    onClick={handleTakePhoto}
+                    onClick={() => void handleTakePhoto()}
+                    disabled={cameraLoading}
                     className="bg-indigo-600 hover:bg-indigo-700"
                   >
                     <Camera className="h-4 w-4 mr-2" />
-                    {t('take_photo')}
+                    {cameraLoading ? (t('uploading') || 'Abriendo...') : t('take_photo')}
                   </Button>
                   <Button
                     variant="outline"
-                    onClick={handleTakePhoto}
+                    onClick={handleUploadFromGallery}
                   >
                     <Upload className="h-4 w-4 mr-2" />
                     {t('upload_from_gallery')}
@@ -521,11 +627,13 @@ export function CapturePOD({ orderId }: { orderId: string }) {
             )}
 
             <input
-              ref={fileInputRef}
+              ref={galleryInputRef}
               type="file"
               accept="image/*"
               onChange={handleFileSelect}
               className="hidden"
+              aria-hidden
+              tabIndex={-1}
             />
           </CardContent>
         </Card>
@@ -629,6 +737,49 @@ export function CapturePOD({ orderId }: { orderId: string }) {
         </Button>
       </div>
       )}
+
+      {cameraOpen ? (
+        <div className="fixed inset-0 z-[100] flex flex-col bg-black">
+          <div className="flex items-center justify-between px-4 py-3 bg-black/90 text-white">
+            <span className="text-sm font-medium">{t('take_photo')}</span>
+            <button
+              type="button"
+              onClick={closeCamera}
+              className="p-2 rounded-full hover:bg-white/10"
+              aria-label={t('cancel')}
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
+          <div className="relative flex-1 min-h-0 bg-black">
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="absolute inset-0 h-full w-full object-cover"
+            />
+          </div>
+          <div className="p-4 pb-8 bg-black/90 flex flex-col gap-2">
+            <Button
+              type="button"
+              onClick={capturePhotoFromCamera}
+              className="w-full bg-indigo-600 hover:bg-indigo-700 h-12 text-base"
+            >
+              <Camera className="h-5 w-5 mr-2" />
+              {t('capture_photo')}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={closeCamera}
+              className="w-full border-slate-600 text-white hover:bg-white/10"
+            >
+              {t('cancel')}
+            </Button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

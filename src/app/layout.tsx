@@ -8,6 +8,10 @@ export const metadata: Metadata = {
   title: "PWA Vendedores",
   description: "Portal de Vendedores - Eternal Cosmetics",
   manifest: "/manifest.webmanifest",
+  icons: {
+    icon: "/logo-eternal.png",
+    apple: "/logo-eternal.png",
+  },
 };
 
 export default function RootLayout({
